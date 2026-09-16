@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A moody run through an endless brutalist city." />
+    <title>Concrete Sky</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='3' width='5' height='13' fill='%23777'/><rect x='8' y='0' width='6' height='16' fill='%23999'/><rect x='0' y='10' width='16' height='1' fill='%23555'/></svg>" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="start">
+      <h1>CONCRETE SKY</h1>
+      <p class="seed" id="seed"></p>
+      <p class="status" id="status">pouring concrete…</p>
+      <p class="hint" id="begin" hidden>click to run</p>
+      <p class="gpu" id="gpu" hidden></p>
+      <p class="keys">
+        mouse look · WASD run · shift sprint · ctrl walk · space jump / climb<br />
+        E get in / out of cars and flyers · click shoot (flyer) · V cockpit view<br />
+        R back to last roof · N next weather · L hold weather · F3 stats · esc pause
+      </p>
+    </div>
+    <div id="caption"></div>
+    <div id="prompt"></div>
+    <div id="crosshair"></div>
+    <div id="score"></div>
+    <div id="stats" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

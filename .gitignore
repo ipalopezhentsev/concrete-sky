@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# game screenshots (F12)
+screenshots/
+
+# web build
+node_modules/
+dist/

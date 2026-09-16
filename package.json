@@ -1,0 +1,19 @@
+{
+  "name": "concrete-sky",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "tsx tests/traversal.test.ts",
+    "shots": "node scripts/shots.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.11.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}

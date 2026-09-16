@@ -1,0 +1,89 @@
+// Box models for vehicles. Local space: +Z forward, +Y up, origin at the
+// bottom centre. "paint" boxes take the vehicle's colour.
+
+import { Mat, type Tint } from "../city/materials";
+
+export interface ModelBox {
+  b: [number, number, number, number, number, number];
+  mat: Mat;
+  paint?: boolean;
+}
+
+const box = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: Mat, paint = false): ModelBox =>
+  ({ b: [x0, y0, z0, x1, y1, z1], mat, paint });
+
+/** Mirror a box across x = 0 (models are symmetric). */
+const pair = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: Mat, paint = false) =>
+  [box(x0, y0, z0, x1, y1, z1, mat, paint), box(-x1, y0, z0, -x0, y1, z1, mat, paint)];
+
+export function carBoxes(van: boolean): ModelBox[] {
+  if (van) {
+    return [
+      box(-1.0, 0.35, -2.8, 1.0, 2.1, 2.3, Mat.Paint, true),
+      box(-0.92, 1.1, 2.3, 0.92, 2.0, 2.75, Mat.VGlass),
+      box(-1.0, 0.35, 2.3, 1.0, 1.1, 2.8, Mat.Paint, true),
+      box(-1.02, 1.3, -2.6, 1.02, 1.75, 2.1, Mat.VGlass),
+      ...pair(0.8, 0, 1.45, 1.02, 0.66, 2.05, Mat.Metal),
+      ...pair(0.8, 0, -2.25, 1.02, 0.66, -1.65, Mat.Metal),
+      ...pair(0.5, 0.75, 2.8, 0.85, 0.88, 2.83, Mat.Glow),
+      ...pair(0.6, 0.9, -2.83, 0.92, 1.25, -2.8, Mat.Tail),
+    ];
+  }
+  return [
+    box(-0.95, 0.35, -2.2, 0.95, 0.95, 2.2, Mat.Paint, true),
+    box(-0.84, 0.95, -1.15, 0.84, 1.4, 0.85, Mat.VGlass),
+    box(-0.86, 1.4, -1.05, 0.86, 1.48, 0.75, Mat.Paint, true),
+    ...pair(0.76, 0, 1.1, 0.98, 0.62, 1.7, Mat.Metal),
+    ...pair(0.76, 0, -1.7, 0.98, 0.62, -1.1, Mat.Metal),
+    ...pair(0.55, 0.68, 2.2, 0.86, 0.8, 2.23, Mat.Glow),
+    ...pair(0.6, 0.7, -2.23, 0.9, 0.84, -2.2, Mat.Tail),
+  ];
+}
+
+export const FLYER_HEIGHT = 1.6;
+/** Car footprint half sizes (x across, z along) and height, per variant. */
+export const CAR_DIMS = { car: { hx: 0.98, hz: 2.23, h: 1.5 }, van: { hx: 1.02, hz: 2.83, h: 2.1 } };
+
+export function flyerBoxes(): ModelBox[] {
+  return [
+    // skids and struts
+    ...pair(0.75, 0, -1.3, 0.95, 0.12, 1.3, Mat.Metal),
+    ...pair(0.8, 0.12, -0.8, 0.9, 0.4, -0.65, Mat.Metal),
+    ...pair(0.8, 0.12, 0.65, 0.9, 0.4, 0.8, Mat.Metal),
+    // fuselage and canopy
+    box(-0.85, 0.4, -1.5, 0.85, 1.05, 1.25, Mat.Paint, true),
+    box(-0.7, 1.05, -0.7, 0.7, 1.55, 0.95, Mat.VGlass),
+    box(-0.72, 1.05, -1.4, 0.72, 1.35, -0.7, Mat.Paint, true),
+    box(-0.5, 0.55, 1.25, 0.5, 0.95, 1.6, Mat.VGlass),
+    box(-0.12, 1.05, -1.5, 0.12, 1.6, -1.1, Mat.Paint, true),
+    // arms and rotor ducts
+    ...pair(0.85, 0.85, 0.85, 1.35, 0.97, 1.05, Mat.Metal),
+    ...pair(0.85, 0.85, -1.05, 1.35, 0.97, -0.85, Mat.Metal),
+    ...pair(1.25, 0.8, 0.55, 2.05, 1.05, 1.35, Mat.Metal),
+    ...pair(1.25, 0.8, -1.35, 2.05, 1.05, -0.55, Mat.Metal),
+    ...pair(1.35, 0.78, 0.65, 1.95, 0.8, 1.25, Mat.Glow),
+    ...pair(1.35, 0.78, -1.25, 1.95, 0.8, -0.65, Mat.Glow),
+    // lights
+    box(-0.6, 0.36, -1.2, 0.6, 0.4, 1.0, Mat.Glow),
+    ...pair(0.3, 0.8, 1.6, 0.48, 0.9, 1.62, Mat.Glow),
+    ...pair(0.45, 0.8, -1.52, 0.8, 0.95, -1.5, Mat.Tail),
+  ];
+}
+
+/** Flatten a model to 12-float boxes with a white tint (for instanced meshes). */
+export function modelData(model: ModelBox[]): number[] {
+  const out: number[] = [];
+  for (const m of model) out.push(...m.b, 1, 1, 1, m.mat, m.paint ? 1 : 0, 0);
+  return out;
+}
+
+export const PAINT_COLORS: Tint[] = [
+  [0.72, 0.71, 0.68],
+  [0.18, 0.19, 0.2],
+  [0.45, 0.47, 0.5],
+  [0.55, 0.16, 0.12],
+  [0.14, 0.3, 0.33],
+  [0.62, 0.48, 0.2],
+  [0.82, 0.8, 0.74],
+  [0.1, 0.12, 0.18],
+];
