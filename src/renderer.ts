@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { carBoxes, figureBoxes, flyerBoxes, liftBoxes, modelData } from "./vehicles/models";
+import { carBoxes, carBoxesFar, figureBoxes, flyerBoxes, flyerBoxesFar, liftBoxes, modelData } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
@@ -55,30 +55,62 @@ export interface VehicleLists {
  * The lists themselves stay whole: traffic and combat query them by index.
  */
 class InstanceCull {
-  private buf = new Float32Array(0);
-  count = 0;
+  private near = new Float32Array(0);
+  private far = new Float32Array(0);
+  nearCount = 0;
+  farCount = 0;
 
-  /** `radius` covers the widest model plus its rotation. */
-  apply(list: InstanceList, planes: Float64Array[], radius: number): Float32Array {
-    if (this.buf.length < list.count * INSTANCE_STRIDE) this.buf = new Float32Array(list.count * INSTANCE_STRIDE);
-    const src = list.data, dst = this.buf;
-    let n = 0;
+  /**
+   * Splits a list into what is in view and close enough for the full model, and what is in
+   * view but far enough for the stand-in. `radius` covers the widest model plus its rotation.
+   */
+  apply(list: InstanceList, planes: Float64Array[], radius: number, eye: Vec3, farDist: number): void {
+    const need = list.count * INSTANCE_STRIDE;
+    if (this.near.length < need) this.near = new Float32Array(need);
+    if (this.far.length < need) this.far = new Float32Array(need);
+    const src = list.data;
+    const far2 = farDist * farDist;
+    let n = 0, f = 0;
     outer: for (let i = 0; i < list.count; i++) {
       const o = i * INSTANCE_STRIDE;
       const x = src[o], y = src[o + 1], z = src[o + 2];
       for (const p of planes) if (p[0] * x + p[1] * y + p[2] * z + p[3] < -radius) continue outer;
-      dst.set(src.subarray(o, o + INSTANCE_STRIDE), n * INSTANCE_STRIDE);
-      n++;
+      const dx = x - eye[0], dy = y - eye[1], dz = z - eye[2];
+      if (dx * dx + dy * dy + dz * dz > far2) {
+        this.far.set(src.subarray(o, o + INSTANCE_STRIDE), f * INSTANCE_STRIDE);
+        f++;
+      } else {
+        this.near.set(src.subarray(o, o + INSTANCE_STRIDE), n * INSTANCE_STRIDE);
+        n++;
+      }
     }
-    this.count = n;
-    return dst;
+    this.nearCount = n;
+    this.farCount = f;
+  }
+
+  get nearData(): Float32Array {
+    return this.near;
+  }
+
+  get farData(): Float32Array {
+    return this.far;
   }
 }
+
+/** Beyond this a vehicle is a few pixels tall and gets its simplified model. */
+const FAR_VEHICLE = 110;
 
 export interface RenderOptions {
   msaa?: number;
   shadowSize?: number;
   prepass?: boolean;
+  fxaa?: boolean;
+  /** Distance past which surfaces use the cheap shading path. */
+  detailDist?: number;
+  /** Anisotropic filtering on the material arrays; 1 disables it. */
+  aniso?: number;
+  /** Diagnostic: 1 drops fog, 2 also drops shadows, 3 shows raw material. */
+  cheap?: number;
 }
 
 export class Renderer {
@@ -86,6 +118,9 @@ export class Renderer {
   readonly integrated: boolean;
   readonly samples: number;
   readonly prepass: boolean;
+  readonly fxaa: boolean;
+  readonly detailDist: number;
+  readonly cheap: number;
   readonly timer: GpuTimer;
   private clip: ClipControl | null;
   private sky: Program;
@@ -95,7 +130,11 @@ export class Renderer {
   private post: Program;
   private cloudProg: Program;
   private vehicleProg: Program;
-  private vehicleMeshes: { car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; figures: InstancedMesh[]; lift: InstancedMesh };
+  private vehicleMeshes: {
+    car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh;
+    carFar: InstancedMesh; vanFar: InstancedMesh; flyerFar: InstancedMesh;
+    figures: InstancedMesh[]; lift: InstancedMesh;
+  };
   private particleProg: Program;
   private particleMesh: InstancedMesh;
   private tri: Mesh;
@@ -127,8 +166,13 @@ export class Renderer {
     this.renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
     this.integrated = /Intel|UHD|Iris|Radeon\(TM\) Graphics|Apple|SwiftShader|llvmpipe|Mali|Adreno/i.test(this.renderer);
     const maxSamples = gl.getParameter(gl.MAX_SAMPLES) as number;
-    // 4x MSAA costs integrated GPUs ~15% of the frame; 2x keeps edges smooth enough
-    this.samples = Math.min(opts.msaa ?? (this.integrated ? 2 : 4), maxSamples);
+    // On integrated GPUs 2x MSAA and its resolve cost ~2 ms of a 16.7 ms frame, which
+    // buys back more resolution as FXAA than it costs in edge quality. Discrete GPUs
+    // have the bandwidth for real 4x MSAA, which looks better in motion.
+    this.samples = Math.min(opts.msaa ?? (this.integrated ? 1 : 4), maxSamples);
+    this.fxaa = opts.fxaa ?? this.samples <= 1;
+    this.detailDist = opts.detailDist ?? (this.integrated ? 200 : 400);
+    this.cheap = opts.cheap ?? 0;
     // The colour pass matches the pre-pass depth with EQUAL, which needs bit-identical depth
     // from both. Apple's Metal-backed WebGL doesn't always give that, and surfaces flicker.
     this.prepass = opts.prepass ?? !/Apple/i.test(this.renderer);
@@ -154,6 +198,9 @@ export class Renderer {
       car: instanced(modelData(carBoxes(false))),
       van: instanced(modelData(carBoxes(true))),
       flyer: instanced(modelData(flyerBoxes())),
+      carFar: instanced(modelData(carBoxesFar(false))),
+      vanFar: instanced(modelData(carBoxesFar(true))),
+      flyerFar: instanced(modelData(flyerBoxesFar())),
       figures: [0, 1, -1].map((stride) => instanced(modelData(figureBoxes(stride)))),
       lift: instanced(modelData(liftBoxes(LIFT_SIZE, LIFT_THICK))),
     };
@@ -167,8 +214,9 @@ export class Renderer {
     }
     this.rain = new Mesh(gl, rain, [3, 1], null, gl.LINES);
 
-    this.albedo = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.albedo, true);
-    this.normal = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.normal, false);
+    const aniso = opts.aniso ?? (this.integrated ? 4 : 8);
+    this.albedo = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.albedo, true, aniso);
+    this.normal = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.normal, false, aniso);
     this.noise = texture2D(gl, NOISE_SIZE, tex.noise);
     this.shadow = new ShadowTarget(gl, this.shadowSize);
     this.clouds = new ColorTarget(gl, CLOUD_SIZE);
@@ -236,7 +284,7 @@ export class Renderer {
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(1.5, 3);
     this.depthProg.use().mat4("uViewProj", this.lightVP);
-    world.draw(frustumPlanes(this.lightVP, true, true), center, 0.4, false);
+    world.draw(frustumPlanes(this.lightVP, true, true), center, 0.4, false, true);
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.colorMask(true, true, true, true);
   }
@@ -296,7 +344,7 @@ export class Renderer {
       gl.colorMask(false, false, false, false);
       gl.depthFunc(nearer);
       this.depthProg.use().mat4("uViewProj", viewProj);
-      world.draw(planes, cam.eye, 1, true);
+      world.draw(planes, cam.eye, 1, true, true);
       gl.colorMask(true, true, true, true);
       gl.depthFunc(gl.EQUAL);
       gl.depthMask(false);
@@ -313,6 +361,7 @@ export class Renderer {
     const surface = (prog: Program) => prog.use().setAll(common)
       .mat4("uViewProj", viewProj).mat4("uLightVP", this.lightVP)
       .float("uShadowTexel", 1 / this.shadowSize)
+      .float("uDetailDist", this.detailDist).float("uCheap", this.cheap)
       .int("uAlbedo", 0).int("uNormal", 1).int("uShadow", 2).int("uNoise", 3)
       .int("uCloudTex", 5).vec("uCloudCenter", cloudCenter).float("uCloudExtent", CLOUD_EXTENT);
     surface(this.city);
@@ -326,17 +375,20 @@ export class Renderer {
     // the lists hold everything within streaming range, most of it behind the camera
     const sphere = normalizedPlanes(planes);
     const cull = this.cull;
-    const drawCulled = (mesh: InstancedMesh, list: InstanceList, radius: number) => {
-      const data = cull.apply(list, sphere, radius);
-      mesh.draw(data, cull.count);
-      this.vehiclesDrawn += cull.count;
+    // `far` is the stand-in mesh, or null for models simple enough not to need one
+    const drawCulled = (mesh: InstancedMesh, far: InstancedMesh | null, list: InstanceList, radius: number) => {
+      cull.apply(list, sphere, radius, cam.eye, far ? FAR_VEHICLE : Infinity);
+      mesh.draw(cull.nearData, cull.nearCount);
+      if (far && cull.farCount > 0) far.draw(cull.farData, cull.farCount);
+      this.vehiclesDrawn += cull.nearCount + cull.farCount;
     };
     this.vehiclesDrawn = 0;
-    drawCulled(this.vehicleMeshes.car, vehicles.cars, 3.2);
-    drawCulled(this.vehicleMeshes.van, vehicles.vans, 3.6);
-    drawCulled(this.vehicleMeshes.flyer, vehicles.flyers, 3.6);
-    vehicles.figures?.forEach((list, i) => drawCulled(this.vehicleMeshes.figures[i], list, 1.4));
-    if (vehicles.lifts) drawCulled(this.vehicleMeshes.lift, vehicles.lifts, LIFT_SIZE);
+    const m = this.vehicleMeshes;
+    drawCulled(m.car, m.carFar, vehicles.cars, 3.2);
+    drawCulled(m.van, m.vanFar, vehicles.vans, 3.6);
+    drawCulled(m.flyer, m.flyerFar, vehicles.flyers, 3.6);
+    vehicles.figures?.forEach((list, i) => drawCulled(m.figures[i], null, list, 1.4));
+    if (vehicles.lifts) drawCulled(m.lift, null, vehicles.lifts, LIFT_SIZE);
 
     // --- sky, only where no geometry was drawn
     timer.begin("sky");
@@ -402,6 +454,7 @@ export class Renderer {
     bindTexture(gl, 4, scene.color);
     bindTexture(gl, 6, scene.bloom);
     this.post.use().setAll(weather.postUniforms())
+      .vec("uSceneSize", [scene.width, scene.height]).float("uFxaa", this.fxaa ? 1 : 0)
       .int("uScene", 4).int("uBloomTex", 6).int("uNoiseTex", 3)
       .float("uTime", time).float("uSpeed", speed).float("uFade", fade)
       .float("uBloomLod", Math.max(0, Math.log2(scene.bloomHeight / 110)))

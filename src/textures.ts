@@ -15,8 +15,13 @@ export const enum Layer {
   Paving = 3,
   Ribbed = 4, // bush-hammered ribbed ("corduroy") concrete
   Cast = 5, // plywood-formed cast-in-place concrete
+  // Facade panels: one tile is one precast panel around one window, so the panel joints
+  // sit on the cell border and never cut through the glass. Alpha of the albedo layer is
+  // the glass mask here, not cavity.
+  Punched = 6, // a window per panel, with a spandrel below and a sill
+  Ribbon = 7, // continuous horizontal glazing, mullions on the cell border
 }
-export const TEX_LAYERS = 6;
+export const TEX_LAYERS = 8;
 
 type Field = Float32Array;
 
@@ -198,6 +203,7 @@ interface LayerFields {
   rust?: Field; // 0..1 rust stain
   bloom?: Field; // 0..1 efflorescence (white salt)
   grime?: Field; // 0..1 dark green-grey dirt
+  alpha?: Field; // overrides cavity in the albedo alpha channel (facade layers put glass there)
 }
 
 class TexLayer {
@@ -207,6 +213,7 @@ class TexLayer {
   constructor(f: LayerFields) {
     const n = TEX_SIZE;
     const { gray, rgb, warm, height, strength, cavity, rough, rust, bloom, grime } = f;
+    const alpha = f.alpha ?? cavity;
     const u8 = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
     for (let y = 0; y < n; y++)
       for (let x = 0; x < n; x++) {
@@ -230,7 +237,7 @@ class TexLayer {
         this.albedo[i * 4] = u8(r);
         this.albedo[i * 4 + 1] = u8(gr);
         this.albedo[i * 4 + 2] = u8(b);
-        this.albedo[i * 4 + 3] = u8(cavity[i]);
+        this.albedo[i * 4 + 3] = u8(alpha[i]);
         const dx = (height[y * n + ((x + 1) % n)] - height[y * n + ((x + n - 1) % n)]) * strength;
         const dy = (height[((y + 1) % n) * n + x] - height[((y + n - 1) % n) * n + x]) * strength;
         const len = Math.hypot(dx, dy, 1);
@@ -402,6 +409,93 @@ function precastPanel(rng: Rng): TexLayer {
       rustF[i] = rust[i] * 0.7;
     }
   return new TexLayer({ gray, rgb: [0.95, 0.95, 0.93], warm, height, strength: 1.5, cavity, rough, grime, rust: rustF });
+}
+
+/**
+ * A facade panel: one tile covers one window cell, so the joints around its edge land on
+ * the cell border and the glazing never sits across a stitch. The albedo alpha channel
+ * carries the glass mask; cavity is baked into the albedo instead.
+ *
+ * `ribbon` makes the glazing run the full width of the tile (continuous strip windows,
+ * with a mullion on the border) rather than a window punched into a solid panel.
+ */
+function facadePanel(rng: Rng, ribbon: boolean): TexLayer {
+  const n = TEX_SIZE;
+  // opening in tile coordinates (0..1, v = 0 at the floor line)
+  const x0 = ribbon ? -1 : 0.20, x1 = ribbon ? 2 : 0.80;
+  const y0 = ribbon ? 0.40 : 0.34, y1 = ribbon ? 0.84 : 0.88;
+  const frame = 0.028; // frame width, in tile units
+  const px = 1 / n; // one texel, for edges that stay crisp but not jagged
+
+  const fine = fbm(rng, n, 16, 16, 5);
+  const blotch = stretch(fbm(rng, n, 3, 3, 6));
+  const warm = fbm(rng, n, 2, 2, 3);
+  const pores = speckles(rng, n, 0.005);
+  const agg = stones(rng, n, 2000, 0.8, 2.0);
+  const aggShow = fbm(rng, n, 6, 6, 4);
+  const jitter = valueNoise(rng, n, 64, 64);
+  const vert = rainStreaks(rng, n, 96, 4);
+  const chipN = valueNoise(rng, n, 96, 96);
+  // dirt washing down from under the sill, which is what a sill is for
+  const sillY = y0 * n;
+  const sources: [number, number][] = [];
+  for (let k = 0; k < 14; k++) sources.push([rng.uniform(x0 * n, x1 * n), sillY - 2]);
+  const drips = runs(rng, n, sources, [30, 150], [3, 9], jitter);
+
+  const gray = new Float32Array(n * n), height = new Float32Array(n * n);
+  const cavity = new Float32Array(n * n), rough = new Float32Array(n * n);
+  const glass = new Float32Array(n * n), grime = new Float32Array(n * n);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const i = y * n + x;
+      const u = x / n, v = y / n;
+      // distance into the opening (negative outside), in tile units
+      const dIn = Math.min(u - x0, x1 - u, v - y0, y1 - v);
+      const open = ss(-px, px, dIn);
+      const pane = ss(frame - px, frame + px, dIn);
+      const frameMask = Math.max(open - pane, 0);
+      // the panel joint runs around the tile edge; on a ribbon panel the vertical part of
+      // it is a mullion standing in front of the glass instead of a groove in concrete
+      const sdX = Math.min(x, n - 1 - x), sdY = Math.min(y, n - 1 - y);
+      const sd = ribbon ? sdY : Math.min(sdX, sdY);
+      const chip = ss(0.72, 0.9, chipN[i]) * 3;
+      const seam = 1 - ss(0.5, 2.5 + chip, sd);
+      const chamfer = 1 - ss(2 + chip, 5 + chip, sd);
+      const mullion = ribbon ? (1 - ss(2.5, 5.0, sdX)) * pane : 0;
+      // reveal: the opening is set back, so its top and left edges catch shade
+      const revealTop = ss(0, 0.05, y1 - v) * open;
+      const revealSide = ss(0, 0.04, u - x0) * open;
+      const reveal = Math.min(1, revealTop * 0.8 + revealSide * 0.5);
+      // sill: a lip under the opening, sticking out a little and wider than the glass
+      const sill = ribbon
+        ? ss(-px, px, Math.min(v - (y0 - 0.045), y0 - v))
+        : ss(-px, px, Math.min(v - (y0 - 0.05), y0 + 0.012 - v, u - (x0 - 0.03), x1 + 0.03 - u));
+      const below = y0 - 0.05 - v; // distance below the sill, negative above it
+      const underSill = below <= 0 ? 0 : (1 - ss(0, 0.10, below)) * ss(0.3, 0.7, blotch[i]);
+
+      const show = ss(0.45, 0.75, aggShow[i]) * agg.mask[i];
+      const concrete = 0.67 + 0.07 * (blotch[i] - 0.5) + 0.04 * (fine[i] - 0.5) + 0.07 * show * agg.tone[i]
+        - 0.12 * drips[i] - 0.06 * vert[i] - 0.05 * chamfer - 0.25 * seam - 0.12 * pores[i];
+      // dark interior behind the glass, a little lighter toward the ceiling
+      const interior = 0.05 + 0.03 * (1 - ss(y0, y1, v)) + 0.02 * fine[i];
+      let g = concrete * (1 - open) + interior * pane + 0.20 * frameMask;
+      g = g * (1 - 0.35 * reveal) + 0.05 * sill * (1 - open);
+      g = g * (1 - 0.25 * mullion) + 0.18 * mullion;
+      gray[i] = g;
+
+      height[i] = 0.25 * fine[i] - 1.4 * seam - 0.6 * chamfer - 0.5 * pores[i] + 0.35 * show
+        - 2.2 * pane - 0.8 * frameMask + 1.2 * sill * (1 - open) + 0.9 * mullion;
+      // AO goes into the albedo for these layers, so alpha can carry the glass mask
+      cavity[i] = 1 - Math.min(1, 0.9 * seam + 0.5 * pores[i] + 0.2 * chamfer + 0.6 * reveal);
+      rough[i] = pane > 0.5 ? 0.06 + 0.04 * fine[i] : (frameMask > 0.3 || mullion > 0.3 ? 0.35 : 0.72 + 0.2 * fine[i]);
+      glass[i] = Math.max(pane - mullion, 0);
+      grime[i] = 0.3 * underSill + 0.12 * vert[i] * (1 - open);
+    }
+  // the cavity term is folded into the albedo here instead of being sampled separately
+  for (let i = 0; i < gray.length; i++) gray[i] *= 0.65 + 0.35 * cavity[i];
+  return new TexLayer({
+    gray, rgb: [0.95, 0.95, 0.93], warm, height, strength: 1.5, cavity, rough, grime, alpha: glass,
+  });
 }
 
 function asphalt(rng: Rng): TexLayer {
@@ -600,7 +694,10 @@ export function generateTextures(seed = 7): TextureSet {
   const rng = new Rng(seed);
   // the shader noise comes first so it stays the same whatever the material recipes do
   const noise = shaderNoise(rng);
-  const layers = [boardFormed(rng), precastPanel(rng), asphalt(rng), paving(rng), ribbed(rng), castInPlace(rng)];
+  const layers = [
+    boardFormed(rng), precastPanel(rng), asphalt(rng), paving(rng), ribbed(rng), castInPlace(rng),
+    facadePanel(rng, false), facadePanel(rng, true),
+  ];
   const px = TEX_SIZE * TEX_SIZE * 4;
   const albedo = new Uint8Array(px * layers.length);
   const normal = new Uint8Array(px * layers.length);

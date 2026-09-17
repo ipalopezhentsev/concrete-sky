@@ -1,6 +1,7 @@
 // GLSL ES 3.00 sources.
 
 import { CELL, LAMP_HEIGHT, STREET, lampHeadsLocal } from "./city/generate";
+import { Layer } from "./textures";
 
 const HEADER = `#version 300 es
 precision highp float;
@@ -162,13 +163,33 @@ void main() {
 }
 `;
 
-export const CITY_VS = HEADER + /* glsl */ `
+// Unpacking shared by the city and vehicle vertex shaders: the mesh stores a face index,
+// a colour packed into one float and material and style packed together.
+const VERTEX_UNPACK = /* glsl */ `
+const vec3 FACE_NORMALS[6] = vec3[6](
+  vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0),
+  vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0), vec3(0.0, -1.0, 0.0));
+
+vec3 unpackTint(float p) {
+  float r = floor(p / 65536.0);
+  float g = floor((p - r * 65536.0) / 256.0);
+  return vec3(r, g, p - r * 65536.0 - g * 256.0) / 255.0;
+}
+
+// aInfo.x holds material + style * 64; aInfo.y is the per-box seed
+vec3 unpackInfo(vec2 info) {
+  float style = floor(info.x / 64.0);
+  return vec3(info.x - style * 64.0, style, info.y);
+}
+`;
+
+export const CITY_VS = HEADER + VERTEX_UNPACK + /* glsl */ `
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNrm;
+layout(location = 1) in float aFace;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec2 aSize;
-layout(location = 4) in vec3 aTint;
-layout(location = 5) in vec3 aInfo;
+layout(location = 4) in float aTint;
+layout(location = 5) in vec2 aInfo;
 uniform mat4 uViewProj;
 invariant gl_Position;
 out vec3 vPos;
@@ -179,22 +200,22 @@ flat out vec2 vSize;
 flat out vec3 vInfo;
 void main() {
   vPos = aPos;
-  vNrm = aNrm;
+  vNrm = FACE_NORMALS[int(aFace)];
   vUV = aUV;
   vSize = aSize;
-  vTint = aTint;
-  vInfo = aInfo;
+  vTint = unpackTint(aTint);
+  vInfo = unpackInfo(aInfo);
   gl_Position = uViewProj * vec4(aPos, 1.0);
 }
 `;
 
-export const VEHICLE_VS = HEADER + /* glsl */ `
+export const VEHICLE_VS = HEADER + VERTEX_UNPACK + /* glsl */ `
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNrm;
+layout(location = 1) in float aFace;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec2 aSize;
-layout(location = 4) in vec3 aTint;
-layout(location = 5) in vec3 aInfo;
+layout(location = 4) in float aTint;
+layout(location = 5) in vec2 aInfo;
 layout(location = 6) in vec3 iPos;
 layout(location = 7) in vec3 iRot; // yaw, pitch (nose down), roll
 layout(location = 8) in vec4 iColor;
@@ -217,13 +238,14 @@ mat3 rotation(vec3 r) {
 
 void main() {
   mat3 R = rotation(iRot);
+  vec3 info = unpackInfo(aInfo);
   vPos = iPos + R * aPos;
-  vNrm = R * aNrm;
+  vNrm = R * FACE_NORMALS[int(aFace)];
   vUV = aUV;
   vSize = aSize;
   // style 1 marks painted parts, which take the instance colour
-  vTint = aInfo.y > 0.5 ? iColor.rgb : aTint;
-  vInfo = vec3(aInfo.x, 0.0, iColor.a);
+  vTint = info.y > 0.5 ? iColor.rgb : unpackTint(aTint);
+  vInfo = vec3(info.x, 0.0, iColor.a);
   gl_Position = uViewProj * vec4(vPos, 1.0);
 }
 `;
@@ -262,6 +284,8 @@ uniform float uShadowTexel;
 uniform sampler2D uCloudTex;
 uniform vec2 uCloudCenter;
 uniform float uCloudExtent;
+uniform float uDetailDist; // beyond this, surfaces drop to a cheaper shading path
+uniform float uCheap; // diagnostic only: strips shading stages to find the real cost
 out vec4 fragColor;
 
 const float CLOUD_REF_Y = 25.0;
@@ -296,67 +320,29 @@ float shadowAt(vec3 p, vec3 n, bool cheap) {
   return mix(sum, 1.0, smoothstep(0.42, 0.5, edge));
 }
 
-// Anti-aliased coverage of the rectangle [lo, hi] at f, given a pixel footprint fw.
-float rectCoverage(vec2 f, vec2 lo, vec2 hi, vec2 fw) {
-  vec2 a = smoothstep(lo - fw, lo + fw, f);
-  vec2 b = 1.0 - smoothstep(hi - fw, hi + fw, f);
-  return a.x * a.y * b.x * b.y;
-}
-
-struct Facade {
-  float glass;   // 0..1 glass coverage
-  float frame;   // 0..1 dark frame coverage
-  float inner;   // recess shading
-  vec2 cell;
+struct Cell {
+  vec2 uv;    // panel coordinates: one unit is one window cell
+  vec2 id;    // which cell, for per-window variation
+  float band; // 1 where the facade carries windows, 0 on margins and the parapet
 };
 
-// Procedural recessed windows; fwUV is fwidth(vUV) in metres.
-Facade facade(vec2 uv, vec2 size, float style, vec2 fwUV) {
-  Facade o = Facade(0.0, 0.0, 1.0, vec2(0.0));
+/**
+ * Where a wall pixel falls on the window grid. The columns divide the usable width into
+ * whole cells, so no pane is ever cut in half at a corner, and one cell maps to exactly
+ * one panel texture tile, which keeps the panel joints off the glass.
+ */
+Cell facadeCell(vec2 uv, vec2 size, float style, vec2 fwUV) {
+  Cell o = Cell(vec2(0.0), vec2(0.0), 0.0);
   float margin = 1.0;
   float usable = size.x - 2.0 * margin;
   if (usable < 1.5 || size.y < 3.0) return o;
   float cwTarget = style < 0.5 ? 3.0 : (style < 1.5 ? 1.5 : (style < 2.5 ? 1.8 : (style < 3.5 ? 2.6 : 2.2)));
   float cw = usable / max(1.0, floor(usable / cwTarget));
   float lu = uv.x - margin;
-  vec2 f = vec2(lu / cw, uv.y / FLOOR_H);
-  o.cell = floor(f);
-  vec2 lf = fract(f);
-  vec2 fw = fwUV / vec2(cw, FLOOR_H);
-
-  vec2 lo, hi;
-  float depth;
-  if (style < 0.5)      { lo = vec2(0.20, 0.28); hi = vec2(0.80, 0.80); depth = 0.45; }
-  else if (style < 1.5) { lo = vec2(-1.0, 0.30); hi = vec2(2.0, 0.74); depth = 0.35; }
-  else if (style < 2.5) { lo = vec2(0.40, 0.10); hi = vec2(0.60, 0.92); depth = 0.6; }
-  else if (style < 3.5) { lo = vec2(0.09, 0.10); hi = vec2(0.91, 0.90); depth = 1.1; }
-  else                  { lo = vec2(0.2, 0.22); hi = vec2(0.8, 0.84); depth = 1.8; }
-
-  // band of facade that carries windows (margins and the parapet stay solid)
-  float band = smoothstep(-fwUV.x, fwUV.x, lu) * (1.0 - smoothstep(usable - fwUV.x, usable + fwUV.x, lu))
-             * (1.0 - smoothstep(size.y - 0.9 - fwUV.y, size.y - 0.9 + fwUV.y, uv.y));
-
-  float outer = rectCoverage(lf, lo, hi, fw);
-  // shrink by the frame width for the pane
-  vec2 fr = vec2(0.06 / cw, 0.06 / FLOOR_H);
-  float pane = rectCoverage(lf, lo + fr, hi - fr, fw);
-  float mull = 0.0;
-  if (style > 0.5 && style < 1.5) {
-    float m = min(lf.x, 1.0 - lf.x) * cw;
-    mull = 1.0 - smoothstep(0.045 - fwUV.x, 0.045 + fwUV.x, m);
-  }
-  pane *= 1.0 - mull;
-
-  // at a distance the pattern averages out instead of shimmering
-  float far = smoothstep(0.25, 0.7, max(fw.x, fw.y));
-  vec2 area = clamp(hi, 0.0, 1.0) - clamp(lo, 0.0, 1.0);
-  float avg = area.x * area.y;
-  o.glass = mix(pane, avg * 0.85, far) * band;
-  o.frame = mix(max(outer - pane, 0.0), avg * 0.15, far) * band;
-
-  float dTop = (hi.y - lf.y) * FLOOR_H;
-  float dLeft = (lf.x - lo.x) * cw;
-  o.inner = mix(smoothstep(0.0, depth * 0.9, dTop) * mix(0.55, 1.0, smoothstep(0.0, depth * 0.5, dLeft)), 0.75, far);
+  o.uv = vec2(lu / cw, uv.y / FLOOR_H);
+  o.id = floor(o.uv);
+  o.band = smoothstep(-fwUV.x, fwUV.x, lu) * (1.0 - smoothstep(usable - fwUV.x, usable + fwUV.x, lu))
+         * (1.0 - smoothstep(size.y - 0.9 - fwUV.y, size.y - 0.9 + fwUV.y, uv.y));
   return o;
 }
 
@@ -464,11 +450,38 @@ void main() {
   vec2 uvM = (mat == 8 && horizontal) ? vPos.xz * vec2(1.0, -1.0) : vUV;
   vec2 tuv = uvM / tile + offs;
 
-  vec4 alb = texture(uAlbedo, vec3(tuv, float(layer)));
-  vec4 nt = texture(uNormal, vec3(tuv, float(layer)));
+  // Walls that carry windows read a facade panel instead: one tile per window cell, with
+  // the panel joint on the cell border. Mipmaps average the pattern down at a distance,
+  // so nothing here has to fade the detail out by hand.
+  bool facadeWall = mat == 4 && !horizontal;
+  Cell cell = Cell(vec2(0.0), vec2(0.0), 0.0);
+  float panelLayer = 0.0;
+  if (facadeWall) {
+    cell = facadeCell(vUV, vSize, style, fwUV);
+    bool strip = (style > 0.5 && style < 1.5) || (style > 2.5 && style < 3.5);
+    panelLayer = strip ? ${Layer.Ribbon}.0 : ${Layer.Punched}.0;
+  }
+
+  // Past uDetailDist a surface bump is well under a pixel, so the normal map is dropped:
+  // that is one anisotropic array fetch per pixel saved over most of the screen.
+  bool detailed = dist < uDetailDist;
+  vec4 alb, nt = vec4(0.5, 0.5, 1.0, 0.78); // flat normal, mid roughness
+  if (cell.band > 0.999) {
+    alb = texture(uAlbedo, vec3(cell.uv, panelLayer));
+    if (detailed) nt = texture(uNormal, vec3(cell.uv, panelLayer));
+  } else if (cell.band < 0.001) {
+    alb = texture(uAlbedo, vec3(tuv, float(layer)));
+    if (detailed) nt = texture(uNormal, vec3(tuv, float(layer)));
+  } else {
+    alb = mix(texture(uAlbedo, vec3(tuv, float(layer))), texture(uAlbedo, vec3(cell.uv, panelLayer)), cell.band);
+    if (detailed) nt = mix(texture(uNormal, vec3(tuv, float(layer))), texture(uNormal, vec3(cell.uv, panelLayer)), cell.band);
+  }
+  // on a panel layer the alpha channel is the glass mask and the cavity is already in the albedo
+  bool onPanel = cell.band > 0.5;
+  float glass = onPanel ? alb.a : 0.0;
   vec3 albedo = alb.rgb * vTint;
-  float cavity = alb.a;
-  float rough = nt.a;
+  float cavity = onPanel ? 1.0 : alb.a;
+  float rough = detailed ? nt.a : mix(0.78, 0.10, glass); // keep distant glazing glossy
   vec3 tn = nt.xyz * 2.0 - 1.0;
   vec3 T = tangentFor(N);
   vec3 B = bitangentFor(N);
@@ -480,7 +493,7 @@ void main() {
   // weathering on concrete walls: stains running down from the top edge, splash-back dirt at the
   // foot and a patchy tone per surface. The noise texture has no mipmaps, so these lookups are
   // safe inside the branch, and the fine streaks fade out with distance instead.
-  bool concrete = mat == 2 || mat == 3 || mat == 4 || mat == 8;
+  bool concrete = (mat == 2 || mat == 3 || mat == 4 || mat == 8) && glass < 0.5 && detailed;
   if (concrete) {
     float wBlot = texture(uNoise, vUV * 0.06 + seed * 13.0).g;
     albedo *= mix(0.9, 1.06, wBlot);
@@ -545,14 +558,17 @@ void main() {
     Nd = normalize(mix(Nd, N, uWet * puddle));
   }
 
-  float sh = shadowAt(vPos, N, dist > 140.0);
+  // uCheap is a diagnostic ladder for finding what the pass actually costs:
+  // 1 drops the fog, 2 also drops the shadows, 3 shows the raw material.
+  if (uCheap > 2.5) { fragColor = vec4(albedo, 1.0); return; }
+  float sh = uCheap > 1.5 ? 1.0 : shadowAt(vPos, N, dist > 140.0);
   float NdL = max(dot(Nd, L), 0.0) * smoothstep(-0.02, 0.1, dot(N, L));
   vec3 skyTone = mix(uHorizon, uZenith, 0.55);
   skyTone = mix(vec3(dot(skyTone, vec3(0.3, 0.5, 0.2))), skyTone, 0.5);
   vec3 skyAmb = skyTone * uAmbient * 1.1 + uNight * vec3(0.012, 0.014, 0.022);
   vec3 groundAmb = (uGroundCol * 0.6 + uSunColor * 0.08) * uAmbient + uNight * vec3(0.06, 0.045, 0.03);
   vec3 hemi = mix(groundAmb, skyAmb, Nd.y * 0.5 + 0.5);
-  float cs = cloudShadowTex(vPos);
+  float cs = uCheap > 1.5 ? 1.0 : cloudShadowTex(vPos);
   sh *= cs;
   // sunlight bounced off lit walls and paving: it fills shade from the side away from the sun and from below
   vec3 bounceDir = normalize(vec3(-L.x, -0.35, -L.z));
@@ -578,25 +594,26 @@ void main() {
     color += skyBase(R) * fres * uWet * mix(0.25, 1.0, puddle) * ao;
   }
 
-  if (mat == 4 && !horizontal) {
-    Facade fa = facade(vUV, vSize, style, fwUV);
-    if (fa.glass + fa.frame > 0.001) {
-      float h = hash12(fa.cell + seed * 113.0);
-      float h2 = hash12(fa.cell.yx * 1.7 + seed * 57.0);
-      vec3 gN = normalize(N + (vec3(h, 0.0, h2) - 0.5) * 0.04);
-      vec3 R = reflect(-V, gN);
-      float fres = 0.04 + 0.96 * pow(1.0 - max(dot(gN, V), 0.0), 5.0);
-      vec3 refl = skyBase(vec3(R.x, abs(R.y) * 0.3, R.z)) * (R.y < 0.0 ? 0.45 : 0.8) * (0.5 + 0.6 * h2);
-      vec3 interior = vec3(0.008, 0.009, 0.011) * (0.4 + h) * (1.0 + uAmbient);
-      float lit = step(h, 0.02 + 0.24 * uNight);
-      vec3 warm = mix(vec3(1.0, 0.62, 0.32), vec3(0.75, 0.88, 1.0), step(0.8, h2));
-      vec3 glassCol = (interior + refl * mix(0.04, 0.75, fres)) * fa.inner;
-      glassCol += lit * warm * (0.08 + 1.5 * uNight) * fa.inner * (0.5 + 0.5 * h2);
-      glassCol += uSunColor * pow(max(dot(gN, H), 0.0), 200.0) * sh * 2.0;
-      vec3 frameCol = vec3(0.035, 0.037, 0.04) * (uSunColor * NdL * sh + hemi);
-      color = mix(color, frameCol, fa.frame);
-      color = mix(color, glassCol, fa.glass);
-    }
+  // Glazing. The frame, reveal and sill come from the panel texture; what stays here is
+  // what has to differ from window to window: reflection, blinds and who left a light on.
+  if (glass > 0.001) {
+    float h = hash12(cell.id + seed * 113.0);
+    float h2 = hash12(cell.id.yx * 1.7 + seed * 57.0);
+    vec3 gN = normalize(N + (vec3(h, 0.0, h2) - 0.5) * 0.04);
+    vec3 R = reflect(-V, gN);
+    float fres = 0.04 + 0.96 * pow(1.0 - max(dot(gN, V), 0.0), 5.0);
+    vec3 refl = skyBase(vec3(R.x, abs(R.y) * 0.3, R.z)) * (R.y < 0.0 ? 0.45 : 0.8) * (0.5 + 0.6 * h2);
+    vec3 glassCol = albedo * (0.5 + h) + refl * mix(0.04, 0.75, fres);
+    // blinds hang from the head of the window, pulled down to a different height in each
+    float drop = step(0.45, h2) * (0.35 + 0.45 * h);
+    float blind = smoothstep(0.0, 0.02, fract(cell.uv.y) - (0.92 - drop));
+    vec3 blindCol = vec3(0.42, 0.41, 0.38) * (hemi * 0.8 + uSunColor * NdL * sh * 0.12);
+    glassCol = mix(glassCol, blindCol, blind * 0.88);
+    float lit = step(h, 0.02 + 0.24 * uNight);
+    vec3 warm = mix(vec3(1.0, 0.62, 0.32), vec3(0.75, 0.88, 1.0), step(0.8, h2));
+    glassCol += lit * warm * (0.08 + 1.5 * uNight) * (0.5 + 0.5 * h2) * mix(1.0, 0.45, blind);
+    glassCol += uSunColor * pow(max(dot(gN, H), 0.0), 200.0) * sh * 2.0;
+    color = mix(color, glassCol, glass);
   }
 
   if (mat == 10 || mat == 11) {
@@ -609,7 +626,7 @@ void main() {
   }
 
   color += emissive;
-  fragColor = vec4(applyFog(color, vPos, dist, -V), 1.0);
+  fragColor = vec4(uCheap > 0.5 ? color : applyFog(color, vPos, dist, -V), 1.0);
 }
 `;
 
@@ -672,10 +689,44 @@ uniform float uBloom;
 uniform float uFade;
 uniform float uBloomLod;
 uniform vec2 uResolution;
+uniform vec2 uSceneSize; // the scene texture, which the adaptive scale can make smaller than the canvas
+uniform float uFxaa;
 out vec4 fragColor;
 
 vec3 aces(vec3 x) {
   return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+// Luma of an HDR sample, compressed the way the tonemap will compress it, so that
+// edge detection works on the contrast the eye ends up seeing.
+float fxaaLuma(vec3 c) {
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  return sqrt(l / (1.0 + l));
+}
+
+// FXAA (the classic corner-tap form), used in place of MSAA: it costs one texture
+// tap per corner in flat areas and a short blend along the edge elsewhere.
+vec3 fxaa(vec2 uv, vec2 texel) {
+  vec3 mid = texture(uScene, uv).rgb;
+  float lM = fxaaLuma(mid);
+  float lNW = fxaaLuma(texture(uScene, uv + vec2(-1.0, -1.0) * texel).rgb);
+  float lNE = fxaaLuma(texture(uScene, uv + vec2(1.0, -1.0) * texel).rgb);
+  float lSW = fxaaLuma(texture(uScene, uv + vec2(-1.0, 1.0) * texel).rgb);
+  float lSE = fxaaLuma(texture(uScene, uv + vec2(1.0, 1.0) * texel).rgb);
+  float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+  float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+  if (lMax - lMin < max(0.045, lMax * 0.125)) return mid;
+
+  vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), (lNW + lSW) - (lNE + lSE));
+  float reduce = max((lNW + lNE + lSW + lSE) * 0.03125, 0.0078125);
+  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8.0, 8.0) * texel;
+
+  vec3 inner = 0.5 * (texture(uScene, uv + dir * (1.0 / 3.0 - 0.5)).rgb
+                    + texture(uScene, uv + dir * (2.0 / 3.0 - 0.5)).rgb);
+  vec3 outer = inner * 0.5 + 0.25 * (texture(uScene, uv - dir * 0.5).rgb
+                                   + texture(uScene, uv + dir * 0.5).rgb);
+  float lOuter = fxaaLuma(outer);
+  return (lOuter < lMin || lOuter > lMax) ? inner : outer;
 }
 
 void main() {
@@ -683,10 +734,21 @@ void main() {
   vec2 c = uv - 0.5;
   float r2 = dot(c, c);
   float ca = (0.0005 + 0.004 * uSpeed) * r2 * 4.0;
-  vec3 col = vec3(
-    texture(uScene, uv - c * ca).r,
-    texture(uScene, uv).g,
-    texture(uScene, uv + c * ca).b);
+  vec3 col;
+  if (uFxaa > 0.5) {
+    col = fxaa(uv, 1.0 / uSceneSize);
+    // the fringe is under a pixel wide until the camera moves fast; skip it then
+    vec2 off = c * ca;
+    if (length(off * uSceneSize) > 0.75) {
+      col.r = texture(uScene, uv - off).r;
+      col.b = texture(uScene, uv + off).b;
+    }
+  } else {
+    col = vec3(
+      texture(uScene, uv - c * ca).r,
+      texture(uScene, uv).g,
+      texture(uScene, uv + c * ca).b);
+  }
 
   if (uSpeed > 0.05) {
     vec3 acc = col;

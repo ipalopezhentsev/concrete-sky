@@ -9,7 +9,7 @@
 import { hashInt, Rng } from "../math";
 import { Finish, Mat, Win, type Tint } from "./materials";
 import { PAINT_COLORS } from "../vehicles/models";
-import { emitBox, FLOATS_PER_VERTEX } from "./mesh";
+import { emitBox, FLOATS_PER_VERTEX, positionsOf } from "./mesh";
 
 export { VERTEX_LAYOUT, FLOATS_PER_VERTEX } from "./mesh";
 
@@ -1462,8 +1462,13 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
 export interface CellRange {
   lo: [number, number, number];
   hi: [number, number, number];
+  /** Boxes big enough to read from anywhere; always drawn. */
   coarseStart: number;
   coarseCount: number;
+  /** Smaller structural boxes, dropped beyond FAR_DISTANCE. */
+  midStart: number;
+  midCount: number;
+  /** Small detail (steps, rails, fins), dropped beyond DETAIL_DISTANCE. */
   detailStart: number;
   detailCount: number;
 }
@@ -1472,6 +1477,8 @@ export interface RegionMesh {
   rx: number;
   rz: number;
   vertices: Float32Array;
+  /** Positions alone, for the depth-only passes. */
+  positions: Float32Array;
   indices: Uint32Array;
   groundCount: number; // indices[0..groundCount] is the street slab
   cells: CellRange[];
@@ -1482,7 +1489,87 @@ export interface RegionMesh {
   colliders: { ci: number; cj: number; boxes: Float32Array }[];
 }
 
-export function buildRegion(rx: number, rz: number): RegionMesh {
+/**
+ * Faces of a cell's boxes that are buried inside another box, as a per-box bitmask.
+ * A box that covers a face has to contain that face's centre, so a grid over the cell
+ * narrows the search to a handful of candidates instead of every box in the cell.
+ *
+ * A box may only hide a face of a box in its own tier or a shorter-lived one: tiers drop
+ * out with distance, and a face hidden by something already gone would be a hole — which
+ * the shadow pass turns into leaked light, since it drops tiers four times sooner.
+ */
+function buriedFaces(b: Builder, ci: number, cj: number): Uint8Array {
+  const EPS = 1e-3, G = 16;
+  const n = b.count, d = b.data;
+  const masks = new Uint8Array(n);
+  const ox = ci * CELL, oz = cj * CELL, s = G / CELL;
+  const cl = (v: number) => Math.min(G - 1, Math.max(0, v | 0));
+
+  // bucket the boxes: counting sort into one flat array, no per-bucket arrays
+  const starts = new Int32Array(G * G + 1);
+  const bx0 = new Int32Array(n), bx1 = new Int32Array(n), bz0 = new Int32Array(n), bz1 = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const o = i * FLOATS_PER_BOX;
+    bx0[i] = cl((d[o] - ox) * s); bx1[i] = cl((d[o + 3] - ox) * s);
+    bz0[i] = cl((d[o + 2] - oz) * s); bz1[i] = cl((d[o + 5] - oz) * s);
+    for (let a = bx0[i]; a <= bx1[i]; a++) for (let c = bz0[i]; c <= bz1[i]; c++) starts[a * G + c + 1]++;
+  }
+  for (let k = 0; k < G * G; k++) starts[k + 1] += starts[k];
+  const items = new Int32Array(starts[G * G]);
+  const fill = starts.slice(0, G * G);
+  for (let i = 0; i < n; i++)
+    for (let a = bx0[i]; a <= bx1[i]; a++) for (let c = bz0[i]; c <= bz1[i]; c++) items[fill[a * G + c]++] = i;
+
+  const lo = (i: number, a: number) => d[i * FLOATS_PER_BOX + a];
+  const hi = (i: number, a: number) => d[i * FLOATS_PER_BOX + 3 + a];
+  // 0 = bulk (always drawn), 1 = mid, 2 = detail: an occluder must outlast what it hides
+  const tiers = new Uint8Array(n);
+  for (let i = 0; i < n; i++) tiers[i] = boxTier(d, i * FLOATS_PER_BOX);
+  for (let i = 0; i < n; i++) {
+    const o = i * FLOATS_PER_BOX;
+    const tierI = tiers[i];
+    const cx = (d[o] + d[o + 3]) / 2, cz = (d[o + 2] + d[o + 5]) / 2;
+    let mask = 0;
+    // face order matches FACES in mesh.ts: +x, -x, +z, -z, +y, -y
+    for (let f = 0; f < 6; f++) {
+      const axis = f < 2 ? 0 : f < 4 ? 2 : 1;
+      const side = f % 2 === 0 ? 1 : 0; // even faces sit on the box maximum
+      const plane = side ? hi(i, axis) : lo(i, axis);
+      const u = (axis + 1) % 3, w = (axis + 2) % 3;
+      const lu = lo(i, u), hu = hi(i, u), lw = lo(i, w), hw = hi(i, w);
+      const fx = axis === 0 ? plane : cx, fz = axis === 2 ? plane : cz;
+      const key = cl((fx - ox) * s) * G + cl((fz - oz) * s);
+      for (let k = starts[key]; k < starts[key + 1]; k++) {
+        const j = items[k];
+        if (j === i) continue;
+        if (lo(j, u) > lu + EPS || hi(j, u) < hu - EPS) continue;
+        if (lo(j, w) > lw + EPS || hi(j, w) < hw - EPS) continue;
+        if (side ? !(lo(j, axis) <= plane + EPS && hi(j, axis) > plane + EPS)
+                 : !(hi(j, axis) >= plane - EPS && lo(j, axis) < plane - EPS)) continue;
+        if (tiers[j] > tierI) continue;
+        mask |= 1 << f;
+        break;
+      }
+    }
+    masks[i] = mask;
+  }
+  return masks;
+}
+
+/**
+ * A box whose largest face is this big still reads as a shape from far away and stays in
+ * the coarsest tier. About 3.5 m on a side: at 700 m that is still several pixels across.
+ */
+const BULK_FACE_AREA = 12;
+
+/** 0 = bulk (drawn at any distance), 1 = smaller structure, 2 = detail. */
+function boxTier(d: ArrayLike<number>, o: number): number {
+  if (d[o + 13] > 0.5) return 2;
+  const w = d[o + 3] - d[o], h = d[o + 4] - d[o + 1], dep = d[o + 5] - d[o + 2];
+  return Math.max(w * h, w * dep, h * dep) >= BULK_FACE_AREA ? 0 : 1;
+}
+
+export function buildRegion(rx: number, rz: number, faceCull = true): RegionMesh {
   const cells: { ci: number; cj: number; b: Builder }[] = [];
   let total = 1;
   for (let ci = rx * REGION_CELLS; ci < (rx + 1) * REGION_CELLS; ci++)
@@ -1500,10 +1587,11 @@ export function buildRegion(rx: number, rz: number): RegionMesh {
   let v = 0;
   let maxHeight = 0;
 
-  const emit = (d: ArrayLike<number>, o: number) => {
+  const emit = (d: ArrayLike<number>, o: number, buried = 0) => {
     maxHeight = Math.max(maxHeight, d[o + 4]);
-    // a bottom face resting on the street or a sidewalk can never be seen
-    ({ v, idx } = emitBox(d, o, vertices, v, indices, idx, boxIndex * 24, d[o + 1] <= 0.19));
+    // a bottom face resting on the street or a sidewalk can never be seen either
+    const mask = buried | (d[o + 1] <= 0.19 ? 1 << 5 : 0);
+    ({ v, idx } = emitBox(d, o, vertices, v, indices, idx, boxIndex * 24, mask));
     boxIndex++;
   };
 
@@ -1513,8 +1601,11 @@ export function buildRegion(rx: number, rz: number): RegionMesh {
   const groundCount = idx;
 
   const ranges: CellRange[] = [];
-  for (const { b } of cells) {
+  for (const { ci, cj, b } of cells) {
     const d = b.data;
+    const buried = faceCull ? buriedFaces(b, ci, cj) : new Uint8Array(b.count);
+    // three tiers, emitted in order so that any prefix of them is one contiguous range:
+    // bulk (always drawn), the smaller coarse boxes, then detail
     const lo: [number, number, number] = [Infinity, Infinity, Infinity];
     const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
     for (let i = 0; i < b.count; i++)
@@ -1523,11 +1614,16 @@ export function buildRegion(rx: number, rz: number): RegionMesh {
         hi[k] = Math.max(hi[k], d[i * FLOATS_PER_BOX + 3 + k]);
       }
     const coarseStart = idx;
-    for (let i = 0; i < b.count; i++) if (d[i * FLOATS_PER_BOX + 13] === 0) emit(d, i * FLOATS_PER_BOX);
+    for (let i = 0; i < b.count; i++) if (boxTier(d, i * FLOATS_PER_BOX) === 0) emit(d, i * FLOATS_PER_BOX, buried[i]);
+    const midStart = idx;
+    for (let i = 0; i < b.count; i++) if (boxTier(d, i * FLOATS_PER_BOX) === 1) emit(d, i * FLOATS_PER_BOX, buried[i]);
     const detailStart = idx;
-    for (let i = 0; i < b.count; i++) if (d[i * FLOATS_PER_BOX + 13] !== 0) emit(d, i * FLOATS_PER_BOX);
+    for (let i = 0; i < b.count; i++) if (boxTier(d, i * FLOATS_PER_BOX) === 2) emit(d, i * FLOATS_PER_BOX, buried[i]);
     ranges.push({
-      lo, hi, coarseStart, coarseCount: detailStart - coarseStart, detailStart, detailCount: idx - detailStart,
+      lo, hi,
+      coarseStart, coarseCount: midStart - coarseStart,
+      midStart, midCount: detailStart - midStart,
+      detailStart, detailCount: idx - detailStart,
     });
   }
 
@@ -1543,7 +1639,10 @@ export function buildRegion(rx: number, rz: number): RegionMesh {
   const pads = cells.flatMap(({ ci, cj, b }) => b.pads.map((pd, k) => ({ ...pd, id: `p${ci},${cj},${k}` })));
   const cars = cells.flatMap(({ ci, cj, b }) => b.cars.map((c, k) => ({ ...c, id: `c${ci},${cj},${k}` })));
   const lifts = cells.flatMap(({ ci, cj, b }) => b.lifts.map((l, k) => ({ ...l, id: `l${ci},${cj},${k}` })));
-  return { rx, rz, vertices, indices: indices.slice(0, idx), groundCount, cells: ranges, pads, cars, lifts, maxHeight, colliders };
+  return {
+    rx, rz, vertices, positions: positionsOf(vertices, v), indices: indices.slice(0, idx),
+    groundCount, cells: ranges, pads, cars, lifts, maxHeight, colliders,
+  };
 }
 
 /** Where the runner starts: on the podium deck of cell (0, 0). */

@@ -10,6 +10,7 @@ import type { WorkerRequest } from "./worker";
 export const LOAD_RADIUS = 950;
 const UNLOAD_RADIUS = 1200;
 const DETAIL_DISTANCE = 230; // small boxes (steps, rails, fins) are sub-pixel beyond this
+const FAR_DISTANCE = 700; // beyond this only the boxes that still read as shapes are drawn
 
 interface Region {
   mesh: Mesh;
@@ -32,7 +33,13 @@ export class World {
   private workers: Worker[] = [];
   private busy: number[] = [];
   private collideCache = new Map<string, Float32Array>(); // 3x3 cell neighbourhoods, most recent last
-  stats = { regions: 0, drawn: 0, pending: 0 };
+  stats = { regions: 0, drawn: 0, pending: 0, tris: 0 };
+  /** Scales the distance at which small detail boxes stop being drawn (diagnostic knob). */
+  detailScale = 1;
+  /** Same, for the tier of smaller structural boxes. */
+  farScale = 1;
+  /** Build-time removal of faces buried inside other boxes (diagnostic knob). */
+  faceCull = true;
   /** Bumped whenever regions are added or removed. */
   version = 0;
 
@@ -85,7 +92,7 @@ export class World {
     const x0 = m.rx * REGION, z0 = m.rz * REGION;
     const pad = 36; // bridges and stairs poke into neighbouring regions
     this.regions.set(key(m.rx, m.rz), {
-      mesh: new Mesh(this.gl, m.vertices, VERTEX_LAYOUT, m.indices),
+      mesh: new Mesh(this.gl, m.vertices, VERTEX_LAYOUT, m.indices, this.gl.TRIANGLES, m.positions),
       pads: m.pads,
       cars: m.cars,
       lifts: m.lifts,
@@ -124,7 +131,7 @@ export class World {
       if (this.busy[w] >= 2) break;
       this.busy[w]++;
       this.pending.add(key(i, j));
-      this.workers[w].postMessage({ type: "region", rx: i, rz: j, seed: this.seed } satisfies WorkerRequest);
+      this.workers[w].postMessage({ type: "region", rx: i, rz: j, seed: this.seed, faceCull: this.faceCull } satisfies WorkerRequest);
     }
     for (const [k, r] of this.regions) {
       const [i, j] = k.split(",").map(Number);
@@ -171,7 +178,7 @@ export class World {
         let cell = this.cells.get(key(i, j));
         if (!cell) {
           // not streamed in yet: build synchronously (rare)
-          const m = buildRegion(Math.floor(i / REGION_CELLS), Math.floor(j / REGION_CELLS));
+          const m = buildRegion(Math.floor(i / REGION_CELLS), Math.floor(j / REGION_CELLS), this.faceCull);
           this.add(m);
           cell = this.cells.get(key(i, j))!;
         }
@@ -194,7 +201,7 @@ export class World {
    * Draw visible city blocks, nearest first so the depth test rejects hidden
    * surfaces early. Small detail boxes are skipped for distant blocks.
    */
-  draw(planes: Float64Array[], eye: Vec3, lodScale = 1, record = true): void {
+  draw(planes: Float64Array[], eye: Vec3, lodScale = 1, record = true, depthOnly = false): void {
     const items: [number, Region, CellRange | null][] = [];
     for (const r of this.regions.values()) {
       if (!aabbVisible(planes, r.lo, r.hi)) continue;
@@ -211,7 +218,8 @@ export class World {
     // and each region's ranges stay nearest first
     const order: Region[] = [];
     const batches = new Map<Region, number[]>();
-    const detailDist = DETAIL_DISTANCE * lodScale;
+    const detailDist = DETAIL_DISTANCE * lodScale * this.detailScale;
+    const farDist = FAR_DISTANCE * lodScale * this.farScale;
     let cells = 0;
     for (const [dist, r, c] of items) {
       let b = batches.get(r);
@@ -225,9 +233,13 @@ export class World {
         continue;
       }
       cells++;
+      // the tiers sit next to each other in the index buffer, so a near cell's three
+      // ranges merge back into a single draw below
       b.push(c.coarseStart, c.coarseCount);
+      if (dist < farDist) b.push(c.midStart, c.midCount);
       if (dist < detailDist) b.push(c.detailStart, c.detailCount);
     }
+    let indices = 0;
     for (const r of order) {
       const b = batches.get(r)!;
       if (this.starts.length * 2 < b.length) {
@@ -245,9 +257,13 @@ export class World {
           this.counts[n++] = count;
         }
       }
-      r.mesh.drawRanges(this.starts, this.counts, n);
+      for (let i = 0; i < n; i++) indices += this.counts[i];
+      r.mesh.drawRanges(this.starts, this.counts, n, depthOnly);
     }
-    if (record) this.stats.drawn = cells;
+    if (record) {
+      this.stats.drawn = cells;
+      this.stats.tris = indices / 3;
+    }
   }
 
   private starts = new Int32Array(256);

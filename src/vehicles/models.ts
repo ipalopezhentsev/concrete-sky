@@ -40,6 +40,35 @@ export function carBoxes(van: boolean): ModelBox[] {
   ];
 }
 
+/**
+ * Stand-ins drawn beyond FAR_VEHICLE metres, where a whole car is a few pixels tall:
+ * the painted shell, the glazing and the lights, without wheels, struts or ducts.
+ */
+export function carBoxesFar(van: boolean): ModelBox[] {
+  if (van) {
+    return [
+      box(-1.0, 0.2, -2.8, 1.0, 2.1, 2.8, Mat.Paint, true),
+      box(-1.02, 1.3, -2.6, 1.02, 1.75, 2.75, Mat.VGlass),
+      ...pair(0.6, 0.9, -2.83, 0.92, 1.25, -2.8, Mat.Tail),
+    ];
+  }
+  return [
+    box(-0.95, 0.2, -2.23, 0.95, 0.95, 2.23, Mat.Paint, true),
+    box(-0.84, 0.95, -1.15, 0.86, 1.48, 0.85, Mat.VGlass),
+    ...pair(0.6, 0.7, -2.23, 0.9, 0.84, -2.2, Mat.Tail),
+  ];
+}
+
+export function flyerBoxesFar(): ModelBox[] {
+  return [
+    box(-0.85, 0.3, -1.5, 0.85, 1.05, 1.25, Mat.Paint, true),
+    box(-0.7, 1.05, -1.4, 0.72, 1.55, 0.95, Mat.VGlass),
+    ...pair(1.25, 0.8, -1.35, 2.05, 1.05, 1.35, Mat.Metal),
+    box(-0.6, 0.36, -1.2, 0.6, 0.4, 1.0, Mat.Glow),
+    ...pair(0.45, 0.8, -1.52, 0.8, 0.95, -1.5, Mat.Tail),
+  ];
+}
+
 export const FLYER_HEIGHT = 1.6;
 /** Car footprint half sizes (x across, z along) and height, per variant. */
 export const CAR_DIMS = { car: { hx: 0.98, hz: 2.23, h: 1.5 }, van: { hx: 1.02, hz: 2.83, h: 2.1 } };

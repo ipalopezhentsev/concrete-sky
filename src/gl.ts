@@ -78,16 +78,23 @@ export class Program {
 
 export class Mesh {
   readonly vao: WebGLVertexArrayObject;
+  private depthVao: WebGLVertexArrayObject | null = null;
   private buffers: WebGLBuffer[] = [];
   count: number;
   indexed: boolean;
 
+  /**
+   * With `positions` (3 floats a vertex, same order as `vertices`) the mesh also builds a
+   * slim vertex array for the depth-only passes, which then read 12 bytes a vertex instead
+   * of the full format. On a shared-memory GPU that fetch is most of what a depth pass does.
+   */
   constructor(
     private gl: GL,
     vertices: Float32Array,
     layout: number[],
     indices: Uint32Array | null = null,
     readonly mode: number = gl.TRIANGLES,
+    positions: Float32Array | null = null,
   ) {
     this.vao = gl.createVertexArray()!;
     gl.bindVertexArray(this.vao);
@@ -103,14 +110,27 @@ export class Mesh {
       offset += size;
     });
     this.indexed = indices !== null;
+    let ebo: WebGLBuffer | null = null;
     if (indices) {
-      const ebo = gl.createBuffer()!;
+      ebo = gl.createBuffer()!;
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
       this.buffers.push(ebo);
       this.count = indices.length;
     } else {
       this.count = vertices.length / stride;
+    }
+
+    if (positions) {
+      this.depthVao = gl.createVertexArray()!;
+      gl.bindVertexArray(this.depthVao);
+      const pbo = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, pbo);
+      gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+      this.buffers.push(pbo);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+      if (ebo) gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo); // the same indices address both
     }
     gl.bindVertexArray(null);
     Mesh.bound = null;
@@ -119,7 +139,7 @@ export class Mesh {
   draw(count = this.count): void {
     const gl = this.gl;
     gl.bindVertexArray(this.vao);
-    Mesh.bound = this;
+    Mesh.bound = this.vao;
     if (this.indexed) gl.drawElements(this.mode, count, gl.UNSIGNED_INT, 0);
     else gl.drawArrays(this.mode, 0, count);
   }
@@ -128,12 +148,13 @@ export class Mesh {
    * Draw many parts of the index buffer (starts in indices) in one call when
    * WEBGL_multi_draw is available, otherwise one call per part.
    */
-  drawRanges(starts: Int32Array, counts: Int32Array, n: number): void {
+  drawRanges(starts: Int32Array, counts: Int32Array, n: number, depthOnly = false): void {
     if (n <= 0) return;
     const gl = this.gl;
-    if (Mesh.bound !== this) {
-      gl.bindVertexArray(this.vao);
-      Mesh.bound = this;
+    const vao = depthOnly && this.depthVao ? this.depthVao : this.vao;
+    if (Mesh.bound !== vao) {
+      gl.bindVertexArray(vao);
+      Mesh.bound = vao;
     }
     const multi = Mesh.multiDraw(gl);
     if (!multi) {
@@ -144,7 +165,8 @@ export class Mesh {
     multi.multiDrawElementsWEBGL(this.mode, counts, 0, gl.UNSIGNED_INT, starts, 0, n);
   }
 
-  static bound: Mesh | null = null;
+  /** The vertex array currently bound, so consecutive draws from one mesh skip rebinding. */
+  static bound: WebGLVertexArrayObject | null = null;
 
   private static multi: WEBGL_multi_draw | null | undefined;
   private static multiDraw(gl: GL): WEBGL_multi_draw | null {
@@ -153,9 +175,10 @@ export class Mesh {
   }
 
   dispose(): void {
-    if (Mesh.bound === this) Mesh.bound = null;
+    if (Mesh.bound === this.vao || Mesh.bound === this.depthVao) Mesh.bound = null;
     for (const b of this.buffers) this.gl.deleteBuffer(b);
     this.gl.deleteVertexArray(this.vao);
+    if (this.depthVao) this.gl.deleteVertexArray(this.depthVao);
   }
 }
 
@@ -238,7 +261,7 @@ export function texture2D(gl: GL, size: number, data: Uint8Array, opts: { mipmap
   return tex;
 }
 
-export function textureArray(gl: GL, size: number, layers: number, data: Uint8Array, srgb: boolean): WebGLTexture {
+export function textureArray(gl: GL, size: number, layers: number, data: Uint8Array, srgb: boolean, aniso = 8): WebGLTexture {
   const tex = gl.createTexture()!;
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
   const levels = Math.floor(Math.log2(size)) + 1;
@@ -248,10 +271,10 @@ export function textureArray(gl: GL, size: number, layers: number, data: Uint8Ar
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-  const aniso = gl.getExtension("EXT_texture_filter_anisotropic");
-  if (aniso) {
-    const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) as number;
-    gl.texParameterf(gl.TEXTURE_2D_ARRAY, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, max));
+  const ext = gl.getExtension("EXT_texture_filter_anisotropic");
+  if (ext && aniso > 1) {
+    const max = gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT) as number;
+    gl.texParameterf(gl.TEXTURE_2D_ARRAY, ext.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(aniso, max));
   }
   gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
   return tex;
@@ -289,8 +312,10 @@ export class SceneTarget {
       return t;
     };
     this.color = makeTex(width, height, 1);
-    this.bloomWidth = Math.max(1, width >> 1);
-    this.bloomHeight = Math.max(1, height >> 1);
+    // Quarter resolution: the post pass only reads mip 2 and above of this chain, and
+    // building the two largest levels every frame was most of what the resolve cost.
+    this.bloomWidth = Math.max(1, width >> 2);
+    this.bloomHeight = Math.max(1, height >> 2);
     this.bloom = makeTex(this.bloomWidth, this.bloomHeight, Math.floor(Math.log2(Math.max(this.bloomWidth, this.bloomHeight))) + 1);
 
     this.fbo = gl.createFramebuffer()!;

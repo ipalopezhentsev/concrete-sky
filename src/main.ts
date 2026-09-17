@@ -89,6 +89,9 @@ async function main(): Promise<void> {
   seedEl.textContent = `city no. ${seed}`;
   seedEl.title = `add ?seed=${seed} to the address to come back to this city`;
   const world = new World(gl, seed);
+  if (Number(params.get("geolod")) > 0) world.detailScale = Number(params.get("geolod"));
+  if (Number(params.get("farlod")) > 0) world.farScale = Number(params.get("farlod"));
+  if (params.get("facecull") === "0") world.faceCull = false;
   statusEl.textContent = "generating textures…";
   const textures = await world.textures();
   let renderer: Renderer;
@@ -98,6 +101,10 @@ async function main(): Promise<void> {
       msaa: num("msaa"),
       shadowSize: num("shadowsize"),
       prepass: params.has("prepass") ? params.get("prepass") !== "0" : undefined,
+      fxaa: params.has("fxaa") ? params.get("fxaa") !== "0" : undefined,
+      detailDist: num("detail"),
+      aniso: num("aniso"),
+      cheap: num("cheap"),
     });
   } catch (e) {
     fail(String((e as Error).message));
@@ -572,10 +579,10 @@ async function main(): Promise<void> {
       };
       {
         statsText = [
-          `${fps.toFixed(0)} fps  ${renderer.width}x${renderer.height} x${renderer.samples} msaa  worst ${worstShown.toFixed(1)} ms`,
+          `${fps.toFixed(0)} fps  ${renderer.width}x${renderer.height} x${renderer.samples} msaa${renderer.fxaa ? " + fxaa" : ""}  worst ${worstShown.toFixed(1)} ms`,
           renderer.renderer,
           `reversed z: ${renderer.reversedZ}   depth pre-pass: ${renderer.prepass}`,
-          `regions ${world.stats.regions} (drawn ${world.stats.drawn}, pending ${world.stats.pending})`,
+          `regions ${world.stats.regions} (drawn ${world.stats.drawn}, pending ${world.stats.pending}, ${(world.stats.tris / 1000).toFixed(0)}k tris)`,
           `pos ${player.pos.map((v) => v.toFixed(1)).join(" ")}`,
           `weather: ${weather.name}   city seed ${seed}`,
           `vehicles: ${t.cars.count} cars, ${t.vans.count} vans, ${t.flyers.count} flyers (${renderer.vehiclesDrawn} in view)`,
