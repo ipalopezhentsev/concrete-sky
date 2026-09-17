@@ -12,7 +12,8 @@ import { hashInt, worldSeed, type Vec3 } from "../math";
 import { PAINT_COLORS } from "./models";
 
 export const INSTANCE_LAYOUT = [3, 3, 4]; // position, rotation (yaw, pitch, roll), colour (rgb, lights)
-const STRIDE = 10;
+export const INSTANCE_STRIDE = 10;
+const STRIDE = INSTANCE_STRIDE;
 
 export class InstanceList {
   data: Float32Array;

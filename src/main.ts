@@ -260,6 +260,15 @@ async function main(): Promise<void> {
     play(withTouch);
   }
 
+  // F4 copies the stats panel (and the URL, which carries any test parameters)
+  let statsText = "";
+  const copyStats = () => {
+    navigator.clipboard.writeText(`${location.href}\n${statsText}`).then(
+      () => caption("stats copied"),
+      () => caption("could not copy stats"),
+    );
+  };
+
   window.addEventListener("keydown", (e) => {
     idle = 0;
     if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
@@ -267,7 +276,11 @@ async function main(): Promise<void> {
       statsEl.hidden = !statsEl.hidden;
       e.preventDefault();
     }
-    if (mode === "demo" && !e.repeat && e.code !== "F3") {
+    if (e.code === "F4") {
+      e.preventDefault();
+      if (!e.repeat) copyStats();
+    }
+    if (mode === "demo" && !e.repeat && e.code !== "F3" && e.code !== "F4") {
       if (e.code === "Escape") setMode("title");
       else takeOver(false);
     }
@@ -515,16 +528,27 @@ async function main(): Promise<void> {
     renderer.render(cam, weather, world, rides.vehicleLists, rides.particles, time, blur, shade);
     debug.frames++;
 
-    // adaptive resolution: drop the internal scale if frames stay slow
+    // Adaptive resolution, aimed at the display's frame budget: drop the internal
+    // scale while frames run long and give it back once there is room to spare.
+    // Both directions need a full second of agreement, so the scale cannot oscillate.
     frameAvg += (dt * 1000 - frameAvg) * 0.05;
-    if (!scaleParam && time > 4 && frameAvg > 21 && renderer.scale > 0.55) {
-      if (++slowFrames > 60) {
-        renderer.scale = Math.max(0.5, renderer.scale - 0.15);
+    if (!scaleParam && time > 4) {
+      const budget = 16.7; // one 60 Hz frame
+      // Frame time only shows trouble: once vsync locks it at the budget it says nothing
+      // about the headroom left. GPU pass timings do, so they decide when to go back up.
+      const gpuMs = renderer.timer.total;
+      const busy = gpuMs > 0 ? gpuMs > budget * 0.95 : frameAvg > budget * 1.06;
+      const idleEnough = gpuMs > 0 ? gpuMs < budget * 0.72 : frameAvg < budget * 0.82;
+      if ((busy || frameAvg > budget * 1.06) && renderer.scale > 0.5) slowFrames++;
+      else if (idleEnough && frameAvg < budget * 1.06 && renderer.scale < 1) slowFrames--;
+      else slowFrames = 0;
+      if (Math.abs(slowFrames) > 60) {
+        renderer.scale = Math.min(1, Math.max(0.5, renderer.scale - Math.sign(slowFrames) * 0.1));
         resize();
         slowFrames = 0;
-        frameAvg = 16;
+        frameAvg = budget;
       }
-    } else slowFrames = 0;
+    }
 
     fpsTime += dt;
     fpsFrames++;
@@ -546,18 +570,19 @@ async function main(): Promise<void> {
         hunters: hunters.list.map((x) => x.mode).join(","), health: hunters.health, hunterKills: hunters.kills, caught: hunters.caught,
         mode, demo: demo.kind, touch: touchPlay,
       };
-      if (!statsEl.hidden) {
-        statsEl.textContent = [
+      {
+        statsText = [
           `${fps.toFixed(0)} fps  ${renderer.width}x${renderer.height} x${renderer.samples} msaa  worst ${worstShown.toFixed(1)} ms`,
           renderer.renderer,
           `reversed z: ${renderer.reversedZ}   depth pre-pass: ${renderer.prepass}`,
           `regions ${world.stats.regions} (drawn ${world.stats.drawn}, pending ${world.stats.pending})`,
           `pos ${player.pos.map((v) => v.toFixed(1)).join(" ")}`,
           `weather: ${weather.name}   city seed ${seed}`,
-          `vehicles: ${t.cars.count} cars, ${t.vans.count} vans, ${t.flyers.count} flyers`,
+          `vehicles: ${t.cars.count} cars, ${t.vans.count} vans, ${t.flyers.count} flyers (${renderer.vehiclesDrawn} in view)`,
           `hunters: ${hunt ? hunters.list.map((x) => x.mode).join(" ") || "none yet" : "off"} (up to ${hunters.pressure})`,
-          `gpu ms: ${renderer.timer.summary()}`,
+          `gpu ms: ${renderer.timer.summary()}  = ${renderer.timer.total.toFixed(2)} total`,
         ].join("\n");
+        if (!statsEl.hidden) statsEl.textContent = statsText;
       }
     }
     requestAnimationFrame(frame);

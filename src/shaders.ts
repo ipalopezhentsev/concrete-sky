@@ -276,16 +276,24 @@ const vec3 LAMP_COL = vec3(1.0, 0.72, 0.42);
 const vec3 GLOW_COL = vec3(0.72, 0.84, 1.0);
 const float FLOOR_H = 3.4;
 
-float shadowAt(vec3 p, vec3 n) {
+// Four taps soften the shadow edge up close; further out one tap covers more
+// than a pixel anyway, so the extra three are spent on nothing.
+float shadowAt(vec3 p, vec3 n, bool cheap) {
   vec4 lp = uLightVP * vec4(p + n * 0.12, 1.0);
   vec3 s = lp.xyz / lp.w * 0.5 + 0.5;
   if (s.x <= 0.0 || s.x >= 1.0 || s.y <= 0.0 || s.y >= 1.0 || s.z >= 1.0) return 1.0;
-  float sum = 0.0;
-  const vec2 taps[4] = vec2[4](vec2(-0.4, -1.2), vec2(1.2, -0.4), vec2(0.4, 1.2), vec2(-1.2, 0.4));
-  for (int i = 0; i < 4; i++)
-    sum += texture(uShadow, vec3(s.xy + taps[i] * uShadowTexel, s.z - 0.00015));
+  float sum;
+  if (cheap) {
+    sum = texture(uShadow, vec3(s.xy, s.z - 0.00015));
+  } else {
+    sum = 0.0;
+    const vec2 taps[4] = vec2[4](vec2(-0.4, -1.2), vec2(1.2, -0.4), vec2(0.4, 1.2), vec2(-1.2, 0.4));
+    for (int i = 0; i < 4; i++)
+      sum += texture(uShadow, vec3(s.xy + taps[i] * uShadowTexel, s.z - 0.00015));
+    sum *= 0.25;
+  }
   float edge = max(abs(s.x - 0.5), abs(s.y - 0.5));
-  return mix(sum / 4.0, 1.0, smoothstep(0.42, 0.5, edge));
+  return mix(sum, 1.0, smoothstep(0.42, 0.5, edge));
 }
 
 // Anti-aliased coverage of the rectangle [lo, hi] at f, given a pixel footprint fw.
@@ -470,15 +478,15 @@ void main() {
   albedo *= mix(0.86, 1.08, macro);
 
   // weathering on concrete walls: stains running down from the top edge, splash-back dirt at the
-  // foot and a patchy tone per surface. Sampled unconditionally; the noise has no mipmaps, so the
-  // fine streaks fade out with distance instead.
-  float wStreak = texture(uNoise, vec2(vUV.x * 0.07 + seed * 37.0, vUV.y * 0.005 + seed * 5.0)).b;
-  float wPatch = texture(uNoise, vec2(vUV.x * 0.045 + seed * 11.0, vUV.y * 0.03 - seed * 3.0)).g;
-  float wBlot = texture(uNoise, vUV * 0.06 + seed * 13.0).g;
+  // foot and a patchy tone per surface. The noise texture has no mipmaps, so these lookups are
+  // safe inside the branch, and the fine streaks fade out with distance instead.
   bool concrete = mat == 2 || mat == 3 || mat == 4 || mat == 8;
   if (concrete) {
+    float wBlot = texture(uNoise, vUV * 0.06 + seed * 13.0).g;
     albedo *= mix(0.9, 1.06, wBlot);
     if (!horizontal) {
+      float wStreak = texture(uNoise, vec2(vUV.x * 0.07 + seed * 37.0, vUV.y * 0.005 + seed * 5.0)).b;
+      float wPatch = texture(uNoise, vec2(vUV.x * 0.045 + seed * 11.0, vUV.y * 0.03 - seed * 3.0)).g;
       float near = 1.0 - smoothstep(60.0, 220.0, dist);
       float fromTop = vSize.y - vUV.y;
       float run = exp(-fromTop / mix(2.5, 16.0, wPatch));
@@ -537,7 +545,7 @@ void main() {
     Nd = normalize(mix(Nd, N, uWet * puddle));
   }
 
-  float sh = shadowAt(vPos, N);
+  float sh = shadowAt(vPos, N, dist > 140.0);
   float NdL = max(dot(Nd, L), 0.0) * smoothstep(-0.02, 0.1, dot(N, L));
   vec3 skyTone = mix(uHorizon, uZenith, 0.55);
   skyTone = mix(vec3(dot(skyTone, vec3(0.3, 0.5, 0.2))), skyTone, 0.5);

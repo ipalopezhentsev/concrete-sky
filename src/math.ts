@@ -97,6 +97,14 @@ export function frustumPlanes(m: Mat4, withNear: boolean, withFar: boolean): Flo
   return planes.map((p) => Float64Array.from(p));
 }
 
+/** Planes scaled so that plane·point is the signed distance (needed for sphere tests). */
+export function normalizedPlanes(planes: Float64Array[]): Float64Array[] {
+  return planes.map((p) => {
+    const len = Math.hypot(p[0], p[1], p[2]) || 1;
+    return Float64Array.from(p, (v) => v / len);
+  });
+}
+
 export function aabbVisible(planes: Float64Array[], lo: Vec3, hi: Vec3): boolean {
   for (const p of planes) {
     const x = p[0] >= 0 ? hi[0] : lo[0];

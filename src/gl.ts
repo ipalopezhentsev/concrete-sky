@@ -124,18 +124,33 @@ export class Mesh {
     else gl.drawArrays(this.mode, 0, count);
   }
 
-  /** Draw part of the index buffer; skips rebinding the VAO between consecutive calls. */
-  drawRange(start: number, count: number): void {
-    if (count <= 0) return;
+  /**
+   * Draw many parts of the index buffer (starts in indices) in one call when
+   * WEBGL_multi_draw is available, otherwise one call per part.
+   */
+  drawRanges(starts: Int32Array, counts: Int32Array, n: number): void {
+    if (n <= 0) return;
     const gl = this.gl;
     if (Mesh.bound !== this) {
       gl.bindVertexArray(this.vao);
       Mesh.bound = this;
     }
-    gl.drawElements(this.mode, count, gl.UNSIGNED_INT, start * 4);
+    const multi = Mesh.multiDraw(gl);
+    if (!multi) {
+      for (let i = 0; i < n; i++) gl.drawElements(this.mode, counts[i], gl.UNSIGNED_INT, starts[i] * 4);
+      return;
+    }
+    for (let i = 0; i < n; i++) starts[i] *= 4; // byte offsets
+    multi.multiDrawElementsWEBGL(this.mode, counts, 0, gl.UNSIGNED_INT, starts, 0, n);
   }
 
   static bound: Mesh | null = null;
+
+  private static multi: WEBGL_multi_draw | null | undefined;
+  private static multiDraw(gl: GL): WEBGL_multi_draw | null {
+    if (Mesh.multi === undefined) Mesh.multi = new URLSearchParams(location.search).get("multidraw") === "0" ? null : gl.getExtension("WEBGL_multi_draw");
+    return Mesh.multi;
+  }
 
   dispose(): void {
     if (Mesh.bound === this) Mesh.bound = null;

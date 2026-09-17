@@ -207,17 +207,49 @@ export class World {
       }
     }
     items.sort((a, b) => a[0] - b[0]);
+    // one batched call per region: regions go in order of their nearest cell,
+    // and each region's ranges stay nearest first
+    const order: Region[] = [];
+    const batches = new Map<Region, number[]>();
     const detailDist = DETAIL_DISTANCE * lodScale;
     let cells = 0;
     for (const [dist, r, c] of items) {
+      let b = batches.get(r);
+      if (!b) {
+        b = [];
+        batches.set(r, b);
+        order.push(r);
+      }
       if (!c) {
-        r.mesh.drawRange(0, r.groundCount);
+        b.push(0, r.groundCount);
         continue;
       }
       cells++;
-      r.mesh.drawRange(c.coarseStart, c.coarseCount);
-      if (dist < detailDist) r.mesh.drawRange(c.detailStart, c.detailCount);
+      b.push(c.coarseStart, c.coarseCount);
+      if (dist < detailDist) b.push(c.detailStart, c.detailCount);
+    }
+    for (const r of order) {
+      const b = batches.get(r)!;
+      if (this.starts.length * 2 < b.length) {
+        this.starts = new Int32Array(b.length);
+        this.counts = new Int32Array(b.length);
+      }
+      let n = 0;
+      for (let i = 0; i < b.length; i += 2) {
+        const start = b[i], count = b[i + 1];
+        if (count <= 0) continue;
+        // join ranges that follow each other in the index buffer
+        if (n > 0 && this.starts[n - 1] + this.counts[n - 1] === start) this.counts[n - 1] += count;
+        else {
+          this.starts[n] = start;
+          this.counts[n++] = count;
+        }
+      }
+      r.mesh.drawRanges(this.starts, this.counts, n);
     }
     if (record) this.stats.drawn = cells;
   }
+
+  private starts = new Int32Array(256);
+  private counts = new Int32Array(256);
 }

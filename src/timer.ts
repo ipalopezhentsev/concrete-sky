@@ -37,6 +37,13 @@ export class GpuTimer {
     this.active = null;
   }
 
+  /** Averaged GPU time of all passes, in ms; 0 when timers are unavailable. */
+  get total(): number {
+    let sum = 0;
+    for (const v of this.avg.values()) sum += v;
+    return sum;
+  }
+
   /** Collect finished queries; call once per frame. */
   poll(): void {
     if (!this.ext) return;

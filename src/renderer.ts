@@ -5,7 +5,7 @@ import {
   ColorTarget, InstancedMesh, Mesh, Program, SceneTarget, ShadowTarget, bindTexture, fullscreenTriangle, textureArray, texture2D, type GL,
 } from "./gl";
 import {
-  cross, dot, frustumPlanes, mul, normalize, ortho, perspective, perspectiveReversed, scale, sub, viewMatrix, type Vec3,
+  cross, dot, frustumPlanes, mul, normalizedPlanes, normalize, ortho, perspective, perspectiveReversed, scale, sub, viewMatrix, type Vec3,
 } from "./math";
 import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
@@ -14,7 +14,7 @@ import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
 import { carBoxes, figureBoxes, flyerBoxes, liftBoxes, modelData } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
-import { INSTANCE_LAYOUT, type InstanceList } from "./vehicles/traffic";
+import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
 import { PARTICLE_INSTANCE_LAYOUT, type Particles } from "./effects/particles";
 import type { Weather } from "./weather";
 import type { World } from "./world";
@@ -48,6 +48,31 @@ export interface VehicleLists {
   /** People on foot, by pose: standing, left stride, right stride. */
   figures?: InstanceList[];
   lifts?: InstanceList;
+}
+
+/**
+ * Instances whose bounding sphere is outside the view, dropped before upload.
+ * The lists themselves stay whole: traffic and combat query them by index.
+ */
+class InstanceCull {
+  private buf = new Float32Array(0);
+  count = 0;
+
+  /** `radius` covers the widest model plus its rotation. */
+  apply(list: InstanceList, planes: Float64Array[], radius: number): Float32Array {
+    if (this.buf.length < list.count * INSTANCE_STRIDE) this.buf = new Float32Array(list.count * INSTANCE_STRIDE);
+    const src = list.data, dst = this.buf;
+    let n = 0;
+    outer: for (let i = 0; i < list.count; i++) {
+      const o = i * INSTANCE_STRIDE;
+      const x = src[o], y = src[o + 1], z = src[o + 2];
+      for (const p of planes) if (p[0] * x + p[1] * y + p[2] * z + p[3] < -radius) continue outer;
+      dst.set(src.subarray(o, o + INSTANCE_STRIDE), n * INSTANCE_STRIDE);
+      n++;
+    }
+    this.count = n;
+    return dst;
+  }
 }
 
 export interface RenderOptions {
@@ -90,6 +115,9 @@ export class Renderer {
   width = 0;
   height = 0;
   shadowRenders = 0;
+  /** Instances that survived frustum culling in the last frame (for the stats panel). */
+  vehiclesDrawn = 0;
+  private cull = new InstanceCull();
 
   constructor(private gl: GL, tex: TextureSet, opts: RenderOptions = {}) {
     if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("This browser cannot render to float textures (EXT_color_buffer_float).");
@@ -295,11 +323,20 @@ export class Renderer {
     gl.depthMask(true);
     gl.depthFunc(nearer);
     surface(this.vehicleProg);
-    this.vehicleMeshes.car.draw(vehicles.cars.data, vehicles.cars.count);
-    this.vehicleMeshes.van.draw(vehicles.vans.data, vehicles.vans.count);
-    this.vehicleMeshes.flyer.draw(vehicles.flyers.data, vehicles.flyers.count);
-    vehicles.figures?.forEach((list, i) => this.vehicleMeshes.figures[i].draw(list.data, list.count));
-    if (vehicles.lifts) this.vehicleMeshes.lift.draw(vehicles.lifts.data, vehicles.lifts.count);
+    // the lists hold everything within streaming range, most of it behind the camera
+    const sphere = normalizedPlanes(planes);
+    const cull = this.cull;
+    const drawCulled = (mesh: InstancedMesh, list: InstanceList, radius: number) => {
+      const data = cull.apply(list, sphere, radius);
+      mesh.draw(data, cull.count);
+      this.vehiclesDrawn += cull.count;
+    };
+    this.vehiclesDrawn = 0;
+    drawCulled(this.vehicleMeshes.car, vehicles.cars, 3.2);
+    drawCulled(this.vehicleMeshes.van, vehicles.vans, 3.6);
+    drawCulled(this.vehicleMeshes.flyer, vehicles.flyers, 3.6);
+    vehicles.figures?.forEach((list, i) => drawCulled(this.vehicleMeshes.figures[i], list, 1.4));
+    if (vehicles.lifts) drawCulled(this.vehicleMeshes.lift, vehicles.lifts, LIFT_SIZE);
 
     // --- sky, only where no geometry was drawn
     timer.begin("sky");

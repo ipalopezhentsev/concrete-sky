@@ -46,6 +46,7 @@ Click the page to capture the mouse.
 | N | skip to the next weather |
 | L | hold the current weather / let it drift again |
 | F3 | stats (fps, GPU, position) |
+| F4 | copy stats to the clipboard |
 | Esc | pause |
 
 **In a flyer:** the mouse steers and W flies where you look. A / D strafe,
