@@ -50,10 +50,27 @@ Space is the handbrake and Shift boosts. The mouse looks around, and the view
 drifts back behind the car. Stop and press E to get out. You can take a parked
 car, or step into the avenue and take a passing one.
 
+**On a phone or tablet:** tap the title screen to play (it goes full screen
+where the browser allows). Your left thumb places a stick wherever it lands:
+push lightly to walk, further to run, all the way to sprint. Drag with your
+right thumb to look. Jump climbs ledges; in a car it is the handbrake, and in
+a flyer the up / down buttons climb and descend and fire shoots. To get in or
+out, tap the prompt at the bottom of the screen. The buttons at the top go
+back to the last roof, change the weather, switch the vehicle view and pause.
+It plays best held sideways.
+
+**Demo:** *watch the demo* on the title screen (or `?demo`) hands the city to
+an autopilot. It flies the air corridors and shoots at passing flyers, runs
+along the podium decks and over their bridges, then drives a cross street,
+giving way to avenue traffic. Each scene brings in the next weather. The demo
+also starts by itself after 45 seconds on the first title screen. Click, tap
+or press a key to take over wherever it is, including the vehicle it is in.
+Esc goes back to the title screen.
+
 Every visit generates a new city. Its number is shown on the title screen and
 in F3, and `?seed=12345` brings a particular city back.
 
-URL options: `?seed=12345`, `?weather=golden%20hour`, `?vehicle=1` / `?vehicle=car` (start in a vehicle), `?scale=0.7` (internal resolution),
+URL options: `?seed=12345`, `?demo` (start in the demo) / `?demo=0` (never start it by itself), `?weather=golden%20hour`, `?vehicle=1` / `?vehicle=car` (start in a vehicle), `?scale=0.7` (internal resolution),
 `?dpr=2` (render at full device pixel ratio), `?msaa=0|2|4`,
 `?shadowsize=1024|2048|4096`, `?prepass=0`, `?pose=x,y,z,yaw,pitch`.
 
@@ -115,6 +132,8 @@ reversed-Z depth.
 | `src/vehicles/car.ts` | Drivable car: arcade handling, box collision, kerb stepping. |
 | `src/vehicles/parking.ts` | Vehicles standing still: flyers on pads, kerbside cars, and anything the player parked. |
 | `src/rides.ts` | The player's side of vehicles: boarding, driving, flying, shooting and their cameras. |
+| `src/demo.ts` | Demo mode: autopilots for running (along lines probed clear on each deck, over the bridges), flying (street corridors between the traffic layers) and driving (timing avenue crossings against the traffic), and the director that cuts between them. |
+| `src/touch.ts` | On-screen touch controls: floating stick, drag to look, hold and tap buttons. |
 | `src/effects/combat.ts`, `src/effects/particles.ts` | Bolts, hit tests, falling wrecks, and fire / smoke / spark particles. |
 | `src/vehicles/flyer.ts` | The piloted flyer (hover physics, swept box collision, landing, finding a spot to step out) and the hangar of flyers waiting on landing pads. |
 | `src/vehicles/models.ts` | Box models of cars, vans and flyers. |
@@ -122,7 +141,7 @@ reversed-Z depth.
 ## Development
 
 ```sh
-npm test                      # headless tests: stairs, bridges, climbing, collisions, flying, clear traffic lanes
+npm test                      # headless tests: stairs, bridges, climbing, collisions, flying, clear traffic lanes, demo autopilots
 npm run build && npx vite preview --port 4173
 node scripts/shots.mjs out "clear sky,rain" deck,street   # screenshots via Chrome/Edge
 node scripts/landing.mjs out/landing.png                  # title screen as a visitor sees it

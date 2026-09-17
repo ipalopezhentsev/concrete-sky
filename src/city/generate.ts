@@ -19,8 +19,8 @@ export const REGION_CELLS = 3;
 export const REGION = CELL * REGION_CELLS;
 export const LAMP_HEIGHT = 7.2;
 export const PODIUM_LEVELS = [18, 24, 30];
-const INSET = 6.5; // block edge -> podium face
-const INNER = 15; // block edge -> tower zone
+export const INSET = 6.5; // block edge -> podium face
+export const INNER = 15; // block edge -> tower zone
 const KERB = 0.4;
 
 export { Mat, Win } from "./materials";

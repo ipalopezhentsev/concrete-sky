@@ -8,6 +8,7 @@ import { Parking } from "../src/vehicles/parking";
 import { Traffic } from "../src/vehicles/traffic";
 import { Combat } from "../src/effects/combat";
 import { Particles } from "../src/effects/particles";
+import { DrivePilot, FlyPilot, RunPilot } from "../src/demo";
 
 let failures = 0;
 const check = (name: string, ok: boolean, detail = "") => {
@@ -415,6 +416,106 @@ for (const seed of [1971, 42, 777777]) {
   const same = (x: Float32Array, y: Float32Array) => x.length === y.length && x.every((v, i) => v === y[i]);
   check("different seeds give different cities", !same(a.vertices, b.vertices));
   check("the same seed gives the same city", same(a.vertices, c.vertices));
+  setWorldSeed(1971);
+}
+
+// 12. demo autopilots in real cities: run the decks, fly the corridors, drive the cross streets
+{
+  const cityColliders = () => {
+    const cells = new Map<string, Float32Array>();
+    let lastKey = "", last = new Float32Array(0);
+    return (x: number, z: number): Float32Array => {
+      const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+      if (`${ci},${cj}` === lastKey) return last;
+      const parts: Float32Array[] = [];
+      for (let i = ci - 1; i <= ci + 1; i++)
+        for (let j = cj - 1; j <= cj + 1; j++) {
+          if (!cells.has(`${i},${j}`)) {
+            for (const c of buildRegion(Math.floor(i / 3), Math.floor(j / 3)).colliders) cells.set(`${c.ci},${c.cj}`, c.boxes);
+          }
+          parts.push(cells.get(`${i},${j}`)!);
+        }
+      last = new Float32Array(parts.reduce((s, p) => s + p.length, 0));
+      let o = 0;
+      for (const p of parts) {
+        last.set(p, o);
+        o += p.length;
+      }
+      lastKey = `${ci},${cj}`;
+      return last;
+    };
+  };
+  // deterministic "random" choices
+  const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+
+  for (const seed of [1971, 42, 777777]) {
+    setWorldSeed(seed);
+    const colliders = cityColliders();
+
+    // running
+    {
+      const pilot = new RunPilot(0, 0, colliders, lcg(seed));
+      const s = pilot.start;
+      const p = new Player(s[0], s[1], s[2], Math.PI / 2);
+      let fell = false, stuck = 0, last: number[] = [...p.pos];
+      for (let t = 0; t < 90 * 60; t++) {
+        const c = pilot.steer(p, 1 / 60);
+        p.update(1 / 60, { moveX: c.moveX, moveZ: c.moveZ, sprint: c.sprint, walk: c.down, jump: c.up }, colliders);
+        if (pilot.fell(p)) fell = true;
+        if (t % 180 === 179) {
+          if (Math.hypot(p.pos[0] - last[0], p.pos[2] - last[2]) < 4) stuck++;
+          last = [...p.pos];
+        }
+      }
+      check(`demo runner keeps to the decks (seed ${seed})`, !fell && stuck === 0 && pilot.crossings >= 5,
+        `fell=${fell} stuck=${stuck} bridges=${pilot.crossings} pos=${p.pos.map((v) => v.toFixed(1))}`);
+    }
+
+    // flying
+    {
+      const pilot = new FlyPilot(0, 30, "ns", 1, lcg(seed + 1));
+      const f = new Flyer(0, 60, 30, 0, [1, 1, 1]);
+      f.grounded = false;
+      const look = { yaw: 0, pitch: -0.1 };
+      let turns = 0, hits = 0, axis = pilot.axis, low = Infinity, high = 0;
+      for (let t = 0; t < 120 * 60; t++) {
+        const c = pilot.steer(f, look, 1 / 60);
+        const before = Math.hypot(...f.vel);
+        f.update(1 / 60, { moveX: c.moveX, moveZ: c.moveZ, up: c.climb ?? 0, boost: c.sprint }, look.yaw, look.pitch, colliders);
+        if (before > 10 && Math.hypot(...f.vel) < before * 0.7) hits++;
+        if (pilot.axis !== axis) {
+          turns++;
+          axis = pilot.axis;
+        }
+        if (t > 300) {
+          low = Math.min(low, f.pos[1]);
+          high = Math.max(high, f.pos[1]);
+        }
+      }
+      check(`demo flyer follows the corridors (seed ${seed})`, hits === 0 && turns >= 3 && low > 45,
+        `hits=${hits} turns=${turns} height=${low.toFixed(0)}..${high.toFixed(0)} pos=${f.pos.map((v) => v.toFixed(0))}`);
+    }
+
+    // driving, with avenue traffic
+    {
+      const pilot = new DrivePilot(88, 1);
+      const car = new Car(44, 0, pilot.lane, Math.PI / 2, false, [1, 1, 1]);
+      const traffic = new Traffic();
+      let impacts = 0, drift = 0;
+      for (let t = 0; t < 60 * 60; t++) {
+        const time = t / 60;
+        traffic.update(time, [car.pos[0] - 7, 3, car.pos[2]], [1, 0, 0]);
+        const c = pilot.steer(car, traffic);
+        car.update(1 / 60, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, colliders,
+          traffic.carBoxes(car.pos[0], car.pos[2], 30));
+        if (car.impact > 0) impacts++;
+        if (t > 120) drift = Math.max(drift, Math.abs(car.pos[2] - pilot.lane));
+      }
+      const crossed = Math.floor(car.pos[0] / CELL);
+      check(`demo car gives way and keeps its lane (seed ${seed})`, impacts === 0 && drift < 1.5 && crossed >= 8,
+        `impacts=${impacts} drift=${drift.toFixed(2)} avenues=${crossed} x=${car.pos[0].toFixed(0)}`);
+    }
+  }
   setWorldSeed(1971);
 }
 

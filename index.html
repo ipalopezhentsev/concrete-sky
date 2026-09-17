@@ -2,8 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
     <meta name="description" content="A moody run through an endless brutalist city." />
+    <meta name="theme-color" content="#0d0e10" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Concrete Sky</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='3' width='5' height='13' fill='%23777'/><rect x='8' y='0' width='6' height='16' fill='%23999'/><rect x='0' y='10' width='16' height='1' fill='%23555'/></svg>" />
     <link rel="stylesheet" href="/src/style.css" />
@@ -15,17 +19,42 @@
       <p class="seed" id="seed"></p>
       <p class="status" id="status">pouring concrete…</p>
       <p class="hint" id="begin" hidden>click to run</p>
+      <button class="watch" id="watch" type="button" hidden>watch the demo</button>
       <p class="gpu" id="gpu" hidden></p>
-      <p class="keys">
+      <p class="keys mouse-only">
         mouse look · WASD run · shift sprint · ctrl walk · space jump / climb<br />
         E get in / out of cars and flyers · click shoot (flyer) · V cockpit view<br />
         R back to last roof · N next weather · L hold weather · F3 stats · esc pause
+      </p>
+      <p class="keys touch-only">
+        left thumb run (push further to sprint) · right thumb look<br />
+        tap the prompt to get in or out · jump climbs ledges<br />
+        best held sideways
       </p>
     </div>
     <div id="caption"></div>
     <div id="prompt"></div>
     <div id="crosshair"></div>
     <div id="score"></div>
+    <div id="demo" hidden>
+      <b>demo</b>
+      <span class="mouse-only">click or press a key to take over · esc for the menu</span>
+      <span class="touch-only">tap to take over</span>
+    </div>
+    <div id="touch" hidden>
+      <div class="stick"><div class="knob"></div></div>
+      <div class="bar">
+        <button type="button" data-tap="view" class="riding">view</button>
+        <button type="button" data-tap="roof" class="foot">roof</button>
+        <button type="button" data-tap="weather">sky</button>
+        <button type="button" data-tap="pause" aria-label="pause">❚❚</button>
+      </div>
+      <div class="pad">
+        <button type="button" data-hold="fire" class="fire flyer">fire</button>
+        <button type="button" data-hold="down" class="flyer">down</button>
+        <button type="button" data-hold="jump" class="jump">jump</button>
+      </div>
+    </div>
     <div id="stats" hidden></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

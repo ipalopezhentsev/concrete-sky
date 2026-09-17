@@ -13,13 +13,26 @@ html, body {
   background: #0d0e10;
   color: var(--ink);
   font-family: "Helvetica Neue", Arial, sans-serif;
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.touch-only { display: none; }
+
+@media (pointer: coarse) {
+  .touch-only { display: revert; }
+  .mouse-only { display: none; }
 }
 
 canvas#view {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   display: block;
 }
 
@@ -74,6 +87,21 @@ canvas#view {
   letter-spacing: 0.08em;
   color: var(--dim);
 }
+
+#start .watch {
+  margin: -0.4rem 0 0;
+  padding: 8px 16px;
+  font: inherit;
+  font-size: 0.8rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--dim);
+  background: none;
+  border: 1px solid rgba(233, 231, 226, 0.25);
+  cursor: pointer;
+}
+
+#start .watch:hover, #start .watch:focus-visible { color: var(--ink); border-color: rgba(233, 231, 226, 0.6); }
 
 #start .gpu {
   margin: 0;
@@ -173,3 +201,134 @@ canvas#view {
   white-space: pre;
   pointer-events: none;
 }
+
+#demo {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  padding: 0 16px;
+  text-align: center;
+  font-size: 0.8rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--dim);
+  text-shadow: 0 0 8px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+
+#demo b, #demo span {
+  padding: 5px 10px;
+  background: rgba(10, 11, 13, 0.45);
+}
+
+#demo b {
+  margin-right: 0.4em;
+  font-weight: 400;
+  color: var(--ink);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+/* --- touch controls */
+
+#touch {
+  position: fixed;
+  inset: 0;
+  touch-action: none;
+}
+
+#touch[hidden] { display: none; }
+
+#touch .stick {
+  position: fixed;
+  left: calc(96px + env(safe-area-inset-left));
+  top: calc(100% - 110px - env(safe-area-inset-bottom));
+  width: 112px;
+  height: 112px;
+  margin: -56px 0 0 -56px;
+  border: 1.5px solid rgba(233, 231, 226, 0.35);
+  border-radius: 50%;
+  opacity: 0.35;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+#touch .stick.on { opacity: 0.9; }
+
+#touch .knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 48px;
+  height: 48px;
+  margin: -24px 0 0 -24px;
+  border-radius: 50%;
+  background: rgba(233, 231, 226, 0.35);
+}
+
+#touch button {
+  font: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: rgba(12, 13, 15, 0.35);
+  border: 1.5px solid rgba(233, 231, 226, 0.35);
+  touch-action: none;
+}
+
+#touch button.on { background: rgba(233, 231, 226, 0.3); }
+
+#touch .bar {
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top));
+  right: calc(12px + env(safe-area-inset-right));
+  display: flex;
+  gap: 8px;
+}
+
+#touch .bar button {
+  min-width: 48px;
+  height: 40px;
+  padding: 0 10px;
+  border-radius: 20px;
+}
+
+#touch .pad {
+  position: fixed;
+  right: calc(20px + env(safe-area-inset-right));
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-columns: 64px 84px;
+  grid-template-rows: 64px 84px;
+  gap: 10px;
+  align-items: end;
+  justify-items: end;
+}
+
+#touch .pad button {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+}
+
+#touch .pad .jump { grid-column: 2; grid-row: 2; width: 84px; height: 84px; }
+#touch .pad .fire { grid-column: 2; grid-row: 1; }
+#touch .pad [data-hold="down"] { grid-column: 1; grid-row: 2; }
+#touch .pad .fire.on { background: rgba(230, 120, 60, 0.45); }
+
+#touch:not([data-mode="flyer"]) .flyer,
+#touch[data-mode="foot"] .riding,
+#touch:not([data-mode="foot"]) .foot { display: none; }
+
+body.touchplay #prompt {
+  bottom: calc(22px + env(safe-area-inset-bottom));
+  padding: 12px 22px;
+  border: 1.5px solid rgba(233, 231, 226, 0.35);
+  border-radius: 24px;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+body.touchplay #prompt:not(.show) { pointer-events: none; }
+body.touchplay #score { top: calc(64px + env(safe-area-inset-top)); }

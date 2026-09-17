@@ -22,6 +22,8 @@ export interface Controls {
   fire: boolean;
   mouseDX: number;
   mouseDY: number;
+  /** Analog climb (-1..1) for a flyer; overrides up / down (autopilot). */
+  climb?: number;
 }
 
 export interface RideCamera {
@@ -147,16 +149,24 @@ export class Rides {
     return null;
   }
 
-  /** Start in a flyer (test hook). */
-  spawnFlyer(): void {
+  /** Start in a flyer where the player stands (test hook, demo). */
+  spawnFlyer(color: Vec3 = [0.9, 0.42, 0.12]): Flyer {
     const p = this.player.pos;
-    this.flyer = new Flyer(p[0], p[1], p[2], this.player.yaw, [0.9, 0.42, 0.12]);
+    this.flyer = new Flyer(p[0], p[1], p[2], this.player.yaw, color);
+    return this.flyer;
   }
 
-  /** Start in a car (test hook). */
-  spawnCar(): void {
+  /** Start in a car where the player stands (test hook, demo). */
+  spawnCar(color: Vec3 = [0.55, 0.16, 0.12]): Car {
     const p = this.player.pos;
-    this.car = new Car(p[0], p[1], p[2], this.player.yaw, false, [0.55, 0.16, 0.12]);
+    this.car = new Car(p[0], p[1], p[2], this.player.yaw, false, color);
+    return this.car;
+  }
+
+  /** Drop the current vehicle without parking it (demo cuts). */
+  leave(): void {
+    this.flyer = this.car = null;
+    this.cockpit = false;
   }
 
   /** Vehicle simulation for this frame (before the traffic of this frame is known). */
@@ -165,7 +175,7 @@ export class Rides {
     if (this.flyer) {
       pl.look(c.mouseDX, c.mouseDY);
       this.flyer.update(dt, {
-        moveX: c.moveX, moveZ: c.moveZ, up: (c.up ? 1 : 0) - (c.down ? 1 : 0), boost: c.sprint,
+        moveX: c.moveX, moveZ: c.moveZ, up: c.climb ?? (c.up ? 1 : 0) - (c.down ? 1 : 0), boost: c.sprint,
       }, pl.yaw, pl.pitch, this.colliders);
       pl.pos = [...this.flyer.pos];
     } else if (this.car) {

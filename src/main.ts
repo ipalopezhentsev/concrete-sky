@@ -2,10 +2,12 @@
 
 import { Audio } from "./audio";
 import { spawnPoint } from "./city/generate";
+import { Demo } from "./demo";
 import { add, cross, normalize, scale, setWorldSeed, type Vec3 } from "./math";
 import { Player, type Input } from "./player";
 import { Renderer, type Camera } from "./renderer";
 import { Rides, type Controls } from "./rides";
+import { TouchControls } from "./touch";
 import { STATES, Weather } from "./weather";
 import { World } from "./world";
 
@@ -19,6 +21,12 @@ const statsEl = document.getElementById("stats")!;
 const promptEl = document.getElementById("prompt")!;
 const crosshairEl = document.getElementById("crosshair")!;
 const scoreEl = document.getElementById("score")!;
+const demoEl = document.getElementById("demo")!;
+const watchEl = document.getElementById("watch")!;
+const touchEl = document.getElementById("touch")!;
+// phones and tablets: the title screen talks about tapping
+const coarse = matchMedia("(pointer: coarse)").matches;
+const verb = coarse ? "tap" : "click";
 
 let promptText = "";
 function prompt(text: string): void {
@@ -122,7 +130,9 @@ async function main(): Promise<void> {
     statusEl.textContent = `pouring concrete… ${Math.round(f * 100)}%`;
   });
   statusEl.hidden = true;
+  beginEl.textContent = `${verb} to run`;
   beginEl.hidden = false;
+  watchEl.hidden = false;
   if (params.has("shot")) startEl.classList.add("hidden");
   debug.ready = true;
 
@@ -146,46 +156,118 @@ async function main(): Promise<void> {
   if (params.get("vehicle") === "car") rides.spawnCar();
   else if (params.has("vehicle")) rides.spawnFlyer();
 
-  // --- input
+  // --- modes: the title screen, playing (mouse or touch), and the demo
+  type Mode = "title" | "play" | "demo";
+  let mode: Mode = "title";
+  let touchPlay = false; // playing with the on-screen controls instead of a locked mouse
+  let played = false;
+  let idle = 0;
+  const demo = new Demo(rides, player, weather);
+  // the title screen turns into the demo when left alone (not while testing views)
+  const attract = params.get("demo") !== "0" &&
+    !["shot", "pose", "autorun", "autofly", "vehicle"].some((k) => params.has(k));
+
   const keys = new Set<string>();
   let mouseDX = 0, mouseDY = 0;
   let firing = false;
-  let running = false;
   let notice = "";
   let noticeTime = 0;
+
+  const interact = () => {
+    const why = rides.interact();
+    if (why) {
+      notice = why;
+      noticeTime = 2;
+    }
+  };
+  const touch = new TouchControls(touchEl, (action) => {
+    if (action === "pause") setMode("title");
+    else if (action === "view" && rides.riding) rides.cockpit = !rides.cockpit;
+    else if (action === "roof" && !rides.riding) player.respawn();
+    else if (action === "weather") weather.next(6);
+  });
+
+  /** Switch mode; `title` false keeps the title screen hidden (a pointer lock is on its way). */
+  function setMode(m: Mode, title = true): void {
+    if (mode === "demo" && m !== "demo") demo.stop();
+    mode = m;
+    if (m !== "play") {
+      keys.clear();
+      firing = false;
+    }
+    if (title) startEl.classList.toggle("hidden", m !== "title");
+    demoEl.hidden = m !== "demo";
+    touch.show(m === "play" && touchPlay);
+    document.body.classList.toggle("touchplay", m === "play" && touchPlay);
+    if (m === "play") {
+      played = true;
+      beginEl.textContent = `${verb} to continue`;
+    }
+    if (m === "title") audio.stop();
+    idle = 0;
+  }
+
+  function play(withTouch: boolean): void {
+    audio.start();
+    touchPlay = withTouch;
+    if (withTouch) {
+      if (document.pointerLockElement) document.exitPointerLock();
+      document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
+      setMode("play");
+    } else {
+      // resolves with pointerlockchange; older browsers return nothing
+      (canvas.requestPointerLock?.() as Promise<void> | undefined)?.catch?.(() => {});
+    }
+  }
+
+  function startDemo(): void {
+    setMode("demo");
+    demo.start();
+  }
+
+  /** Any input during the demo takes over from wherever it is. */
+  function takeOver(withTouch: boolean): void {
+    setMode("title", false);
+    play(withTouch);
+  }
+
   window.addEventListener("keydown", (e) => {
-    keys.add(e.code);
+    idle = 0;
     if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
+    if (e.code === "F3") {
+      statsEl.hidden = !statsEl.hidden;
+      e.preventDefault();
+    }
+    if (mode === "demo" && !e.repeat && e.code !== "F3") {
+      if (e.code === "Escape") setMode("title");
+      else takeOver(false);
+    }
+    keys.add(e.code);
     if (e.repeat) return;
     if (e.code === "KeyN") weather.next(6);
     if (e.code === "KeyL") {
       weather.cycle = !weather.cycle;
       caption(weather.cycle ? "weather drifting" : "weather held");
     }
-    if (e.code === "KeyR" && running && !rides.riding) player.respawn();
-    if (e.code === "KeyE" && running) {
-      const why = rides.interact();
-      if (why) {
-        notice = why;
-        noticeTime = 2;
-      }
-    }
+    if (mode !== "play") return;
+    if (e.code === "KeyR" && !rides.riding) player.respawn();
+    if (e.code === "KeyE") interact();
     if (e.code === "KeyV" && rides.riding) rides.cockpit = !rides.cockpit;
-    if (e.code === "F3") {
-      statsEl.hidden = !statsEl.hidden;
-      e.preventDefault();
-    }
   });
   window.addEventListener("keyup", (e) => keys.delete(e.code));
   window.addEventListener("blur", () => {
     keys.clear();
     firing = false;
+    touch.reset();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && mode === "play" && touchPlay) setMode("title");
   });
   window.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement === canvas) {
       mouseDX += e.movementX;
       mouseDY += e.movementY;
-    }
+    } else idle = 0;
   });
   window.addEventListener("mousedown", (e) => {
     if (e.button === 0 && document.pointerLockElement === canvas) firing = true;
@@ -193,20 +275,38 @@ async function main(): Promise<void> {
   window.addEventListener("mouseup", (e) => {
     if (e.button === 0) firing = false;
   });
-  startEl.addEventListener("click", () => {
+  window.addEventListener("pointerdown", (e) => {
+    idle = 0;
+    if (mode !== "demo") return;
+    e.preventDefault();
+    takeOver(e.pointerType === "touch");
+  });
+  // a tap on the prompt is the E key
+  promptEl.addEventListener("pointerdown", (e) => {
+    if (mode !== "play" || !touchPlay) return;
+    e.stopPropagation();
+    interact();
+  });
+  let startPointer = "mouse";
+  startEl.addEventListener("pointerdown", (e) => {
+    startPointer = e.pointerType;
+  });
+  startEl.addEventListener("click", () => play(startPointer === "touch"));
+  watchEl.addEventListener("click", (e) => {
+    e.stopPropagation();
     audio.start();
-    void canvas.requestPointerLock?.();
+    startDemo();
   });
   document.addEventListener("pointerlockchange", () => {
-    running = document.pointerLockElement === canvas;
-    startEl.classList.toggle("hidden", running);
-    beginEl.textContent = "click to continue";
-    if (!running) {
-      keys.clear();
-      firing = false;
-      audio.stop();
-    }
+    if (document.pointerLockElement === canvas) {
+      touchPlay = false;
+      setMode("play");
+    } else if (mode === "play" && !touchPlay) setMode("title");
   });
+  document.addEventListener("pointerlockerror", () => {
+    if (mode !== "play") setMode("title");
+  });
+  if (params.has("demo") && attract) startDemo();
 
   // --- loop
   const autorun = Number(params.get("autorun")) || 0;
@@ -226,16 +326,24 @@ async function main(): Promise<void> {
     time += dt;
 
     const down = (...codes: string[]) => codes.some((c) => keys.has(c));
+    // a light push on the stick walks, a full one sprints (it's the throttle in a car)
+    const stick = touch.stick;
     const controls: Controls = {
-      moveX: (down("KeyD", "ArrowRight") ? 1 : 0) - (down("KeyA", "ArrowLeft") ? 1 : 0),
-      moveZ: (down("KeyW", "ArrowUp") ? 1 : 0) - (down("KeyS", "ArrowDown") ? 1 : 0),
-      up: down("Space"),
-      down: down("ControlLeft", "ControlRight", "KeyC"),
-      sprint: down("ShiftLeft", "ShiftRight"),
-      fire: firing || down("KeyF"),
-      mouseDX, mouseDY,
+      moveX: (down("KeyD", "ArrowRight") ? 1 : 0) - (down("KeyA", "ArrowLeft") ? 1 : 0) || touch.moveX,
+      moveZ: (down("KeyW", "ArrowUp") ? 1 : 0) - (down("KeyS", "ArrowDown") ? 1 : 0) || touch.moveZ,
+      up: down("Space") || touch.held.has("jump"),
+      down: down("ControlLeft", "ControlRight", "KeyC") || touch.held.has("down") ||
+        (!rides.riding && stick > 0 && stick < 0.45),
+      sprint: down("ShiftLeft", "ShiftRight") || stick > 0.92,
+      fire: firing || down("KeyF") || touch.held.has("fire"),
+      mouseDX: mouseDX + touch.lookDX,
+      mouseDY: mouseDY + touch.lookDY,
     };
-    const active = running || autorun > 0 || autofly;
+    touch.lookDX = touch.lookDY = 0;
+    if (mode === "demo") demo.update(dt, controls, rides.traffic);
+    else if (mode === "title" && attract && !played && (idle += dt) > 45) startDemo();
+    const running = mode === "play";
+    const active = running || mode === "demo" || autorun > 0 || autofly;
     if (rides.riding && active) {
       if (autofly) {
         controls.moveZ = 1;
@@ -305,10 +413,12 @@ async function main(): Promise<void> {
 
     // HUD
     noticeTime -= dt;
-    if (!running) prompt("");
-    else if (noticeTime > 0) prompt(notice);
-    else prompt(rides.promptText());
+    const promptNow = !running ? "" : noticeTime > 0 ? notice : rides.promptText();
+    // touch players tap the prompt itself, so drop the key name
+    prompt(touchPlay ? promptNow.replace(/^E\s+/, "") : promptNow);
+    if (running && touchPlay) touch.setMode(rides.flyer ? "flyer" : rides.car ? "car" : "foot");
     crosshairEl.classList.toggle("show", running && rides.flyer !== null && !params.has("shot"));
+    scoreEl.hidden = mode === "demo";
     const score = rides.combat.kills * 1000 + rides.combat.carKills;
     if (score !== shownKills) {
       shownKills = score;
@@ -320,7 +430,8 @@ async function main(): Promise<void> {
 
     fade = Math.min(1, fade + dt * 0.5);
     const blur = Math.max(0, Math.min(1, (speedNorm - 0.6) * 2.5));
-    renderer.render(cam, weather, world, rides.traffic, rides.particles, time, blur, fade);
+    const shade = mode === "demo" ? Math.min(fade, demo.fade) : fade;
+    renderer.render(cam, weather, world, rides.traffic, rides.particles, time, blur, shade);
     debug.frames++;
 
     // adaptive resolution: drop the internal scale if frames stay slow
@@ -351,6 +462,7 @@ async function main(): Promise<void> {
         flyerGrounded: rides.flyer?.grounded, carSpeed: rides.car?.speed,
         vehicles: t.cars.count + t.vans.count + t.flyers.count, kills: rides.combat.kills, carKills: rides.combat.carKills, seed,
         particles: rides.particles.glow.count + rides.particles.smoke.count,
+        mode, demo: demo.kind, touch: touchPlay,
       };
       if (!statsEl.hidden) {
         statsEl.textContent = [
