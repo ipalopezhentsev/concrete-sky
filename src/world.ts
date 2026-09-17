@@ -30,8 +30,7 @@ export class World {
   private pending = new Set<string>();
   private workers: Worker[] = [];
   private busy: number[] = [];
-  private collideKey = "";
-  private collideBoxes = new Float32Array(0);
+  private collideCache = new Map<string, Float32Array>(); // 3x3 cell neighbourhoods, most recent last
   stats = { regions: 0, drawn: 0, pending: 0 };
   /** Bumped whenever regions are added or removed. */
   version = 0;
@@ -91,7 +90,7 @@ export class World {
       center: [x0 + REGION / 2, z0 + REGION / 2],
     });
     for (const c of m.colliders) this.cells.set(key(c.ci, c.cj), c.boxes);
-    this.collideKey = "";
+    this.collideCache.clear();
     this.version++;
   }
 
@@ -127,7 +126,7 @@ export class World {
         r.mesh.dispose();
         this.regions.delete(k);
         this.version++;
-        this.collideKey = "";
+        this.collideCache.clear();
         for (let ci = i * REGION_CELLS; ci < (i + 1) * REGION_CELLS; ci++)
           for (let cj = j * REGION_CELLS; cj < (j + 1) * REGION_CELLS; cj++) this.cells.delete(key(ci, cj));
       }
@@ -158,7 +157,8 @@ export class World {
   colliders = (x: number, z: number): Float32Array => {
     const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
     const k = key(ci, cj);
-    if (k === this.collideKey) return this.collideBoxes;
+    const cached = this.collideCache.get(k);
+    if (cached) return cached;
     const parts: Float32Array[] = [];
     for (let i = ci - 1; i <= ci + 1; i++)
       for (let j = cj - 1; j <= cj + 1; j++) {
@@ -178,8 +178,9 @@ export class World {
       out.set(p, o);
       o += p.length;
     }
-    this.collideKey = k;
-    this.collideBoxes = out;
+    // the runner, hunters and bolts ask about different places in the same frame
+    if (this.collideCache.size >= 16) this.collideCache.delete(this.collideCache.keys().next().value!);
+    this.collideCache.set(k, out);
     return out;
   };
 

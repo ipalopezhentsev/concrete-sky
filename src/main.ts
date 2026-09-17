@@ -3,7 +3,8 @@
 import { Audio } from "./audio";
 import { spawnPoint } from "./city/generate";
 import { Demo } from "./demo";
-import { add, cross, normalize, scale, setWorldSeed, type Vec3 } from "./math";
+import { MAX_HEALTH } from "./hunters";
+import { add, cross, dot, normalize, scale, setWorldSeed, sub, type Vec3 } from "./math";
 import { Player, type Input } from "./player";
 import { Renderer, type Camera } from "./renderer";
 import { Rides, type Controls } from "./rides";
@@ -24,6 +25,10 @@ const scoreEl = document.getElementById("score")!;
 const demoEl = document.getElementById("demo")!;
 const watchEl = document.getElementById("watch")!;
 const touchEl = document.getElementById("touch")!;
+const healthEl = document.getElementById("health")!;
+const healthBar = healthEl.firstElementChild as HTMLElement;
+const hurtEl = document.getElementById("hurt")!;
+const markersEl = document.getElementById("markers")!;
 // phones and tablets: the title screen talks about tapping
 const coarse = matchMedia("(pointer: coarse)").matches;
 const verb = coarse ? "tap" : "click";
@@ -45,6 +50,8 @@ const debug = {
   stats: {} as Record<string, unknown>,
   /** Test hook: stand next to the nearest parked car. */
   toCar: () => false,
+  /** Test hook: put a hunter (foot, car or flyer) `ahead` metres in front of the player. */
+  hunter: (_kind: string, _ahead: number) => false,
 };
 (window as unknown as { __cs: typeof debug }).__cs = debug;
 
@@ -153,6 +160,17 @@ async function main(): Promise<void> {
     player.yaw = Math.PI;
     return true;
   };
+  debug.hunter = (kind, ahead) => {
+    const s = Math.sin(player.yaw), c = Math.cos(player.yaw);
+    const p = rides.focus;
+    const at: Vec3 = [p[0] + s * ahead, p[1] + (kind === "flyer" ? 6 : 0), p[2] + c * ahead];
+    const yaw = player.yaw + Math.PI;
+    const h = rides.hunters;
+    if (kind === "flyer") h.addFlyer(at, yaw);
+    else if (kind === "car") h.addCar(at, yaw);
+    else h.addRunner(at, yaw);
+    return true;
+  };
   if (params.get("vehicle") === "car") rides.spawnCar();
   else if (params.has("vehicle")) rides.spawnFlyer();
 
@@ -172,6 +190,15 @@ async function main(): Promise<void> {
   let firing = false;
   let notice = "";
   let noticeTime = 0;
+  // hunters chase the player unless turned off (H, or ?hunters=0)
+  let hunt = params.get("hunters") !== "0" && !["shot", "autorun", "autofly"].some((k) => params.has(k));
+  touchEl.toggleAttribute("data-hunt", hunt);
+  const setHunt = (on: boolean) => {
+    hunt = on;
+    touchEl.toggleAttribute("data-hunt", on);
+    if (!on) rides.hunters.clear();
+    caption(on ? "hunters on" : "hunters off");
+  };
 
   const interact = () => {
     const why = rides.interact();
@@ -185,6 +212,7 @@ async function main(): Promise<void> {
     else if (action === "view" && rides.riding) rides.cockpit = !rides.cockpit;
     else if (action === "roof" && !rides.riding) player.respawn();
     else if (action === "weather") weather.next(6);
+    else if (action === "hunt") setHunt(!hunt);
   });
 
   /** Switch mode; `title` false keeps the title screen hidden (a pointer lock is on its way). */
@@ -221,6 +249,7 @@ async function main(): Promise<void> {
   }
 
   function startDemo(): void {
+    rides.hunters.clear();
     setMode("demo");
     demo.start();
   }
@@ -249,6 +278,7 @@ async function main(): Promise<void> {
       weather.cycle = !weather.cycle;
       caption(weather.cycle ? "weather drifting" : "weather held");
     }
+    if (e.code === "KeyH" && mode !== "demo") setHunt(!hunt);
     if (mode !== "play") return;
     if (e.code === "KeyR" && !rides.riding) player.respawn();
     if (e.code === "KeyE") interact();
@@ -318,7 +348,9 @@ async function main(): Promise<void> {
   let slowFrames = 0;
   let fpsTime = 0, fpsFrames = 0, fps = 0, worst = 0, worstShown = 0;
   let prevEye = player.eye();
-  let shownKills = -1;
+  let shownScore = "";
+  let shownHits = 0;
+  const markers: HTMLElement[] = [];
 
   const frame = (now: number) => {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -394,11 +426,24 @@ async function main(): Promise<void> {
     const fovDeg = rideCam?.fov ?? player.fov;
     const cam: Camera = { eye, fwd, right, up, fov: (fovDeg * Math.PI) / 180, vel };
 
-    // vehicles, weapons, effects
+    // vehicles, hunters, weapons, effects
+    rides.hunters.active = running && hunt;
     rides.update(dt, time, { eye, fwd, roll, fov: fovDeg }, active && controls.fire);
+    const hunters = rides.hunters;
+    if (hunters.gotYou) {
+      caption("caught");
+      fade = 0.15;
+    }
     rides.collectInstances(eye);
     const events = rides.combat.takeEvents();
     for (let i = 0; i < events.shots; i++) audio.zap();
+    for (const p of events.hostile) {
+      audio.zap(Math.min(1, 30 / (Math.hypot(p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]) + 10)), 0.55);
+    }
+    if (hunters.hits !== shownHits) {
+      shownHits = hunters.hits;
+      audio.hurt();
+    }
     for (const p of [...events.hits, ...events.explosions]) {
       audio.boom(Math.hypot(p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]), events.hits.includes(p) ? 0.6 : 1);
     }
@@ -417,21 +462,55 @@ async function main(): Promise<void> {
     // touch players tap the prompt itself, so drop the key name
     prompt(touchPlay ? promptNow.replace(/^E\s+/, "") : promptNow);
     if (running && touchPlay) touch.setMode(rides.flyer ? "flyer" : rides.car ? "car" : "foot");
-    crosshairEl.classList.toggle("show", running && rides.flyer !== null && !params.has("shot"));
+    const armed = rides.flyer !== null || (!rides.riding && hunt);
+    crosshairEl.classList.toggle("show", running && armed && !params.has("shot"));
     scoreEl.hidden = mode === "demo";
-    const score = rides.combat.kills * 1000 + rides.combat.carKills;
-    if (score !== shownKills) {
-      shownKills = score;
-      const parts = [];
-      if (rides.combat.kills) parts.push(`flyers downed  ${rides.combat.kills}`);
-      if (rides.combat.carKills) parts.push(`cars wrecked  ${rides.combat.carKills}`);
-      scoreEl.textContent = parts.join("   ·   ");
+    const parts = [];
+    if (hunters.kills) parts.push(`hunters down  ${hunters.kills}`);
+    if (hunters.caught) parts.push(`caught  ${hunters.caught}`);
+    if (rides.combat.kills) parts.push(`flyers downed  ${rides.combat.kills}`);
+    if (rides.combat.carKills) parts.push(`cars wrecked  ${rides.combat.carKills}`);
+    const score = parts.join("   ·   ");
+    if (score !== shownScore) scoreEl.textContent = shownScore = score;
+    const hunted = running && hunt && params.get("hud") !== "0";
+    healthEl.hidden = !hunted;
+    healthBar.style.transform = `scaleX(${hunters.health / MAX_HEALTH})`;
+    healthEl.classList.toggle("low", hunters.health < MAX_HEALTH * 0.35);
+    hurtEl.style.opacity = hunted ? String(hunters.hurt) : "0";
+
+    // where the hunters are: a mark over those in view, arrows at the edge for the rest
+    let shown = 0;
+    if (hunted) {
+      const w = window.innerWidth, h = window.innerHeight;
+      const tanY = Math.tan(cam.fov / 2), tanX = tanY * (w / h);
+      for (const hunter of hunters.list) {
+        const to = sub(hunter.center, eye);
+        const dist = Math.hypot(...to);
+        if (hunter.dead || dist > 300) continue;
+        const cx = dot(to, right), cy = dot(to, up), cz = dot(to, fwd);
+        const el = markers[shown] ?? markersEl.appendChild(document.createElement("b"));
+        markers[shown++] = el;
+        el.hidden = false;
+        const sx = cx / (cz * tanX), sy = (cy + 1.4) / (cz * tanY);
+        if (cz > 0 && Math.abs(sx) < 0.95 && Math.abs(sy) < 0.9) {
+          el.hidden = dist < 25;
+          el.className = "here";
+          el.style.transform = `translate(${(0.5 + 0.5 * sx) * w}px, ${(0.5 - 0.5 * sy) * h}px) rotate(180deg)`;
+        } else {
+          const len = Math.hypot(cx, cy);
+          const [ux, uy] = len > 1e-3 ? [cx / len, cy / len] : [0, -1];
+          const k = 1 / Math.hypot(ux / (w * 0.45), uy / (h * 0.42));
+          el.className = "";
+          el.style.transform = `translate(${w / 2 + ux * k}px, ${h / 2 - uy * k}px) rotate(${Math.atan2(ux, uy)}rad)`;
+        }
+      }
     }
+    for (let i = shown; i < markers.length; i++) markers[i].hidden = true;
 
     fade = Math.min(1, fade + dt * 0.5);
     const blur = Math.max(0, Math.min(1, (speedNorm - 0.6) * 2.5));
     const shade = mode === "demo" ? Math.min(fade, demo.fade) : fade;
-    renderer.render(cam, weather, world, rides.traffic, rides.particles, time, blur, shade);
+    renderer.render(cam, weather, world, rides.vehicleLists, rides.particles, time, blur, shade);
     debug.frames++;
 
     // adaptive resolution: drop the internal scale if frames stay slow
@@ -462,6 +541,7 @@ async function main(): Promise<void> {
         flyerGrounded: rides.flyer?.grounded, carSpeed: rides.car?.speed,
         vehicles: t.cars.count + t.vans.count + t.flyers.count, kills: rides.combat.kills, carKills: rides.combat.carKills, seed,
         particles: rides.particles.glow.count + rides.particles.smoke.count,
+        hunters: hunters.list.map((x) => x.mode).join(","), health: hunters.health, hunterKills: hunters.kills, caught: hunters.caught,
         mode, demo: demo.kind, touch: touchPlay,
       };
       if (!statsEl.hidden) {
@@ -473,6 +553,7 @@ async function main(): Promise<void> {
           `pos ${player.pos.map((v) => v.toFixed(1)).join(" ")}`,
           `weather: ${weather.name}   city seed ${seed}`,
           `vehicles: ${t.cars.count} cars, ${t.vans.count} vans, ${t.flyers.count} flyers`,
+          `hunters: ${hunt ? hunters.list.map((x) => x.mode).join(" ") || "none yet" : "off"} (up to ${hunters.pressure})`,
           `gpu ms: ${renderer.timer.summary()}`,
         ].join("\n");
       }

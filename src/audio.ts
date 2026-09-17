@@ -195,20 +195,20 @@ export class Audio {
     this.washFilter.frequency.setTargetAtTime(400 + 700 * speedNorm, t, 0.3);
   }
 
-  /** A bolt leaving the gun. */
-  zap(): void {
+  /** A bolt leaving a gun; hunters' guns are pitched lower and fade with distance. */
+  zap(volume = 1, pitch = 1): void {
     const ctx = this.ctx;
     if (!ctx || ctx.state !== "running") return;
     const t = ctx.currentTime;
     const o = ctx.createOscillator();
     o.type = "sawtooth";
-    o.frequency.setValueAtTime(1800 + Math.random() * 300, t);
-    o.frequency.exponentialRampToValueAtTime(180, t + 0.14);
+    o.frequency.setValueAtTime((1800 + Math.random() * 300) * pitch, t);
+    o.frequency.exponentialRampToValueAtTime(180 * pitch, t + 0.14);
     const f = ctx.createBiquadFilter();
     f.type = "bandpass";
     f.frequency.value = 1200;
     const g = ctx.createGain();
-    g.gain.setValueAtTime(0.12, t);
+    g.gain.setValueAtTime(0.12 * volume, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
     o.connect(f).connect(g).connect(this.master);
     o.start(t);
@@ -316,6 +316,36 @@ export class Audio {
     thump.connect(tg).connect(this.master);
     thump.start(t);
     thump.stop(t + 0.12);
+  }
+
+  /** Taking a hit. */
+  hurt(): void {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.stepNoise;
+    src.playbackRate.value = 0.8;
+    const f = ctx.createBiquadFilter();
+    f.type = "bandpass";
+    f.frequency.value = 900;
+    f.Q.value = 0.8;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.5, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    src.connect(f).connect(g).connect(this.master);
+    src.start(t);
+    src.stop(t + 0.2);
+    const o = ctx.createOscillator();
+    o.type = "triangle";
+    o.frequency.setValueAtTime(160, t);
+    o.frequency.exponentialRampToValueAtTime(50, t + 0.2);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.4, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+    o.connect(og).connect(this.master);
+    o.start(t);
+    o.stop(t + 0.24);
   }
 
   landing(strength: number): void {

@@ -1,5 +1,5 @@
 // Headless movement tests: run with `npx tsx tests/traversal.test.ts`.
-import { Builder, buildRegion, CELL, edgeBridge, facadeStair, podiumHeight, STREET, stairTower } from "../src/city/generate";
+import { Builder, bridgeOn, buildRegion, CELL, edgeBridge, facadeStair, PODIUM_LEVELS, podiumHeight, spawnPoint, STREET, stairTower } from "../src/city/generate";
 import { Rng, setWorldSeed } from "../src/math";
 import { Player, type Input } from "../src/player";
 import { Flyer, type FlyInput } from "../src/vehicles/flyer";
@@ -9,6 +9,7 @@ import { Traffic } from "../src/vehicles/traffic";
 import { Combat } from "../src/effects/combat";
 import { Particles } from "../src/effects/particles";
 import { DrivePilot, FlyPilot, RunPilot } from "../src/demo";
+import { Hunters, MAX_HEALTH, type Quarry } from "../src/hunters";
 
 let failures = 0;
 const check = (name: string, ok: boolean, detail = "") => {
@@ -419,35 +420,38 @@ for (const seed of [1971, 42, 777777]) {
   setWorldSeed(1971);
 }
 
+// A real city's colliders, generated on demand (like World.colliders).
+function cityColliders(): (x: number, z: number) => Float32Array {
+  const cells = new Map<string, Float32Array>();
+  const cache = new Map<string, Float32Array>();
+  return (x: number, z: number): Float32Array => {
+    const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+    const hit = cache.get(`${ci},${cj}`);
+    if (hit) return hit;
+    const parts: Float32Array[] = [];
+    for (let i = ci - 1; i <= ci + 1; i++)
+      for (let j = cj - 1; j <= cj + 1; j++) {
+        if (!cells.has(`${i},${j}`)) {
+          for (const c of buildRegion(Math.floor(i / 3), Math.floor(j / 3)).colliders) cells.set(`${c.ci},${c.cj}`, c.boxes);
+        }
+        parts.push(cells.get(`${i},${j}`)!);
+      }
+    const out = new Float32Array(parts.reduce((s, p) => s + p.length, 0));
+    let o = 0;
+    for (const p of parts) {
+      out.set(p, o);
+      o += p.length;
+    }
+    cache.set(`${ci},${cj}`, out);
+    return out;
+  };
+}
+
+// deterministic "random" choices
+const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+
 // 12. demo autopilots in real cities: run the decks, fly the corridors, drive the cross streets
 {
-  const cityColliders = () => {
-    const cells = new Map<string, Float32Array>();
-    let lastKey = "", last = new Float32Array(0);
-    return (x: number, z: number): Float32Array => {
-      const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
-      if (`${ci},${cj}` === lastKey) return last;
-      const parts: Float32Array[] = [];
-      for (let i = ci - 1; i <= ci + 1; i++)
-        for (let j = cj - 1; j <= cj + 1; j++) {
-          if (!cells.has(`${i},${j}`)) {
-            for (const c of buildRegion(Math.floor(i / 3), Math.floor(j / 3)).colliders) cells.set(`${c.ci},${c.cj}`, c.boxes);
-          }
-          parts.push(cells.get(`${i},${j}`)!);
-        }
-      last = new Float32Array(parts.reduce((s, p) => s + p.length, 0));
-      let o = 0;
-      for (const p of parts) {
-        last.set(p, o);
-        o += p.length;
-      }
-      lastKey = `${ci},${cj}`;
-      return last;
-    };
-  };
-  // deterministic "random" choices
-  const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
-
   for (const seed of [1971, 42, 777777]) {
     setWorldSeed(seed);
     const colliders = cityColliders();
@@ -515,6 +519,152 @@ for (const seed of [1971, 42, 777777]) {
       check(`demo car gives way and keeps its lane (seed ${seed})`, impacts === 0 && drift < 1.5 && crossed >= 8,
         `impacts=${impacts} drift=${drift.toFixed(2)} avenues=${crossed} x=${car.pos[0].toFixed(0)}`);
     }
+  }
+  setWorldSeed(1971);
+}
+
+// 13. hunters in real cities: chase over the bridges, take a flyer, fly in, drive in; shooting both ways
+{
+  type V3 = [number, number, number];
+  const huntWorld = (colliders: (x: number, z: number) => Float32Array) => {
+    const particles = new Particles();
+    return { colliders, traffic: new Traffic(), parking: new Parking(), combat: new Combat(particles), particles };
+  };
+  const setup = (colliders: (x: number, z: number) => Float32Array, seed: number) => {
+    const w = huntWorld(colliders);
+    const hunters = new Hunters(w, lcg(seed));
+    hunters.active = true;
+    hunters.auto = false;
+    return { w, hunters };
+  };
+  /** Run the hunt for up to `seconds`, the quarry standing still, until `done`. Returns the seconds taken. */
+  const hunt = (w: ReturnType<typeof huntWorld>, hunters: Hunters, q: Quarry, seconds: number, done: () => boolean) => {
+    const eye: V3 = [q.pos[0], q.pos[1] + 1.6, q.pos[2]];
+    let t = 0;
+    for (; t < seconds * 60 && !done(); t++) {
+      w.traffic.update(t / 60, eye, [0, 0, 1]);
+      hunters.update(1 / 60, q, { eye, fwd: [0, 0, 1] });
+      w.combat.update(1 / 60, w.traffic, w.parking, w.colliders, hunters);
+      w.particles.update(1 / 60);
+    }
+    return t / 60;
+  };
+  const standing = (pos: V3): Quarry => ({ pos, vel: [0, 0, 0], mode: "foot", yaw: 0 });
+
+  for (const seed of [1971, 42, 777777]) {
+    setWorldSeed(seed);
+    const colliders = cityColliders();
+    const s = spawnPoint();
+
+    // on foot, from a deck two bridges away
+    {
+      const depth = new Map<string, number>([["0,0", 0]]);
+      const queue: [number, number][] = [[0, 0]];
+      let far: [number, number] | null = null;
+      while (queue.length && !far) {
+        const [i, j] = queue.shift()!;
+        for (let side = 0; side < 4 && !far; side++) {
+          if (bridgeOn(i, j, side) === null) continue;
+          const n: [number, number] = [i + [1, 0, -1, 0][side], j + [0, 1, 0, -1][side]];
+          if (depth.has(n.join())) continue;
+          depth.set(n.join(), depth.get(`${i},${j}`)! + 1);
+          if (depth.get(n.join()) === 2) far = n;
+          queue.push(n);
+        }
+      }
+      const { w, hunters } = setup(colliders, seed);
+      const q = standing([s.x, s.y, s.z]);
+      const start = new RunPilot(far![0], far![1], colliders).start;
+      const h = hunters.addRunner(start);
+      let low = Infinity;
+      const took = hunt(w, hunters, q, 90, () => {
+        low = Math.min(low, h.body.pos[1]);
+        return hunters.health < MAX_HEALTH - 10;
+      });
+      const dist = Math.hypot(h.pos[0] - q.pos[0], h.pos[2] - q.pos[2]);
+      check(`hunter on foot crosses the bridges and shoots (seed ${seed})`, hunters.health < MAX_HEALTH - 10 && low > PODIUM_LEVELS[0] - 1,
+        `from block ${far} took=${took.toFixed(1)}s dist=${dist.toFixed(1)} health=${hunters.health.toFixed(0)} lowest=${low.toFixed(1)}`);
+    }
+
+    // takes the parked flyer on the deck when the quarry is up in the air, and flies after it
+    {
+      const { w, hunters } = setup(colliders, seed);
+      w.parking.sync(buildRegion(0, 0).pads, []);
+      const q: Quarry = { pos: [60, 110, 300], vel: [0, 0, 0], mode: "flyer", yaw: 0 };
+      const h = hunters.addRunner([s.x, s.y, s.z]);
+      const boarded = hunt(w, hunters, q, 30, () => h.flyer !== null);
+      const took = hunt(w, hunters, q, 60, () => Math.hypot(h.pos[0] - q.pos[0], h.pos[1] - q.pos[1], h.pos[2] - q.pos[2]) < 60);
+      const dist = Math.hypot(h.pos[0] - q.pos[0], h.pos[1] - q.pos[1], h.pos[2] - q.pos[2]);
+      check(`hunter takes a parked flyer and flies after the quarry (seed ${seed})`, h.flyer !== null && dist < 60,
+        `boarded after ${boarded.toFixed(1)}s, then ${took.toFixed(1)}s dist=${dist.toFixed(0)} pos=${h.pos.map((v) => v.toFixed(0))}`);
+    }
+
+    // a hunter flyer comes in over the towers
+    {
+      const { w, hunters } = setup(colliders, seed);
+      const q = standing([s.x, s.y, s.z]);
+      const h = hunters.addFlyer([s.x + 190, 70, s.z + 120], -2);
+      let bumps = 0, prev = 0;
+      const took = hunt(w, hunters, q, 60, () => {
+        const v = Math.hypot(...h.flyer!.vel);
+        if (prev > 15 && v < prev * 0.6) bumps++;
+        prev = v;
+        return hunters.health < MAX_HEALTH - 10;
+      });
+      const flat = Math.hypot(h.pos[0] - q.pos[0], h.pos[2] - q.pos[2]);
+      check(`hunter flyer closes in and shoots (seed ${seed})`, hunters.health < MAX_HEALTH - 10 && bumps <= 1,
+        `took=${took.toFixed(1)}s flat=${flat.toFixed(0)} height=${(h.pos[1] - q.pos[1]).toFixed(0)} bumps=${bumps}`);
+    }
+
+    // a hunter car comes along a cross street, turns up the avenue and gets the quarry
+    {
+      const { w, hunters } = setup(colliders, seed);
+      const q = standing([2 * CELL + 7.5, 0.18, 44]);
+      const h = hunters.addCar([-40, 0, CELL + 3.5], Math.PI / 2, [0, 0, 0], 15);
+      const took = hunt(w, hunters, q, 60, () => hunters.health < MAX_HEALTH - 10);
+      const dist = Math.hypot(h.pos[0] - q.pos[0], h.pos[2] - q.pos[2]);
+      check(`hunter car drives the grid to the quarry (seed ${seed})`, hunters.health < MAX_HEALTH - 10,
+        `took=${took.toFixed(1)}s dist=${dist.toFixed(1)} pos=${h.pos.map((v) => v.toFixed(1))} traffic wrecked=${w.traffic.removed.size}`);
+    }
+  }
+
+  // bolts: the player's hit hunters; the hunters' hit the player and nothing else
+  {
+    setWorldSeed(1971);
+    const noBoxes = () => new Float32Array(0);
+    const w = huntWorld(noBoxes);
+    const hunters = new Hunters(w, lcg(5));
+    hunters.active = true;
+    hunters.auto = false;
+    const runner = hunters.addRunner([0, 0, 25]);
+    const flyer = hunters.addFlyer([0, 30, 60]);
+    for (let f = 0; f < 60 && hunters.kills === 0; f++) {
+      w.combat.triggerSidearm([0, 1.4, 0.5], runner.center, [0, 0, 0]);
+      w.combat.update(1 / 60, w.traffic, w.parking, noBoxes, hunters);
+    }
+    check("sidearm takes down a hunter on foot", hunters.kills === 1 && runner.dead);
+    let shots = 0;
+    for (let f = 0; f < 240 && hunters.kills < 2; f++) {
+      if (f % 20 === 0) {
+        w.combat.shoot([0, 1.4, 0.5], flyer.center, [0, 0, 0]);
+        shots++;
+      }
+      w.combat.update(1 / 60, w.traffic, w.parking, noBoxes, hunters);
+    }
+    check("a hunter flyer takes three hits", hunters.kills === 2 && shots === 3, `shots=${shots} kills=${hunters.kills}`);
+
+    // hostile bolts down an avenue full of traffic, at a quarry beyond it
+    const eye: V3 = [-2.5, 1.5, 0];
+    const far = standing([-2.5, 0, 200]);
+    hunters.update(1 / 60, far, { eye, fwd: [0, 0, 1] });
+    const before = hunters.health;
+    for (let f = 0; f < 90; f++) {
+      w.traffic.update(5 + f / 60, eye, [0, 0, 1]);
+      if (f % 6 === 0) w.combat.shoot([-2.5, 1.2, 1], [-2.5, 1.2, 200], [0, 0, 0], true);
+      w.combat.update(1 / 60, w.traffic, w.parking, noBoxes, hunters);
+    }
+    check("hunter bolts pass through traffic and hit the player", w.combat.carKills === 0 && w.combat.kills === 0 &&
+      w.traffic.removed.size === 0 && hunters.health < before, `health=${hunters.health.toFixed(0)}`);
   }
   setWorldSeed(1971);
 }

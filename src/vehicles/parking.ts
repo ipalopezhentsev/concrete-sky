@@ -35,7 +35,8 @@ export class Parking {
   private gone = new Set<string>(); // city vehicles taken or destroyed
   private dropCount = 0;
   version = 0;
-  private boxCache: { key: string; boxes: Float32Array } = { key: "", boxes: new Float32Array(0) };
+  private boxCache = new Map<string, Float32Array>();
+  private boxVersion = -1;
 
   /** Replace the city-spawned vehicles with those of the currently loaded regions. */
   sync(pads: Iterable<Pad & { id: string }>, cars: Iterable<ParkedCar & { id: string }>): void {
@@ -120,15 +121,21 @@ export class Parking {
 
   /** Collision boxes of parked vehicles near (x, z). */
   boxes(x: number, z: number): Float32Array {
-    const key = `${this.version}:${Math.round(x / 40)},${Math.round(z / 40)}`;
-    if (key === this.boxCache.key) return this.boxCache.boxes;
+    if (this.boxVersion !== this.version) {
+      this.boxCache.clear();
+      this.boxVersion = this.version;
+    }
+    const key = `${Math.round(x / 40)},${Math.round(z / 40)}`;
+    const cached = this.boxCache.get(key);
+    if (cached) return cached;
     const list: number[] = [];
     for (const p of this.all()) {
       if (Math.abs(p.x - x) > 160 || Math.abs(p.z - z) > 160) continue;
       const f = footprint(p.kind, p.yaw);
       list.push(p.x - f.hx, p.y, p.z - f.hz, p.x + f.hx, p.y + f.h, p.z + f.hz);
     }
-    this.boxCache = { key, boxes: Float32Array.from(list) };
-    return this.boxCache.boxes;
+    const boxes = Float32Array.from(list);
+    this.boxCache.set(key, boxes);
+    return boxes;
   }
 }

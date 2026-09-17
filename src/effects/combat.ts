@@ -1,4 +1,5 @@
-// Flyer weapons: bolts, hits on other flyers, and burning wrecks that fall and explode.
+// Weapons: the flyer guns, the sidearm and the hunters' guns; bolts, hits, and
+// burning wrecks that fall and explode.
 
 import type { Vec3 } from "../math";
 import type { Colliders } from "../player";
@@ -6,9 +7,12 @@ import type { Parking } from "../vehicles/parking";
 import type { InstanceList, Traffic } from "../vehicles/traffic";
 import type { Particles } from "./particles";
 
-const BOLT_SPEED = 260;
+export const BOLT_SPEED = 260;
 const BOLT_LIFE = 2.2;
 const FIRE_INTERVAL = 0.12;
+const SIDEARM_INTERVAL = 0.22;
+const TRACER: Vec3 = [3, 6, 14];
+const HOSTILE_TRACER: Vec3 = [16, 2.2, 1.2];
 const HIT_RADIUS = 2.4;
 const WRECK_GRAVITY = 14;
 
@@ -16,6 +20,7 @@ interface Bolt {
   pos: Vec3;
   vel: Vec3;
   life: number;
+  hostile: boolean; // fired by a hunter
 }
 
 /** A car blown into the air; it lands as a burnt-out wreck. */
@@ -72,8 +77,17 @@ function segmentSphere(a: Vec3, b: Vec3, c: Vec3, r: number): boolean {
   return Math.hypot(a[0] + ab[0] * t - c[0], a[1] + ab[1] * t - c[1], a[2] + ab[2] * t - c[2]) < r;
 }
 
+/** Things bolts can hit besides traffic, parked vehicles and buildings. */
+export interface BoltTargets {
+  /** A player's bolt moving a -> b: true if it hit a hunter (who has taken the hit). */
+  hunterAlong(a: Vec3, b: Vec3): boolean;
+  /** A hunter's bolt moving a -> b: true if it hit the player (who has taken the hit). */
+  playerAlong(a: Vec3, b: Vec3): boolean;
+}
+
 export interface CombatEvents {
   shots: number;
+  hostile: Vec3[]; // where hunters fired from
   hits: Vec3[];
   explosions: Vec3[];
 }
@@ -87,7 +101,7 @@ export class Combat {
   private cooldown = 0;
   private side = 1;
   kills = 0;
-  events: CombatEvents = { shots: 0, hits: [], explosions: [] };
+  events: CombatEvents = { shots: 0, hostile: [], hits: [], explosions: [] };
 
   constructor(private particles: Particles) {}
 
@@ -103,81 +117,107 @@ export class Combat {
       muzzleBase[1] + 0.9,
       muzzleBase[2] + c * 2.0 + s * 1.2 * this.side,
     ];
+    this.shoot(muzzle, target, inherit);
+  }
+
+  /** The runner's sidearm, if it is ready. */
+  triggerSidearm(muzzle: Vec3, target: Vec3, inherit: Vec3): void {
+    if (this.cooldown > 0) return;
+    this.cooldown = SIDEARM_INTERVAL;
+    this.shoot(muzzle, target, inherit);
+  }
+
+  /** Fire one bolt from muzzle toward target (no cooldown). */
+  shoot(muzzle: Vec3, target: Vec3, inherit: Vec3, hostile = false): void {
     const d: Vec3 = [target[0] - muzzle[0], target[1] - muzzle[1], target[2] - muzzle[2]];
     const len = Math.hypot(...d) || 1;
     const vel: Vec3 = [0, 1, 2].map((k) => (d[k] / len) * BOLT_SPEED + inherit[k]) as Vec3;
-    this.bolts.push({ pos: muzzle, vel, life: BOLT_LIFE });
-    this.particles.muzzle(muzzle, inherit);
-    this.events.shots++;
+    this.bolts.push({ pos: [...muzzle], vel, life: BOLT_LIFE, hostile });
+    this.particles.muzzle(muzzle, inherit, hostile ? HOSTILE_TRACER : undefined);
+    if (hostile) this.events.hostile.push([...muzzle]);
+    else this.events.shots++;
   }
 
-  private addWreck(pos: Vec3, vel: Vec3, yaw: number, color: Vec3): void {
+  /** Send a flyer down in flames; `count` adds it to the flyers downed. */
+  wreckFlyer(pos: Vec3, vel: Vec3, yaw: number, color: Vec3, count = true): void {
     const r = () => (Math.random() - 0.5);
     this.wrecks.push({
       pos: [...pos], vel: [vel[0] + r() * 6, vel[1] + 4, vel[2] + r() * 6], rot: [yaw, 0, 0],
       spin: [r() * 3, 1 + Math.random() * 1.5, r() * 5], color: [color[0] * 0.35, color[1] * 0.3, color[2] * 0.3],
       age: 0, smoke: 0,
     });
-    this.kills++;
+    if (count) this.kills++;
     this.particles.explosion([pos[0], pos[1] + 0.8, pos[2]], vel, 0.45);
     this.events.hits.push([...pos]);
   }
 
-  private addCarWreck(pos: Vec3, yaw: number, van: boolean, color: Vec3, inherit: Vec3): void {
+  /** Blow a car into the air; `count` adds it to the cars wrecked. */
+  wreckCar(pos: Vec3, yaw: number, van: boolean, color: Vec3, inherit: Vec3, count = true): void {
     this.carWrecks.push({
       pos: [...pos], vel: [inherit[0] * 0.5 + (Math.random() - 0.5) * 3, 6 + Math.random() * 3, inherit[2] * 0.5 + (Math.random() - 0.5) * 3],
       ground: pos[1], yaw, tumble: 0, spin: (Math.random() < 0.5 ? -1 : 1) * (4 + Math.random() * 3), van,
       color: [color[0] * 0.18 + 0.02, color[1] * 0.16 + 0.02, color[2] * 0.15 + 0.02],
     });
-    this.carKills++;
+    if (count) this.carKills++;
     const c: Vec3 = [pos[0], pos[1] + 0.9, pos[2]];
     this.particles.explosion(c, [0, 2, 0], 0.8);
     this.events.explosions.push(c);
   }
 
-  update(dt: number, traffic: Traffic, parking: Parking, colliders: Colliders): void {
+  /** A player bolt moving a -> b against flyers and cars; true if it hit one. */
+  private hitVehicle(a: Vec3, e: Vec3, traffic: Traffic, parking: Parking): boolean {
+    // flyers in the air corridors
+    const hit = traffic.flyerAlong(a, e, HIT_RADIUS);
+    if (hit) {
+      traffic.removed.add(hit.key);
+      this.wreckFlyer(hit.pos, hit.vel, hit.yaw, hit.color);
+      return true;
+    }
+    // parked flyers
+    for (const p of parking.all()) {
+      if (p.kind !== "flyer" || Math.abs(p.x - a[0]) > 12 && Math.abs(p.x - e[0]) > 12) continue;
+      if (segmentSphere(a, e, [p.x, p.y + 0.8, p.z], HIT_RADIUS)) {
+        parking.remove(p);
+        this.wreckFlyer([p.x, p.y, p.z], [0, 0, 0], p.yaw, p.color);
+        return true;
+      }
+    }
+
+    // cars in traffic and at the kerb (a bolt stops at whichever it meets first)
+    const moving = traffic.carAlong(a, e, segmentBox);
+    if (moving) {
+      traffic.removed.add(moving.key);
+      this.wreckCar(moving.pos, moving.yaw, moving.van, moving.color, moving.vel);
+      return true;
+    }
+    const parkedCar = parking.carAlong(a, e, segmentBox);
+    if (parkedCar) {
+      parking.remove(parkedCar);
+      this.wreckCar([parkedCar.x, parkedCar.y, parkedCar.z], parkedCar.yaw, parkedCar.kind === "van", parkedCar.color, [0, 0, 0]);
+      return true;
+    }
+    return false;
+  }
+
+  update(dt: number, traffic: Traffic, parking: Parking, colliders: Colliders, targets?: BoltTargets): void {
     this.cooldown -= dt;
     const survivors: Bolt[] = [];
     for (const b of this.bolts) {
       b.life -= dt;
       const a = b.pos;
       const e: Vec3 = [a[0] + b.vel[0] * dt, a[1] + b.vel[1] * dt, a[2] + b.vel[2] * dt];
-      this.particles.tracer(a, [3, 6, 14]);
-      this.particles.tracer([(a[0] + e[0]) / 2, (a[1] + e[1]) / 2, (a[2] + e[2]) / 2], [3, 6, 14]);
+      const tint = b.hostile ? HOSTILE_TRACER : TRACER;
+      this.particles.tracer(a, tint);
+      this.particles.tracer([(a[0] + e[0]) / 2, (a[1] + e[1]) / 2, (a[2] + e[2]) / 2], tint);
 
-      // flyers in the air corridors
-      const hit = traffic.flyerAlong(a, e, HIT_RADIUS);
-      if (hit) {
-        traffic.removed.add(hit.key);
-        this.addWreck(hit.pos, hit.vel, hit.yaw, hit.color);
-        continue;
-      }
-      // parked flyers
-      let parkedHit = false;
-      for (const p of parking.all()) {
-        if (p.kind !== "flyer" || Math.abs(p.x - a[0]) > 12 && Math.abs(p.x - e[0]) > 12) continue;
-        if (segmentSphere(a, e, [p.x, p.y + 0.8, p.z], HIT_RADIUS)) {
-          parking.remove(p);
-          this.addWreck([p.x, p.y, p.z], [0, 0, 0], p.yaw, p.color);
-          parkedHit = true;
-          break;
+      if (b.hostile) {
+        // hunters only aim at the player
+        if (targets?.playerAlong(a, e)) {
+          this.particles.sparks(e, 6);
+          continue;
         }
-      }
-      if (parkedHit) continue;
-
-      // cars in traffic and at the kerb (a bolt stops at whichever it meets first)
-      const moving = traffic.carAlong(a, e, segmentBox);
-      if (moving) {
-        traffic.removed.add(moving.key);
-        this.addCarWreck(moving.pos, moving.yaw, moving.van, moving.color, moving.vel);
-        continue;
-      }
-      const parkedCar = parking.carAlong(a, e, segmentBox);
-      if (parkedCar) {
-        parking.remove(parkedCar);
-        this.addCarWreck([parkedCar.x, parkedCar.y, parkedCar.z], parkedCar.yaw, parkedCar.kind === "van", parkedCar.color, [0, 0, 0]);
-        continue;
-      }
+      } else if (targets?.hunterAlong(a, e)) continue;
+      else if (this.hitVehicle(a, e, traffic, parking)) continue;
 
       // buildings and ground
       const boxes = colliders(e[0], e[2]);
@@ -272,7 +312,7 @@ export class Combat {
   /** Take and reset this frame's events (for sound). */
   takeEvents(): CombatEvents {
     const e = this.events;
-    this.events = { shots: 0, hits: [], explosions: [] };
+    this.events = { shots: 0, hostile: [], hits: [], explosions: [] };
     return e;
   }
 }

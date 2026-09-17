@@ -289,6 +289,21 @@ export class Traffic {
     return best;
   }
 
+  /** Moving cars and vans whose boxes overlap the area x0..x1, z0..z1 below height top. */
+  carsTouching(x0: number, z0: number, x1: number, z1: number, top: number): (TrafficHit & { van: boolean })[] {
+    const out: (TrafficHit & { van: boolean })[] = [];
+    for (const [list, van, hx, hz] of [[this.cars, false, 0.98, 2.23], [this.vans, true, 1.02, 2.83]] as const) {
+      for (let i = 0; i < list.count; i++) {
+        const o = i * STRIDE, d = list.data;
+        if (list.keys[i] < 0 || d[o + 1] > top) continue;
+        const along = Math.abs(Math.sin(d[o + 3])) > 0.5;
+        const ex = along ? hz : hx, ez = along ? hx : hz;
+        if (d[o] - ex < x1 && d[o] + ex > x0 && d[o + 2] - ez < z1 && d[o + 2] + ez > z0) out.push({ ...this.hitOf(list, i), van });
+      }
+    }
+    return out;
+  }
+
   /** Collision boxes of moving cars near (x, z), for the player's car. */
   carBoxes(x: number, z: number, radius: number): Float32Array {
     const out: number[] = [];

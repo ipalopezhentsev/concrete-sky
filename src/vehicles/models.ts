@@ -70,6 +70,32 @@ export function flyerBoxes(): ModelBox[] {
   ];
 }
 
+/**
+ * A hunter on foot: long dark coat, helmet with a red visor, gun held forward.
+ * stride -1..1 swings the legs and the free arm (0 is standing).
+ */
+export function figureBoxes(stride: number): ModelBox[] {
+  const leg = stride * 0.24, arm = -stride * 0.16;
+  return [
+    box(0.05, 0, -0.09 + leg, 0.23, 0.92, 0.1 + leg, Mat.Paint, true),
+    box(-0.23, 0, -0.09 - leg, -0.05, 0.92, 0.1 - leg, Mat.Paint, true),
+    box(0.04, 0, 0.1 + leg, 0.24, 0.1, 0.22 + leg, Mat.Metal),
+    box(-0.24, 0, 0.1 - leg, -0.04, 0.1, 0.22 - leg, Mat.Metal),
+    // coat and shoulders
+    box(-0.27, 0.62, -0.16, 0.27, 1.5, 0.15, Mat.Paint, true),
+    box(-0.3, 1.36, -0.15, 0.3, 1.5, 0.14, Mat.Metal),
+    // free arm swings, gun arm points ahead
+    box(0.27, 0.86, -0.07 + arm, 0.38, 1.46, 0.07 + arm, Mat.Paint, true),
+    box(-0.38, 1.24, -0.06, -0.27, 1.38, 0.42, Mat.Paint, true),
+    box(-0.37, 1.26, 0.38, -0.29, 1.37, 0.74, Mat.Metal),
+    box(-0.35, 1.29, 0.74, -0.31, 1.33, 0.76, Mat.Tail),
+    // helmet and visor
+    box(-0.12, 1.5, -0.13, 0.12, 1.8, 0.12, Mat.Metal),
+    box(-0.1, 1.61, 0.12, 0.1, 1.67, 0.14, Mat.Tail),
+    box(-0.08, 1.2, -0.18, 0.08, 1.24, -0.16, Mat.Tail),
+  ];
+}
+
 /** Flatten a model to 12-float boxes with a white tint (for instanced meshes). */
 export function modelData(model: ModelBox[]): number[] {
   const out: number[] = [];

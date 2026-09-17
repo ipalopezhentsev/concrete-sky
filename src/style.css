@@ -191,6 +191,67 @@ canvas#view {
   pointer-events: none;
 }
 
+/* --- hunters */
+
+#hurt {
+  position: fixed;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(150, 12, 6, 0) 40%, rgba(150, 12, 6, 0.6) 100%);
+}
+
+#health {
+  position: fixed;
+  left: 50%;
+  top: calc(20px + env(safe-area-inset-top));
+  width: 160px;
+  height: 3px;
+  margin-left: -80px;
+  background: rgba(233, 231, 226, 0.18);
+  pointer-events: none;
+}
+
+#health[hidden] { display: none; }
+
+#health i {
+  display: block;
+  height: 100%;
+  background: rgba(233, 231, 226, 0.85);
+  transform-origin: left;
+  transition: transform 0.15s ease-out;
+}
+
+#health.low i { background: #e0473a; }
+
+#markers {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* an arrow pointing up, turned toward the hunter */
+#markers b {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  margin: -6px 0 0 -7px;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 12px solid rgba(230, 64, 48, 0.85);
+}
+
+#markers b.here {
+  margin: -3px 0 0 -4px;
+  border-width: 0 4px 6px;
+  opacity: 0.8;
+}
+
+#markers b[hidden] { display: none; }
+
 #stats {
   position: fixed;
   left: 12px;
@@ -315,6 +376,8 @@ canvas#view {
 #touch .pad .jump { grid-column: 2; grid-row: 2; width: 84px; height: 84px; }
 #touch .pad .fire { grid-column: 2; grid-row: 1; }
 #touch .pad [data-hold="down"] { grid-column: 1; grid-row: 2; }
+#touch[data-mode="foot"][data-hunt] .pad .fire { display: block; }
+#touch:not([data-hunt]) .bar .hunt { opacity: 0.5; }
 #touch .pad .fire.on { background: rgba(230, 120, 60, 0.45); }
 
 #touch:not([data-mode="flyer"]) .flyer,

@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { carBoxes, flyerBoxes, modelData } from "./vehicles/models";
+import { carBoxes, figureBoxes, flyerBoxes, modelData } from "./vehicles/models";
 import { INSTANCE_LAYOUT, type InstanceList } from "./vehicles/traffic";
 import { PARTICLE_INSTANCE_LAYOUT, type Particles } from "./effects/particles";
 import type { Weather } from "./weather";
@@ -43,6 +43,8 @@ export interface VehicleLists {
   cars: InstanceList;
   vans: InstanceList;
   flyers: InstanceList;
+  /** People on foot, by pose: standing, left stride, right stride. */
+  figures?: InstanceList[];
 }
 
 export interface RenderOptions {
@@ -65,7 +67,7 @@ export class Renderer {
   private post: Program;
   private cloudProg: Program;
   private vehicleProg: Program;
-  private vehicleMeshes: { car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh };
+  private vehicleMeshes: { car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; figures: InstancedMesh[] };
   private particleProg: Program;
   private particleMesh: InstancedMesh;
   private tri: Mesh;
@@ -121,6 +123,7 @@ export class Renderer {
       car: instanced(modelData(carBoxes(false))),
       van: instanced(modelData(carBoxes(true))),
       flyer: instanced(modelData(flyerBoxes())),
+      figures: [0, 1, -1].map((stride) => instanced(modelData(figureBoxes(stride)))),
     };
     this.tri = fullscreenTriangle(gl);
 
@@ -291,6 +294,7 @@ export class Renderer {
     this.vehicleMeshes.car.draw(vehicles.cars.data, vehicles.cars.count);
     this.vehicleMeshes.van.draw(vehicles.vans.data, vehicles.vans.count);
     this.vehicleMeshes.flyer.draw(vehicles.flyers.data, vehicles.flyers.count);
+    vehicles.figures?.forEach((list, i) => this.vehicleMeshes.figures[i].draw(list.data, list.count));
 
     // --- sky, only where no geometry was drawn
     timer.begin("sky");

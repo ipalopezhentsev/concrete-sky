@@ -23,15 +23,18 @@
       <p class="gpu" id="gpu" hidden></p>
       <p class="keys mouse-only">
         mouse look · WASD run · shift sprint · ctrl walk · space jump / climb<br />
-        E get in / out of cars and flyers · click shoot (flyer) · V cockpit view<br />
-        R back to last roof · N next weather · L hold weather · F3 stats · esc pause
+        E get in / out of cars and flyers · click shoot · V cockpit view<br />
+        H hunters on / off · R back to last roof · N next weather · L hold weather · F3 stats · esc pause
       </p>
       <p class="keys touch-only">
         left thumb run (push further to sprint) · right thumb look<br />
-        tap the prompt to get in or out · jump climbs ledges<br />
+        tap the prompt to get in or out · jump climbs ledges · hunt turns the hunters on / off<br />
         best held sideways
       </p>
     </div>
+    <div id="hurt"></div>
+    <div id="markers"></div>
+    <div id="health" hidden><i></i></div>
     <div id="caption"></div>
     <div id="prompt"></div>
     <div id="crosshair"></div>
@@ -46,6 +49,7 @@
       <div class="bar">
         <button type="button" data-tap="view" class="riding">view</button>
         <button type="button" data-tap="roof" class="foot">roof</button>
+        <button type="button" data-tap="hunt" class="hunt">hunt</button>
         <button type="button" data-tap="weather">sky</button>
         <button type="button" data-tap="pause" aria-label="pause">❚❚</button>
       </div>

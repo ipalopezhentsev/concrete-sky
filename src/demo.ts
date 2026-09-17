@@ -1,7 +1,7 @@
 // Demo mode: autopilots that run the decks, fly the air corridors and drive the
 // cross streets, and a director that cuts between them as the weather moves on.
 
-import { CELL, edgeBridge, INSET, PODIUM_LEVELS, podiumHeight, STREET } from "./city/generate";
+import { bridgeOn, CELL, INSET, PODIUM_LEVELS, podiumHeight, STREET } from "./city/generate";
 import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import type { Controls, Rides } from "./rides";
@@ -23,17 +23,9 @@ const turnToward = (from: number, to: number, rate: number, dt: number) =>
 // Running: round the edge of each podium deck and over its bridges. Vents and
 // facade stairs vary per block, so each side's line is probed for a clear path.
 
-const DECK_EDGE = STREET / 2 + INSET - 0.5; // block-local coordinate of the deck's outer edge
-const SIDE_STEP = [[1, 0], [0, 1], [-1, 0], [0, -1]]; // east, north, west, south
+export const DECK_EDGE = STREET / 2 + INSET - 0.5; // block-local coordinate of the deck's outer edge
+export const SIDE_STEP = [[1, 0], [0, 1], [-1, 0], [0, -1]]; // east, north, west, south
 const CLEARANCE = 0.5; // runner radius plus a margin
-
-/** Offset of the bridge leaving block (ci, cj) on `side`, or null. */
-function bridgeOn(ci: number, cj: number, side: number): number | null {
-  if (side === 0) return edgeBridge(ci, cj, 0);
-  if (side === 1) return edgeBridge(ci, cj, 1);
-  if (side === 2) return edgeBridge(ci - 1, cj, 0);
-  return edgeBridge(ci, cj - 1, 1);
-}
 
 /** Can a runner on a deck at height y go straight from a to b without bumping into anything? */
 function clearPath(boxes: Float32Array, a: [number, number], b: [number, number], y: number): boolean {
@@ -47,7 +39,7 @@ function clearPath(boxes: Float32Array, a: [number, number], b: [number, number]
 }
 
 /** A deck's running lines: world x of the east / west sides, z of the north / south ones (null if blocked). */
-interface Ring {
+export interface Ring {
   lines: (number | null)[];
   deck: number;
 }
@@ -57,11 +49,18 @@ type Point = [number, number];
 export class RunPilot {
   private route: Point[] = [];
   private from = 2; // side we came in on (we start at the south-west corner)
-  private rings = new Map<string, Ring>();
   /** Bridges crossed so far. */
   crossings = 0;
+  /**
+   * Bridge hops from a block to where the runner wants to be. When set, the pilot
+   * heads that way instead of wandering, and stops once no bridge gets it closer.
+   */
+  toward: ((ci: number, cj: number) => number) | null = null;
 
-  constructor(private ci: number, private cj: number, private colliders: Colliders, private rand = Math.random) {}
+  constructor(
+    private ci: number, private cj: number, private colliders: Colliders, private rand = Math.random,
+    private rings = new Map<string, Ring>(), // shareable between pilots in the same city
+  ) {}
 
   private ring(ci: number, cj: number): Ring {
     const key = `${ci},${cj}`;
@@ -113,6 +112,29 @@ export class RunPilot {
     return [x, podiumHeight(this.ci, this.cj), z];
   }
 
+  /** Out of waypoints (with `toward` set: as close as the bridges go). */
+  get done(): boolean {
+    return this.route.length === 0;
+  }
+
+  /** Pick the route up from (x, z) on this block's deck: first onto the nearest running line. */
+  joinAt(x: number, z: number): void {
+    const [e, n, w, s] = this.ring(this.ci, this.cj).lines;
+    const ox = this.ci * CELL, oz = this.cj * CELL;
+    const lo = DECK_EDGE + 1.5, hi = CELL - DECK_EDGE - 1.5;
+    let side = -1, best = Infinity;
+    [e, n, w, s].forEach((line, k) => {
+      const d = line === null ? Infinity : Math.abs((k % 2 === 0 ? x : z) - line);
+      if (d < best) [best, side] = [d, k];
+    });
+    if (side < 0) return;
+    const line = [e, n, w, s][side]!;
+    this.from = side;
+    this.route = side % 2 === 0
+      ? [[line, clamp(z, s ?? oz + lo, n ?? oz + hi)]]
+      : [[clamp(x, w ?? ox + lo, e ?? ox + hi), line]];
+  }
+
   /** Ran off a deck and down into the street. */
   fell(p: Player): boolean {
     return p.pos[1] < PODIUM_LEVELS[0] - 3;
@@ -145,10 +167,21 @@ export class RunPilot {
       if (paths.length) ways.push({ exit, path: [...paths[0], out, into] });
     }
     if (!ways.length) return; // no way off this block
-    const onward = ways.filter((w) => w.exit !== from);
-    const options = onward.length ? onward : ways;
-    const straight = options.find((w) => w.exit === (from + 2) % 4);
-    const way = straight && this.rand() < 0.4 ? straight : options[Math.floor(this.rand() * options.length)];
+    let way = ways[0];
+    if (this.toward) {
+      let best = this.toward(ci, cj);
+      let found = false;
+      for (const w of ways) {
+        const d = this.toward(ci + SIDE_STEP[w.exit][0], cj + SIDE_STEP[w.exit][1]);
+        if (d < best) [best, way, found] = [d, w, true];
+      }
+      if (!found) return;
+    } else {
+      const onward = ways.filter((w) => w.exit !== from);
+      const options = onward.length ? onward : ways;
+      const straight = options.find((w) => w.exit === (from + 2) % 4);
+      way = straight && this.rand() < 0.4 ? straight : options[Math.floor(this.rand() * options.length)];
+    }
     this.route.push(...way.path);
     this.ci += SIDE_STEP[way.exit][0];
     this.cj += SIDE_STEP[way.exit][1];

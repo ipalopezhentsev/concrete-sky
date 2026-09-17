@@ -1,14 +1,17 @@
 // Everything about vehicles from the player's side: boarding, driving, flying,
-// shooting, and the cameras for each.
+// shooting, and the cameras for each. Also home to the hunters, who chase
+// whatever the player is in.
 
 import { Combat } from "./effects/combat";
 import { Particles } from "./effects/particles";
+import { Hunters, type Quarry } from "./hunters";
 import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import { Car } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { Parking } from "./vehicles/parking";
 import { Traffic } from "./vehicles/traffic";
+import type { VehicleLists } from "./renderer";
 import type { World } from "./world";
 
 const REACH = 1.6; // how close (to the body) you must be to get in
@@ -52,6 +55,7 @@ export class Rides {
   readonly parking = new Parking();
   readonly particles = new Particles();
   readonly combat = new Combat(this.particles);
+  readonly hunters: Hunters;
   flyer: Flyer | null = null;
   car: Car | null = null;
   cockpit = false;
@@ -59,19 +63,22 @@ export class Rides {
   private carLookYaw = 0;
   private carLookPitch = 0;
   private lookIdle = 0;
-  private combined = { a: null as Float32Array | null, b: null as Float32Array | null, out: new Float32Array(0) };
+  private combined = new WeakMap<Float32Array, { b: Float32Array; out: Float32Array }>();
 
-  constructor(private world: World, private player: Player) {}
+  constructor(private world: World, private player: Player) {
+    this.hunters = new Hunters(this);
+  }
 
   /** City collision plus parked vehicles. */
   colliders: Colliders = (x, z) => {
     const a = this.world.colliders(x, z), b = this.parking.boxes(x, z);
-    const c = this.combined;
-    if (a !== c.a || b !== c.b) {
+    let c = this.combined.get(a);
+    if (!c || c.b !== b) {
       const out = new Float32Array(a.length + b.length);
       out.set(a);
       out.set(b, a.length);
-      Object.assign(c, { a, b, out });
+      c = { b, out };
+      this.combined.set(a, c);
     }
     return c.out;
   };
@@ -180,8 +187,12 @@ export class Rides {
       pl.pos = [...this.flyer.pos];
     } else if (this.car) {
       const car = this.car;
-      car.update(dt, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, this.colliders,
-        this.traffic.carBoxes(car.pos[0], car.pos[2], 30));
+      const traffic = this.traffic.carBoxes(car.pos[0], car.pos[2], 30);
+      const hunters = this.hunters.carBoxes();
+      const obstacles = new Float32Array(traffic.length + hunters.length);
+      obstacles.set(traffic);
+      obstacles.set(hunters, traffic.length);
+      car.update(dt, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, this.colliders, obstacles);
       // mouse looks around; the view drifts back behind the car when left alone
       this.carLookYaw -= c.mouseDX * 0.0022;
       this.carLookPitch = Math.max(-0.6, Math.min(0.5, this.carLookPitch - c.mouseDY * 0.0022));
@@ -198,14 +209,54 @@ export class Rides {
     }
   }
 
-  /** Traffic, weapons and effects; call after drive() and once the camera is known. */
+  /** What the hunters are after. */
+  private quarry(): Quarry {
+    if (this.flyer) return { pos: this.flyer.pos, vel: this.flyer.vel, mode: "flyer", yaw: this.flyer.yaw };
+    if (this.car) {
+      const c = this.car;
+      return { pos: c.pos, vel: [Math.sin(c.yaw) * c.speed, c.vy, Math.cos(c.yaw) * c.speed], mode: "car", yaw: c.yaw, van: c.van };
+    }
+    const p = this.player;
+    return { pos: p.pos, vel: p.vel, mode: "foot", yaw: p.yaw };
+  }
+
+  /** Traffic, hunters, weapons and effects; call after drive() and once the camera is known. */
   update(dt: number, time: number, cam: RideCamera, fire: boolean): void {
     this.traffic.update(time, cam.eye, cam.fwd);
+    const armed = this.hunters.active;
     if (this.flyer && fire) {
       this.combat.trigger(this.flyer.pos, this.flyer.yaw, this.aimPoint(cam), this.flyer.vel);
+    } else if (!this.riding && fire && armed) {
+      // the runner's sidearm, held low on the right
+      const [fx, fy, fz] = cam.fwd;
+      const flat = Math.hypot(fx, fz) || 1;
+      const muzzle: Vec3 = [cam.eye[0] + fx * 0.6 - (fz / flat) * 0.22, cam.eye[1] + fy * 0.6 - 0.25, cam.eye[2] + fz * 0.6 + (fx / flat) * 0.22];
+      this.combat.triggerSidearm(muzzle, this.aimPoint(cam), this.player.vel);
     }
-    this.combat.update(dt, this.traffic, this.parking, this.colliders);
+    this.hunters.update(dt, this.quarry(), cam);
+    this.combat.update(dt, this.traffic, this.parking, this.colliders, this.hunters);
+    if (this.hunters.knock && !this.riding) {
+      const k = this.hunters.knock;
+      for (let i = 0; i < 3; i++) this.player.vel[i] += k[i];
+    }
+    if (this.hunters.gotYou) this.caught();
     this.particles.update(dt);
+  }
+
+  /** The hunters got the player: whatever they were in goes up, and it's back to the last roof. */
+  private caught(): void {
+    const q = this.quarry();
+    if (this.flyer) this.combat.wreckFlyer(q.pos, q.vel, q.yaw, this.flyer.color, false);
+    else if (this.car) this.combat.wreckCar(q.pos, q.yaw, this.car.van, this.car.color, q.vel, false);
+    else {
+      const c: Vec3 = [q.pos[0], q.pos[1] + 1, q.pos[2]];
+      this.particles.sparks(c, 30);
+      this.combat.events.hits.push(c);
+    }
+    this.leave();
+    this.player.respawn();
+    this.player.pitch = 0;
+    this.hunters.reset();
   }
 
   /** Where the guns converge: the crosshair ray, nudged onto a vehicle close to it. */
@@ -213,22 +264,23 @@ export class Rides {
     let best: Vec3 | null = null;
     let bestAngle = 0.045; // ~2.5 degrees of aim assist
     const t = this.traffic;
+    const consider = (center: Vec3, v: Vec3) => {
+      const to: Vec3 = [center[0] - cam.eye[0], center[1] - cam.eye[1], center[2] - cam.eye[2]];
+      const dist = Math.hypot(...to);
+      if (dist > 450 || dist < 3) return;
+      const angle = Math.acos(Math.min(1, (to[0] * cam.fwd[0] + to[1] * cam.fwd[1] + to[2] * cam.fwd[2]) / dist));
+      if (angle >= bestAngle) return;
+      bestAngle = angle;
+      // lead the target by the bolt's flight time
+      const flight = dist / 260;
+      best = [center[0] + v[0] * flight, center[1] + v[1] * flight, center[2] + v[2] * flight];
+    };
+    for (const h of this.hunters.list) if (!h.dead) consider(h.center, h.vel);
     for (const [list, lift] of [[t.flyers, 0.8], [t.cars, 0.7], [t.vans, 1.0]] as const) {
       for (let i = 0; i < list.count; i++) {
         if (list.keys[i] < 0) continue;
         const o = i * 10, d = list.data;
-        const to: Vec3 = [d[o] - cam.eye[0], d[o + 1] + lift - cam.eye[1], d[o + 2] - cam.eye[2]];
-        const dist = Math.hypot(...to);
-        if (dist > 450 || dist < 5) continue;
-        const cos = (to[0] * cam.fwd[0] + to[1] * cam.fwd[1] + to[2] * cam.fwd[2]) / dist;
-        const angle = Math.acos(Math.min(1, cos));
-        if (angle < bestAngle) {
-          bestAngle = angle;
-          // lead the target by the bolt's flight time
-          const v = this.traffic.velocityOf(list.keys[i]);
-          const flight = dist / 260;
-          best = [d[o] + v[0] * flight, d[o + 1] + lift + v[1] * flight, d[o + 2] + v[2] * flight];
-        }
+        consider([d[o], d[o + 1] + lift, d[o + 2]], t.velocityOf(list.keys[i]));
       }
     }
     return best ?? [cam.eye[0] + cam.fwd[0] * 300, cam.eye[1] + cam.fwd[1] * 300, cam.eye[2] + cam.fwd[2] * 300];
@@ -273,5 +325,12 @@ export class Rides {
       (c.van ? t.vans : t.cars).push(c.pos[0], c.pos[1], c.pos[2], c.yaw, c.pitch, c.roll, c.color);
     }
     this.combat.drawWrecks(t.flyers, t.cars, t.vans);
+    this.hunters.draw(t.flyers, t.cars, t.vans);
+  }
+
+  /** Everything the renderer draws with vehicle meshes. */
+  get vehicleLists(): VehicleLists {
+    const t = this.traffic;
+    return { cars: t.cars, vans: t.vans, flyers: t.flyers, figures: this.hunters.figures };
   }
 }

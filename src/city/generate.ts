@@ -633,6 +633,14 @@ export function edgeBridge(ci: number, cj: number, dir: 0 | 1): number | null {
   return (Math.floor(h / 256) % 15) - 6;
 }
 
+/** Offset of the bridge leaving block (ci, cj) on `side` (0 east, 1 north, 2 west, 3 south), or null. */
+export function bridgeOn(ci: number, cj: number, side: number): number | null {
+  if (side === 0) return edgeBridge(ci, cj, 0);
+  if (side === 1) return edgeBridge(ci, cj, 1);
+  if (side === 2) return edgeBridge(ci - 1, cj, 0);
+  return edgeBridge(ci, cj - 1, 1);
+}
+
 export function buildCell(ci: number, cj: number, b: Builder): void {
   const r = new Rng(hashInt(ci, cj, 1));
   const ox = ci * CELL, oz = cj * CELL;

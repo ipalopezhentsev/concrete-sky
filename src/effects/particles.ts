@@ -160,7 +160,7 @@ export class Particles {
     this.glow.add({ pos: p, vel: [0, 0, 0], life: 0.12, size: 0.35, grow: -1.5, color });
   }
 
-  muzzle(p: Vec3, vel: Vec3): void {
-    this.glow.add({ pos: p, vel, life: 0.07, size: 1.1, grow: 4, color: [6, 9, 12] });
+  muzzle(p: Vec3, vel: Vec3, color: Vec3 = [6, 9, 12]): void {
+    this.glow.add({ pos: p, vel, life: 0.07, size: 1.1, grow: 4, color });
   }
 }
