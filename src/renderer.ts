@@ -173,10 +173,10 @@ export class Renderer {
     this.renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
     this.integrated = /Intel|UHD|Iris|Radeon\(TM\) Graphics|Apple|SwiftShader|llvmpipe|Mali|Adreno/i.test(this.renderer);
     const maxSamples = gl.getParameter(gl.MAX_SAMPLES) as number;
-    // On integrated GPUs 2x MSAA and its resolve cost ~2 ms of a 16.7 ms frame, which
-    // buys back more resolution as FXAA than it costs in edge quality. Discrete GPUs
-    // have the bandwidth for real 4x MSAA, which looks better in motion.
-    this.samples = Math.min(opts.msaa ?? (this.integrated ? 1 : 4), maxSamples);
+    // 2x MSAA and its resolve cost an integrated GPU ~1.3 ms net of the FXAA it replaces,
+    // and nothing else recovers the thin railings, lamp posts and tower edges that FXAA
+    // can only smudge. Discrete GPUs have the bandwidth for 4x.
+    this.samples = Math.min(opts.msaa ?? (this.integrated ? 2 : 4), maxSamples);
     this.fxaa = opts.fxaa ?? this.samples <= 1;
     this.detailDist = opts.detailDist ?? (this.integrated ? 200 : 400);
     this.cheap = opts.cheap ?? 0;
