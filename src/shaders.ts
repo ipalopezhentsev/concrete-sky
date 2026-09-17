@@ -29,6 +29,7 @@ uniform float uFogDensity;
 uniform float uFogTint;
 uniform float uMist;
 uniform float uNight;
+uniform float uCloudDither; // amplitude of the cloud-shadow dither (0 disables it)
 uniform float uWet;
 uniform float uTime;
 uniform vec3 uCamPos;
@@ -55,14 +56,19 @@ vec2 smoothNoiseUV(vec2 p) {
   return (i + f * f * (3.0 - 2.0 * f) + 0.5) / NOISE_TEXELS;
 }
 
-float fbm3(vec2 p) {
-  float s = 0.0, a = 0.5;
-  for (int i = 0; i < 3; i++) {
+float fbmOct(vec2 p, int octaves) {
+  float s = 0.0, a = 0.5, norm = 0.0;
+  for (int i = 0; i < octaves; i++) {
     s += a * texture(uNoise, smoothNoiseUV(p)).r;
+    norm += a;
     p = mat2(1.6, 1.2, -1.2, 1.6) * p + vec2(0.37, 0.11);
     a *= 0.5;
   }
-  return s / 0.875;
+  return s / norm;
+}
+
+float fbm3(vec2 p) {
+  return fbmOct(p, 3);
 }
 
 float cloudBase(vec2 wp) {
@@ -133,10 +139,28 @@ vec3 skyColor(vec3 rd) {
   return mix(col, fogColor(rd), skyFog);
 }
 
+/**
+ * Ground shadow of the clouds, as written into the shadow map.
+ *
+ * Deliberately *not* cloudDensity: that function erodes the cloud edge with high-frequency
+ * noise, which reads as fine wisps against the sky but, at any frequency this map can hold,
+ * becomes large feathery streaks across the ground. So the shadow keeps the smooth shape
+ * and takes its extra definition from a fourth octave instead — about 6 m of ground per
+ * noise texel, roughly where the map runs out.
+ *
+ * The dither is off by default; it exists to break up 8-bit contour bands, since the
+ * threshold below multiplies the noise by about seven.
+ */
 float cloudShadow(vec3 p) {
   vec3 L = uLightDir;
   vec2 q = p.xz + L.xz / max(L.y, 0.08) * (CLOUD_H - p.y);
-  return 1.0 - clamp(cloudBase(q), 0.0, 1.0) * mix(0.5, 0.8, uCloudDark);
+  vec2 n = q * 0.0001 + uCloudOffset;
+  float warp = texture(uNoise, smoothNoiseUV(n * 0.23)).g - 0.5;
+  float base = fbmOct(n + vec2(warp, -warp) * 0.35, 4);
+  float t = mix(0.70, 0.22, uCloudCover);
+  float dither = (texture(uNoise, fract(q * 0.02)).a - 0.5) * uCloudDither;
+  float d = clamp((base - t) / 0.14 + dither, 0.0, 1.0);
+  return 1.0 - d * mix(0.5, 0.8, uCloudDark);
 }
 
 // Exponential fog plus a dense, low-lying mist that pools in the street canyons.

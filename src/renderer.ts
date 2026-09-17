@@ -23,7 +23,7 @@ const SHADOW_EXTENT = 180;
 const SHADOW_BACK = 700; // how far toward the sun shadow casters are gathered
 const SHADOW_MOVE = 12; // re-render the shadow map after moving this far
 // The cloud shadow map, in texels across 2 * CLOUD_EXTENT metres: 256 is ~9 m a texel.
-const CLOUD_SIZE_DEFAULT = 256;
+const CLOUD_SIZE_DEFAULT = 384;
 const CLOUD_EXTENT = 1200;
 
 interface ClipControl {
@@ -114,6 +114,8 @@ export interface RenderOptions {
   cheap?: number;
   /** Width of the cloud shadow map in texels. */
   cloudSize?: number;
+  /** Dither amplitude that hides 8-bit contours in the cloud shadow; 0 disables it. */
+  cloudDither?: number;
 }
 
 export class Renderer {
@@ -125,6 +127,7 @@ export class Renderer {
   readonly detailDist: number;
   readonly cheap: number;
   readonly cloudSize: number;
+  readonly cloudDither: number;
   readonly timer: GpuTimer;
   private clip: ClipControl | null;
   private sky: Program;
@@ -225,6 +228,7 @@ export class Renderer {
     this.shadow = new ShadowTarget(gl, this.shadowSize);
     // float, not RGBA8: an 8-bit shadow term contours visibly across such large texels
     this.cloudSize = opts.cloudSize ?? CLOUD_SIZE_DEFAULT;
+    this.cloudDither = opts.cloudDither ?? 0;
     this.clouds = new ColorTarget(gl, this.cloudSize, gl.RGBA16F);
   }
 
@@ -316,7 +320,8 @@ export class Renderer {
     gl.disable(gl.CULL_FACE);
     bindTexture(gl, 3, this.noise);
     this.cloudProg.use().setAll(common).int("uNoise", 3)
-      .vec("uCloudCenter", cloudCenter).float("uCloudExtent", CLOUD_EXTENT);
+      .vec("uCloudCenter", cloudCenter).float("uCloudExtent", CLOUD_EXTENT)
+      .float("uCloudDither", this.cloudDither);
     this.tri.draw();
 
     // --- sun shadows (cached)
