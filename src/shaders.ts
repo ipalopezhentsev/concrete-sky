@@ -1,7 +1,7 @@
 // GLSL ES 3.00 sources.
 
 import { CELL, LAMP_HEIGHT, STREET, lampHeadsLocal } from "./city/generate";
-import { Layer } from "./textures";
+import { Layer, NOISE_SIZE } from "./textures";
 
 const HEADER = `#version 300 es
 precision highp float;
@@ -34,6 +34,7 @@ uniform float uTime;
 uniform vec3 uCamPos;
 
 const float CLOUD_H = 1600.0;
+const float NOISE_TEXELS = ${NOISE_SIZE}.0;
 
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -41,10 +42,23 @@ float hash12(vec2 p) {
   return fract((p3.x + p3.y) * p3.z);
 }
 
+/**
+ * The clouds read the noise texture at about one texel per 40 m of ground, and hardware
+ * filtering is linear, so value noise creases along every texel edge — then cloudBase
+ * multiplies that by seven and the creases become facets. Warping the fractional part of
+ * the coordinate by a smoothstep first makes the same single fetch interpolate smoothly.
+ */
+vec2 smoothNoiseUV(vec2 p) {
+  vec2 t = p * NOISE_TEXELS - 0.5;
+  vec2 i = floor(t);
+  vec2 f = t - i;
+  return (i + f * f * (3.0 - 2.0 * f) + 0.5) / NOISE_TEXELS;
+}
+
 float fbm3(vec2 p) {
   float s = 0.0, a = 0.5;
   for (int i = 0; i < 3; i++) {
-    s += a * texture(uNoise, p).r;
+    s += a * texture(uNoise, smoothNoiseUV(p)).r;
     p = mat2(1.6, 1.2, -1.2, 1.6) * p + vec2(0.37, 0.11);
     a *= 0.5;
   }
@@ -53,7 +67,7 @@ float fbm3(vec2 p) {
 
 float cloudBase(vec2 wp) {
   vec2 p = wp * 0.0001 + uCloudOffset;
-  float warp = texture(uNoise, p * 0.23).g - 0.5;
+  float warp = texture(uNoise, smoothNoiseUV(p * 0.23)).g - 0.5;
   float n = fbm3(p + vec2(warp, -warp) * 0.35);
   float t = mix(0.70, 0.22, uCloudCover);
   return (n - t) / 0.14;
@@ -61,8 +75,8 @@ float cloudBase(vec2 wp) {
 
 float cloudDensity(vec2 wp) {
   vec2 p = wp * 0.0001 + uCloudOffset;
-  float det = texture(uNoise, p * 7.3 + uCloudOffset * 2.0).r * 0.6
-            + texture(uNoise, p * 17.9 - uCloudOffset * 3.0).r * 0.4;
+  float det = texture(uNoise, smoothNoiseUV(p * 7.3 + uCloudOffset * 2.0)).r * 0.6
+            + texture(uNoise, smoothNoiseUV(p * 17.9 - uCloudOffset * 3.0)).r * 0.4;
   float erode = mix(0.9, 0.3, uCloudCover * uCloudCover);
   float d = clamp(cloudBase(wp) + erode * 0.5 - det * erode, 0.0, 1.0);
   return max(d, smoothstep(0.85, 1.0, uCloudCover) * (0.75 + 0.2 * det));
@@ -284,16 +298,23 @@ uniform float uShadowTexel;
 uniform sampler2D uCloudTex;
 uniform vec2 uCloudCenter;
 uniform float uCloudExtent;
+uniform float uCloudTexels; // width of the cloud shadow map, for its own filtering
 uniform float uDetailDist; // beyond this, surfaces drop to a cheaper shading path
 uniform float uCheap; // diagnostic only: strips shading stages to find the real cost
 out vec4 fragColor;
 
 const float CLOUD_REF_Y = 25.0;
 
+/** Cloud shadow at a point, from the map built around the camera. */
 float cloudShadowTex(vec3 p) {
   vec2 k = uLightDir.xz / max(uLightDir.y, 0.08);
   vec2 q = p.xz - k * (p.y - CLOUD_REF_Y);
-  return texture(uCloudTex, (q - uCloudCenter) / (2.0 * uCloudExtent) + 0.5).r;
+  vec2 uv = (q - uCloudCenter) / (2.0 * uCloudExtent) + 0.5;
+  // smoothstep-warped, so the map's own ~9 m texels do not crease either
+  vec2 t = uv * uCloudTexels - 0.5;
+  vec2 i = floor(t);
+  vec2 f = t - i;
+  return texture(uCloudTex, (i + f * f * (3.0 - 2.0 * f) + 0.5) / uCloudTexels).r;
 }
 
 const vec3 LAMP_COL = vec3(1.0, 0.72, 0.42);

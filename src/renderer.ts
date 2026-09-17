@@ -22,7 +22,8 @@ import type { World } from "./world";
 const SHADOW_EXTENT = 180;
 const SHADOW_BACK = 700; // how far toward the sun shadow casters are gathered
 const SHADOW_MOVE = 12; // re-render the shadow map after moving this far
-const CLOUD_SIZE = 256;
+// The cloud shadow map, in texels across 2 * CLOUD_EXTENT metres: 256 is ~9 m a texel.
+const CLOUD_SIZE_DEFAULT = 256;
 const CLOUD_EXTENT = 1200;
 
 interface ClipControl {
@@ -111,6 +112,8 @@ export interface RenderOptions {
   aniso?: number;
   /** Diagnostic: 1 drops fog, 2 also drops shadows, 3 shows raw material. */
   cheap?: number;
+  /** Width of the cloud shadow map in texels. */
+  cloudSize?: number;
 }
 
 export class Renderer {
@@ -121,6 +124,7 @@ export class Renderer {
   readonly fxaa: boolean;
   readonly detailDist: number;
   readonly cheap: number;
+  readonly cloudSize: number;
   readonly timer: GpuTimer;
   private clip: ClipControl | null;
   private sky: Program;
@@ -219,7 +223,9 @@ export class Renderer {
     this.normal = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.normal, false, aniso);
     this.noise = texture2D(gl, NOISE_SIZE, tex.noise);
     this.shadow = new ShadowTarget(gl, this.shadowSize);
-    this.clouds = new ColorTarget(gl, CLOUD_SIZE);
+    // float, not RGBA8: an 8-bit shadow term contours visibly across such large texels
+    this.cloudSize = opts.cloudSize ?? CLOUD_SIZE_DEFAULT;
+    this.clouds = new ColorTarget(gl, this.cloudSize, gl.RGBA16F);
   }
 
   get reversedZ(): boolean {
@@ -363,7 +369,8 @@ export class Renderer {
       .float("uShadowTexel", 1 / this.shadowSize)
       .float("uDetailDist", this.detailDist).float("uCheap", this.cheap)
       .int("uAlbedo", 0).int("uNormal", 1).int("uShadow", 2).int("uNoise", 3)
-      .int("uCloudTex", 5).vec("uCloudCenter", cloudCenter).float("uCloudExtent", CLOUD_EXTENT);
+      .int("uCloudTex", 5).vec("uCloudCenter", cloudCenter)
+      .float("uCloudExtent", CLOUD_EXTENT).float("uCloudTexels", this.cloudSize);
     surface(this.city);
     world.draw(planes, cam.eye, 1, true);
 

@@ -105,6 +105,7 @@ async function main(): Promise<void> {
       detailDist: num("detail"),
       aniso: num("aniso"),
       cheap: num("cheap"),
+      cloudSize: num("cloudsize"),
     });
   } catch (e) {
     fail(String((e as Error).message));

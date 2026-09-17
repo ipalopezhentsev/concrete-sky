@@ -391,17 +391,31 @@ export class ColorTarget {
   readonly fbo: WebGLFramebuffer;
   readonly tex: WebGLTexture;
 
-  constructor(private gl: GL, readonly size: number) {
-    this.tex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, size, size);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  /**
+   * `format` defaults to RGBA8; a float format avoids banding where the target holds a
+   * smooth gradient. Not every driver can render to every float format, so a format it
+   * rejects falls back to RGBA8 rather than taking the whole renderer down.
+   */
+  constructor(private gl: GL, readonly size: number, format: number = gl.RGBA8) {
     this.fbo = gl.createFramebuffer()!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.tex, 0);
+    const attach = (fmt: number) => {
+      const tex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, size, size);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      return tex;
+    };
+    let tex = attach(format);
+    if (format !== gl.RGBA8 && gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.deleteTexture(tex);
+      tex = attach(gl.RGBA8);
+    }
+    this.tex = tex;
     checkFramebuffer(gl, "color");
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
