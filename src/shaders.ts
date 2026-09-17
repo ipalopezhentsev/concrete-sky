@@ -506,18 +506,25 @@ void main() {
     Nd = normalize(mix(Nd, N, uWet * puddle));
   }
 
-  float sh = shadowAt(vPos, N) * cloudShadowTex(vPos);
+  float sh = shadowAt(vPos, N);
   float NdL = max(dot(Nd, L), 0.0) * smoothstep(-0.02, 0.1, dot(N, L));
   vec3 skyTone = mix(uHorizon, uZenith, 0.55);
   skyTone = mix(vec3(dot(skyTone, vec3(0.3, 0.5, 0.2))), skyTone, 0.5);
   vec3 skyAmb = skyTone * uAmbient * 1.1 + uNight * vec3(0.012, 0.014, 0.022);
   vec3 groundAmb = (uGroundCol * 0.6 + uSunColor * 0.08) * uAmbient + uNight * vec3(0.06, 0.045, 0.03);
   vec3 hemi = mix(groundAmb, skyAmb, Nd.y * 0.5 + 0.5);
+  float cs = cloudShadowTex(vPos);
+  sh *= cs;
+  // sunlight bounced off lit walls and paving: it fills shade from the side away from the sun and from below
+  vec3 bounceDir = normalize(vec3(-L.x, -0.35, -L.z));
+  vec3 bounce = uSunColor * (0.05 + 0.08 * max(dot(Nd, bounceDir), 0.0) + 0.03 * max(Nd.y, 0.0)) * mix(0.4, 1.0, cs) * (0.3 + 0.7 * L.y);
+  hemi += bounce;
 
-  float ao = vehicle ? 1.0 : mix(0.55, 1.0, cavity);
-  if (!horizontal && !vehicle) ao *= mix(0.55, 1.0, smoothstep(0.0, 2.2, vUV.y));
-  ao *= mix(0.75, 1.0, smoothstep(0.0, 30.0, vPos.y));
-  if (N.y < -0.5) ao *= 0.7;
+  float ao = vehicle ? 1.0 : mix(0.65, 1.0, cavity);
+  // darken where tall walls meet the ground, not whole steps and railings
+  if (!horizontal && !vehicle) ao *= mix(1.0, mix(0.6, 1.0, smoothstep(0.0, 2.2, vUV.y)), smoothstep(2.5, 5.0, vSize.y));
+  ao *= mix(0.8, 1.0, smoothstep(0.0, 30.0, vPos.y));
+  if (N.y < -0.5) ao *= 0.8;
 
   vec3 H = normalize(L + V);
   float gloss = mix(12.0, 180.0, clamp(1.0 - rough + wet * puddle * 0.9 + specAmt, 0.0, 1.0));

@@ -24,7 +24,10 @@ const POSES = {
   avenue: [-7, 12, 60, 0.05, -0.12],
   fly: [-3, 60, -60, 0.1, -0.18],
   padclose: [24, 18, 24, 2.0, -0.35],
+  skyline: [-9, 34, -9, 0.78, 0.22],
 };
+// POSE="x,y,z,yaw,pitch" adds a "custom" view
+if (process.env.POSE) POSES.custom = process.env.POSE.split(",").map(Number);
 
 fs.mkdirSync(out, { recursive: true });
 const browser = await puppeteer.launch({

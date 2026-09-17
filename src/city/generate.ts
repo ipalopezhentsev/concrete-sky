@@ -157,11 +157,12 @@ export function stairTower(
   b: Builder, axis: "x" | "z", u0: number, v0: number, vSign: 1 | -1, yTop: number, tint: Tint,
 ): void {
   const L = 9, D = 5.8;
-  const put = (ua: number, ub: number, va: number, vb: number, y0: number, y1: number, mat: Mat, style = 0) => {
+  const put = (ua: number, ub: number, va: number, vb: number, y0: number, y1: number, mat: Mat, style = 0, collide = true) => {
     // v measured from the outer side toward the podium
     const p = vSign > 0 ? [v0 + va, v0 + vb] : [v0 - vb, v0 - va];
-    if (axis === "x") b.box(u0 + ua, y0, p[0], u0 + ub, y1, p[1], mat, tint, style);
-    else b.box(p[0], y0, u0 + ua, p[1], y1, u0 + ub, mat, tint, style);
+    const opts = collide ? {} : { collide: false, detail: true };
+    if (axis === "x") b.box(u0 + ua, y0, p[0], u0 + ub, y1, p[1], mat, tint, style, opts);
+    else b.box(p[0], y0, u0 + ua, p[1], y1, u0 + ub, mat, tint, style, opts);
   };
   const wall = 0.4, lane = (D - 2 * wall - 0.4) / 2; // 2.3
   const laneA = [wall, wall + lane];
@@ -189,6 +190,8 @@ export function stairTower(
     const landing = y + 3;
     const [la, lb] = k % 2 === 0 ? [flightU1, L - wall] : [wall, flightU0];
     put(la, lb, wall, D - 0.5, landing - 0.4, landing, Mat.Deck);
+    // a light strip under each landing
+    put(la + 0.4, lb - 0.4, wall + 1.2, wall + 1.4, landing - 0.45, landing - 0.4, Mat.Glow, 0, false);
   }
 }
 
@@ -300,22 +303,86 @@ function midTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, t
   }
 }
 
-/** Skyscraper with setbacks, an optional open sky lobby, fins and a crown. */
-function tallTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, tint: Tint, lobby: number | null): void {
+/** Plan of a tower shaft: a plain box, a cross with cut-back corners, or twin slabs joined by a core. */
+type Plan = "box" | "cross" | "split";
+
+/** One stretch of tower shaft from ya to yb in the given plan. */
+function shaft(b: Builder, f: Footprint, ya: number, yb: number, plan: Plan, cut: number, tint: Tint, style: number): void {
+  const { x0, z0, x1, z1 } = f;
+  const w = x1 - x0, d = z1 - z0;
+  if (plan === "cross" && Math.min(w, d) > 2 * cut + 6) {
+    b.box(x0 + cut, ya, z0, x1 - cut, yb, z1, Mat.Windows, tint, style);
+    b.box(x0, ya, z0 + cut, x0 + cut, yb, z1 - cut, Mat.Windows, tint, style);
+    b.box(x1 - cut, ya, z0 + cut, x1, yb, z1 - cut, Mat.Windows, tint, style);
+  } else if (plan === "split" && Math.min(w, d) > 14) {
+    // a deep slot through the middle of the long faces; the core between the slabs is blank concrete
+    const g = Math.min(cut, 2.5);
+    if (w >= d) {
+      const cz = (z0 + z1) / 2, c0 = x0 + w * 0.35, c1 = x1 - w * 0.35;
+      b.box(x0, ya, z0, x1, yb, cz - g, Mat.Windows, tint, style);
+      b.box(x0, ya, cz + g, x1, yb, z1, Mat.Windows, tint, style);
+      b.box(c0, ya, cz - g, c1, yb, cz + g, Mat.Board, tint);
+    } else {
+      const cx = (x0 + x1) / 2, c0 = z0 + d * 0.35, c1 = z1 - d * 0.35;
+      b.box(x0, ya, z0, cx - g, yb, z1, Mat.Windows, tint, style);
+      b.box(cx + g, ya, z0, x1, yb, z1, Mat.Windows, tint, style);
+      b.box(cx - g, ya, c0, cx + g, yb, c1, Mat.Board, tint);
+    }
+  } else {
+    b.box(x0, ya, z0, x1, yb, z1, Mat.Windows, tint, style);
+  }
+}
+
+/** Plant-floor bands wrapped around a shaft every `every` metres. */
+function bands(b: Builder, f: Footprint, ya: number, yb: number, every: number, tint: Tint): void {
+  for (let y = ya + every; y < yb - 6; y += every)
+    b.box(f.x0 - 0.35, y - 1.4, f.z0 - 0.35, f.x1 + 0.35, y, f.z1 + 0.35, Mat.Panel, tint);
+}
+
+/**
+ * Skyscraper with setbacks, an optional open sky lobby, fins and a crown. Its height is
+ * limited by the footprint so narrow towers stay mid-height and only broad ones go very tall.
+ * Returns the roof height below the crown.
+ */
+function tallTower(
+  b: Builder, r: Rng, f: Footprint, base: number, top: number, tint: Tint, lobby: number | null,
+  opts: { setbacks?: boolean; serviceShaft?: boolean } = {},
+): number {
   const style = r.pick([Win.Punched, Win.Ribbon, Win.Grid, Win.Slit, Win.Punched]);
   let { x0, z0, x1, z1 } = f;
+  const minSide = Math.min(x1 - x0, z1 - z0);
+  top = Math.min(top, base + minSide * r.uniform(5, 8));
+  top = Math.max(top, lobby !== null ? lobby + 26 : base + 24);
+  const free = lobby === null;
+  const plan: Plan = free ? r.pick<Plan>(["box", "box", "cross", "split"]) : "box";
+  const cut = r.uniform(2.5, 4.5);
+  const bandEvery = r.chance(0.4) ? r.pick([12, 15, 21]) : 0;
   const breaks: number[] = [];
-  const nSet = r.int(0, 3);
+  const nSet = top - base > 60 && opts.setbacks !== false ? r.int(0, 3) : 0;
   for (let i = 0; i < nSet; i++) breaks.push(r.uniform(base + 25, top - 20));
   breaks.sort((a, b2) => a - b2);
   // with a sky lobby, set back only above it so the lobby floor keeps the original footprint
   const levels = [base, ...breaks.filter((y) => lobby === null || y > lobby + 14), top];
   const lobbyH = 5;
 
-  if (r.chance(0.35) && lobby === null) fins(b, r, x0, z0, x1, z1, base + 4, levels[1] - 2, 1.1, tint);
+  // on pilotis: a recessed core and corner columns carry the tower over the deck
+  if (free && levels[1] - base > 30 && minSide > 13 && r.chance(0.3)) {
+    const h = r.uniform(7, 12), ins = r.uniform(3, 4.5);
+    b.box(x0 + ins, base, z0 + ins, x1 - ins, base + h, z1 - ins, Mat.Windows, tint, Win.Grid);
+    for (const px of [x0, x1 - 1.6])
+      for (const pz of [z0, z1 - 1.6])
+        b.box(px, base, pz, px + 1.6, base + h, pz + 1.6, Mat.Board, tint, 0, { detail: false });
+    b.box(x0 - 0.5, base + h, z0 - 0.5, x1 + 0.5, base + h + 1.6, z1 + 0.5, Mat.Board, tint);
+    b.box(x0 + ins - 0.5, base + h - 0.05, z0 + 0.3, x1 - ins + 0.5, base + h, z0 + 0.5, Mat.Glow, tint, 0, { collide: false, detail: true });
+    b.box(x0 + ins - 0.5, base + h - 0.05, z1 - 0.5, x1 - ins + 0.5, base + h, z1 - 0.3, Mat.Glow, tint, 0, { collide: false, detail: true });
+    levels[0] = base + h + 1.6;
+  } else if (free && r.chance(0.35)) {
+    fins(b, r, x0, z0, x1, z1, base + 4, levels[1] - 2, 1.1, tint);
+  }
 
   for (let s = 0; s < levels.length - 1; s++) {
     const ya = levels[s], yb = levels[s + 1];
+    const cur = { x0, z0, x1, z1 };
     if (lobby !== null && lobby > ya && lobby + lobbyH < yb) {
       b.box(x0, ya, z0, x1, lobby - 0.8, z1, Mat.Windows, tint, style);
       b.box(x0 - 0.4, lobby - 0.8, z0 - 0.4, x1 + 0.4, lobby, z1 + 0.4, Mat.Deck, tint);
@@ -327,8 +394,9 @@ function tallTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, 
       b.box(x0 + 2, lobby + lobbyH - 0.05, z0 + 2, x1 - 2, lobby + lobbyH, z1 - 2, Mat.Glow, tint, 0, { collide: false });
       b.box(x0, lobby + lobbyH + 1.2, z0, x1, yb, z1, Mat.Windows, tint, style);
     } else {
-      b.box(x0, ya, z0, x1, yb, z1, Mat.Windows, tint, style);
+      shaft(b, cur, ya, yb, plan, cut, tint, style);
     }
+    if (bandEvery) bands(b, cur, ya, yb, bandEvery, tint);
     if (s < levels.length - 2) {
       b.box(x0 - 0.6, yb - 0.8, z0 - 0.6, x1 + 0.6, yb, z1 + 0.6, Mat.Board, tint);
       // step back on one or two sides
@@ -340,7 +408,7 @@ function tallTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, 
     }
   }
   // service shaft on the tallest part, clear of the lobby floor
-  if (r.chance(0.6) && lobby === null) {
+  if (r.chance(0.6) && lobby === null && opts.serviceShaft !== false) {
     const sw = r.uniform(3, 5), cz = (z0 + z1) / 2;
     b.box(x1, base, cz - sw / 2, x1 + sw, top + r.uniform(3, 10), cz + sw / 2, Mat.Board, tint);
   }
@@ -353,7 +421,7 @@ function tallTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, 
     kerb(b, x0 - over, z0 - over, x1 + over, z1 + over, peak, tint, true);
     beacon(b, x0 - over + 0.6, peak + KERB, z0 - over + 0.6);
     beacon(b, x1 + over - 0.6, peak + KERB, z1 + over - 0.6);
-    return;
+    return top;
   }
   if (r.chance(0.5)) {
     const hw = (x1 - x0) * 0.22, hd = (z1 - z0) * 0.22, cap = r.uniform(4, 12);
@@ -366,13 +434,29 @@ function tallTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, 
     peak += mast;
   }
   beacon(b, cx, peak, cz);
+  return top;
 }
 
-function tallHeight(r: Rng, base: number): number {
+/** Smooth 0..1 value over a few blocks: dense high-rise districts and lower ones between them. */
+export function districtDensity(ci: number, cj: number): number {
+  const S = 5;
+  const fx = ci / S, fz = cj / S;
+  const ix = Math.floor(fx), iz = Math.floor(fz);
+  const sm = (t: number) => t * t * (3 - 2 * t);
+  const tx = sm(fx - ix), tz = sm(fz - iz);
+  const v = (a: number, c: number) => (hashInt(a, c, 31) % 1024) / 1023;
+  const top = v(ix, iz) + (v(ix + 1, iz) - v(ix, iz)) * tx;
+  const bot = v(ix, iz + 1) + (v(ix + 1, iz + 1) - v(ix, iz + 1)) * tx;
+  const n = top + (bot - top) * tz;
+  return sm(Math.min(1, Math.max(0, (n - 0.2) / 0.6)));
+}
+
+function tallHeight(r: Rng, base: number, dens: number): number {
   const roll = r.next();
-  if (roll < 0.35) return base + r.uniform(45, 90);
-  if (roll < 0.8) return base + r.uniform(90, 170);
-  return base + r.uniform(170, 300);
+  const k = 0.55 + 1.05 * dens;
+  if (roll < 0.35) return base + k * r.uniform(40, 80);
+  if (roll < 0.8) return base + k * r.uniform(80, 160);
+  return base + k * r.uniform(160, 280);
 }
 
 function midHeight(r: Rng, base: number, kMax = 5): number {
@@ -380,7 +464,7 @@ function midHeight(r: Rng, base: number, kMax = 5): number {
 }
 
 /** Terraced ziggurat with a stair flight up to every level. */
-function terraces(b: Builder, r: Rng, zone: Footprint, base: number, tint: Tint): void {
+function terraces(b: Builder, r: Rng, zone: Footprint, base: number, tint: Tint, dens: number): void {
   let { x0, z0, x1, z1 } = zone;
   let y = base;
   const levels = r.int(3, 6);
@@ -406,7 +490,7 @@ function terraces(b: Builder, r: Rng, zone: Footprint, base: number, tint: Tint)
   kerb(b, x0 - 0.2, z0 - 0.2, x1 + 0.2, z1 + 0.2, y, tint, true);
   if (r.chance(0.5)) {
     const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, hw = Math.min(x1 - x0, z1 - z0) / 2 - 2;
-    tallTower(b, r, { x0: cx - hw, z0: cz - hw, x1: cx + hw, z1: cz + hw }, y + KERB, tallHeight(r, y), tint, null);
+    tallTower(b, r, { x0: cx - hw, z0: cz - hw, x1: cx + hw, z1: cz + hw }, y + KERB, tallHeight(r, y, dens), tint, null);
   } else {
     const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
     b.box(cx - 1, y, cz - 4, cx + 1, y + r.uniform(8, 20), cz + 4, Mat.Board, tint);
@@ -437,26 +521,33 @@ function pergola(b: Builder, r: Rng, f: Footprint, base: number, tint: Tint): vo
 // ---------------------------------------------------------------------------
 // Block layouts on top of the podium (zone is the 40 m inner square)
 
-type Layout = (b: Builder, r: Rng, zone: Footprint, base: number, tint: Tint) => void;
+type Layout = (b: Builder, r: Rng, zone: Footprint, base: number, tint: Tint, dens: number) => void;
 
-const single: Layout = (b, r, z, base, tint) => {
-  const w = r.uniform(18, 28), d = r.uniform(18, 28);
-  const cx = (z.x0 + z.x1) / 2 + r.uniform(-4, 4), cz = (z.z0 + z.z1) / 2 + r.uniform(-4, 4);
+/** Sometimes a tower gets its own concrete mix instead of the block's. */
+function towerTint(r: Rng, tint: Tint): Tint {
+  return r.chance(0.35) ? r.pick(TINTS) : tint;
+}
+
+const single: Layout = (b, r, z, base, tint, dens) => {
+  const w = r.uniform(20, 34), d = r.uniform(20, 34);
+  const cx = (z.x0 + z.x1) / 2 + r.uniform(-1, 1) * (40 - w) / 2 * 0.7;
+  const cz = (z.z0 + z.z1) / 2 + r.uniform(-1, 1) * (40 - d) / 2 * 0.7;
   const f = { x0: cx - w / 2, z0: cz - d / 2, x1: cx + w / 2, z1: cz + d / 2 };
-  if (r.chance(0.5)) {
+  const t = towerTint(r, tint);
+  if (r.chance(0.5) && w < 31 && d < 31) {
     // an accessible low annex wrapped around the base
     const top = midHeight(r, base, 2);
     midTower(b, r, { x0: f.x0 - 3, z0: f.z0 - 3, x1: f.x1 + 3, z1: f.z1 + 3 }, base, top, tint, false);
-    tallTower(b, r, f, top + KERB, tallHeight(r, base), tint, null);
+    tallTower(b, r, f, top + KERB, tallHeight(r, base, dens), t, null);
   } else {
-    tallTower(b, r, f, base, tallHeight(r, base), tint, null);
+    tallTower(b, r, f, base, tallHeight(r, base, dens), t, null);
   }
 };
 
-const pair: Layout = (b, r, z, base, tint) => {
+const pair: Layout = (b, r, z, base, tint, dens) => {
   const alongX = r.chance(0.5);
-  const w1 = r.uniform(13, 17), w2 = r.uniform(13, 17);
-  const d = r.uniform(14, 24);
+  const w1 = r.uniform(13, 16), w2 = r.uniform(14, 20);
+  const d = r.uniform(14, 26);
   const c = alongX ? (z.z0 + z.z1) / 2 : (z.x0 + z.x1) / 2;
   const a0 = alongX ? z.x0 : z.z0, a1 = alongX ? z.x1 : z.z1;
   const make = (s0: number, s1: number): Footprint =>
@@ -466,7 +557,7 @@ const pair: Layout = (b, r, z, base, tint) => {
   midTower(b, r, A, base, level, tint, r.chance(0.4));
   const roll = r.next();
   let bridge = true;
-  if (roll < 0.6) tallTower(b, r, B, base, Math.max(level + 30, tallHeight(r, base)), tint, level);
+  if (roll < 0.6) tallTower(b, r, B, base, Math.max(level + 30, tallHeight(r, base, dens)), towerTint(r, tint), level);
   else if (roll < 0.85) midTower(b, r, B, base, level, tint, r.chance(0.4));
   else {
     midTower(b, r, B, base, midHeight(r, base), tint, false);
@@ -478,7 +569,7 @@ const pair: Layout = (b, r, z, base, tint) => {
   }
 };
 
-const quad: Layout = (b, r, z, base, tint) => {
+const quad: Layout = (b, r, z, base, tint, dens) => {
   const slot = 17, gap = 6;
   const level = midHeight(r, base, 4);
   const cx = z.x0 + slot + gap / 2, cz = z.z0 + slot + gap / 2;
@@ -498,7 +589,7 @@ const quad: Layout = (b, r, z, base, tint) => {
       mids++;
       towers.push({ f, connected: true });
     } else if (roll < 0.8) {
-      tallTower(b, r, f, base, Math.max(level + 30, tallHeight(r, base)), tint, level);
+      tallTower(b, r, f, base, Math.max(level + 30, tallHeight(r, base, dens)), towerTint(r, tint), level);
       towers.push({ f, connected: true });
     } else {
       midTower(b, r, f, base, midHeight(r, base), tint, false);
@@ -526,42 +617,147 @@ const quad: Layout = (b, r, z, base, tint) => {
   link(towers[1], towers[3], false);
 };
 
-const garden: Layout = (b, r, z, base, tint) => {
+const garden: Layout = (b, r, z, base, tint, dens) => {
   const cx = (z.x0 + z.x1) / 2, cz = (z.z0 + z.z1) / 2;
-  const w = r.uniform(10, 13);
-  tallTower(b, r, { x0: z.x1 - w - 2, z0: z.z1 - w - 2, x1: z.x1 - 2, z1: z.z1 - 2 }, base, tallHeight(r, base) + 40, tint, null);
+  const w = r.uniform(13, 17);
+  tallTower(b, r, { x0: z.x1 - w - 2, z0: z.z1 - w - 2, x1: z.x1 - 2, z1: z.z1 - 2 }, base, tallHeight(r, base, dens) + 40, towerTint(r, tint), null);
   pergola(b, r, { x0: z.x0 + 2, z0: z.z0 + 2, x1: cx + 4, z1: cz }, base, tint);
   for (let i = 0; i < r.int(1, 3); i++) {
-    const mx = r.uniform(z.x0 + 2, cx), mz = r.uniform(cz + 3, z.z1 - 10);
+    const mx = r.uniform(z.x0 + 2, cx - 4), mz = r.uniform(cz + 3, z.z1 - 10);
     b.box(mx, base, mz, mx + r.uniform(1.5, 3), base + r.uniform(8, 26), mz + r.uniform(5, 10), Mat.Board, tint);
   }
   parkourPillars(b, r, cx + 6, z.z0 + 4, 0, 1, base, tint);
 };
 
-const gate: Layout = (b, r, z, base, tint) => {
-  const f = { x0: z.x0 + 2, z0: z.z0 + r.uniform(4, 8), x1: z.x1 - 2, z1: z.z1 - r.uniform(4, 8) };
+const gate: Layout = (b, r, z, base, tint, dens) => {
+  const f = { x0: z.x0 + 2, z0: z.z0 + r.uniform(4, 7), x1: z.x1 - 2, z1: z.z1 - r.uniform(4, 7) };
   const top = midHeight(r, base, 3);
   midTower(b, r, f, base, top, tint, true);
-  const w = r.uniform(10, 14);
-  const cx = (f.x0 + f.x1) / 2 + r.uniform(-6, 6), cz = (f.z0 + f.z1) / 2 + (r.chance(0.5) ? -1 : 1) * 5;
-  tallTower(b, r, { x0: cx - w / 2, z0: cz - w / 2 - 1, x1: cx + w / 2, z1: cz + w / 2 - 1 }, top + KERB, tallHeight(r, top), tint, null);
+  const w = r.uniform(13, 18);
+  const cx = (f.x0 + f.x1) / 2 + r.uniform(-5, 5), cz = (f.z0 + f.z1) / 2 + (r.chance(0.5) ? -1 : 1) * 4;
+  const d = Math.min(w, f.z1 - f.z0 - 4);
+  const tz0 = Math.max(f.z0 + 1, Math.min(cz - d / 2, f.z1 - 1 - d));
+  tallTower(b, r, { x0: cx - w / 2, z0: tz0, x1: cx + w / 2, z1: tz0 + d }, top + KERB, tallHeight(r, top, dens), towerTint(r, tint), null);
 };
 
-const LAYOUTS: [Layout, number][] = [
-  [single, 3],
-  [pair, 3],
-  [quad, 3],
-  [terraces, 2],
-  [garden, 1],
-  [gate, 2],
+/** Long slab block, sometimes with a detached service core joined to it by sky bridges. */
+const slab: Layout = (b, r, z, base, tint, dens) => {
+  const alongX = r.chance(0.5);
+  const zx = (z.x0 + z.x1) / 2, zz = (z.z0 + z.z1) / 2;
+  // a runs along the slab, c across it, both relative to the zone centre
+  const fp = (a0: number, c0: number, a1: number, c1: number): Footprint =>
+    alongX ? { x0: zx + a0, z0: zz + c0, x1: zx + a1, z1: zz + c1 } : { x0: zx + c0, z0: zz + a0, x1: zx + c1, z1: zz + a1 };
+  const len = r.uniform(32, 40), dep = r.uniform(11, 15);
+  const o = r.uniform(-19, 10.5 - dep);
+  const t = towerTint(r, tint);
+  const top = tallTower(b, r, fp(-len / 2, o, len / 2, o + dep), base, base + (0.6 + 0.6 * dens) * r.uniform(50, 110), t, null,
+    { setbacks: false, serviceShaft: false });
+  const c0 = o + dep + 3.5;
+  if (r.chance(0.6)) {
+    const cw = r.uniform(5, 7), ca = r.uniform(-len / 2 + 4, len / 2 - 4 - cw);
+    const coreTop = top + r.uniform(6, 14);
+    const core = fp(ca, c0, ca + cw, c0 + 5.5);
+    b.box(core.x0, base, core.z0, core.x1, coreTop, core.z1, Mat.Windows, t, Win.Slit);
+    b.box(core.x0 - 0.5, coreTop, core.z0 - 0.5, core.x1 + 0.5, coreTop + 1.5, core.z1 + 0.5, Mat.Board, t);
+    beacon(b, (core.x0 + core.x1) / 2, coreTop + 1.5, (core.z0 + core.z1) / 2);
+    // a covered link every third floor (starting clear of the deck)
+    for (let y = base + 9; y < top - 4; y += 9.3) {
+      const l = fp(ca + cw / 2 - 1.4, o + dep, ca + cw / 2 + 1.4, c0);
+      b.box(l.x0, y, l.z0, l.x1, y + 3, l.z1, Mat.Windows, t, Win.Ribbon);
+    }
+  } else if (20 - c0 + 0.5 >= 9) {
+    const al = r.uniform(12, 18), start = r.chance(0.5) ? -len / 2 : len / 2 - al;
+    midTower(b, r, fp(start, c0 - 0.5, start + al, 20), base, midHeight(r, base, 3), tint, false);
+  }
+};
+
+/** Bundled tubes: a grid of shafts of different heights that read as one tower. */
+const cluster: Layout = (b, r, z, base, tint, dens) => {
+  const W = r.uniform(26, 34), D = r.uniform(26, 34);
+  const x0 = (z.x0 + z.x1) / 2 - W / 2 + r.uniform(-1, 1) * (40 - W) / 2;
+  const z0 = (z.z0 + z.z1) / 2 - D / 2 + r.uniform(-1, 1) * (40 - D) / 2;
+  const nx = r.int(2, 3), nz = r.int(2, 3);
+  const t = towerTint(r, tint);
+  const style = r.pick([Win.Punched, Win.Ribbon, Win.Grid, Win.Slit]);
+  const H = Math.max(70, Math.min(tallHeight(r, base, Math.max(dens, 0.5)) - base, Math.min(W, D) * r.uniform(5.5, 8)));
+  const tallest = r.int(0, nx * nz - 1);
+  const every = r.chance(0.5) ? r.pick([15, 21]) : 0;
+  // canopy over the deck around the foot of the bundle
+  b.box(x0 - 1.8, base + 5.2, z0 - 1.8, x0 + W + 1.8, base + 6.4, z0 + D + 1.8, Mat.Board, t);
+  for (let i = 0; i < nx; i++)
+    for (let k = 0; k < nz; k++) {
+      const f = { x0: x0 + (W * i) / nx, z0: z0 + (D * k) / nz, x1: x0 + (W * (i + 1)) / nx, z1: z0 + (D * (k + 1)) / nz };
+      const idx = i * nz + k;
+      const h = base + H * (idx === tallest ? 1 : r.pick([0.9, 0.75, 0.6, 0.45, 0.35]));
+      b.box(f.x0, base, f.z0, f.x1, h, f.z1, Mat.Windows, t, style);
+      if (every) bands(b, f, base + 6.4, h, every, t);
+      b.box(f.x0 - 0.3, h, f.z0 - 0.3, f.x1 + 0.3, h + 1.6, f.z1 + 0.3, Mat.Board, t);
+      const cx = (f.x0 + f.x1) / 2, cz = (f.z0 + f.z1) / 2;
+      if (idx === tallest) {
+        const mast = r.uniform(12, 40);
+        b.box(cx - 0.4, h + 1.6, cz - 0.4, cx + 0.4, h + 1.6 + mast, cz + 0.4, Mat.Metal, t, 0, { detail: false });
+        beacon(b, cx, h + 1.6 + mast, cz);
+      } else if (r.chance(0.5)) {
+        b.box(cx - 2, h + 1.6, cz - 1.5, cx + 2, h + 3.4, cz + 1.5, Mat.Metal, t);
+      }
+    }
+};
+
+/** Low courtyard block with passages through it, a walkable roof and sometimes a tower on one corner. */
+const megablock: Layout = (b, r, z, base, tint, dens) => {
+  const m = r.uniform(0.5, 2.5);
+  const x0 = z.x0 + m, z0 = z.z0 + m, x1 = z.x1 - m, z1 = z.z1 - m;
+  const t = r.uniform(9, 12);
+  const top = base + 6 * r.int(3, 5);
+  const style = r.pick([Win.Punched, Win.Ribbon, Win.Grid, Win.Punched]);
+  const cx = (x0 + x1) / 2, pw = 3;
+  // south and north wings, each with a passage at deck level
+  for (const [za, zb] of [[z0, z0 + t], [z1 - t, z1]]) {
+    b.box(x0, base, za, cx - pw, top - 1, zb, Mat.Windows, tint, style);
+    b.box(cx + pw, base, za, x1, top - 1, zb, Mat.Windows, tint, style);
+    b.box(cx - pw, base + 5, za, cx + pw, top - 1, zb, Mat.Windows, tint, style);
+    b.box(cx - pw + 0.4, base + 4.95, za + 0.5, cx + pw - 0.4, base + 5, zb - 0.5, Mat.Glow, tint, 0, { collide: false, detail: true });
+  }
+  b.box(x0, base, z0 + t, x0 + t, top - 1, z1 - t, Mat.Windows, tint, style);
+  b.box(x1 - t, base, z0 + t, x1, top - 1, z1 - t, Mat.Windows, tint, style);
+  // roof deck
+  b.box(x0 - 0.3, top - 1, z0 - 0.3, x1 + 0.3, top, z0 + t, Mat.Deck, tint);
+  b.box(x0 - 0.3, top - 1, z1 - t, x1 + 0.3, top, z1 + 0.3, Mat.Deck, tint);
+  b.box(x0 - 0.3, top - 1, z0 + t, x0 + t, top, z1 - t, Mat.Deck, tint);
+  b.box(x1 - t, top - 1, z0 + t, x1 + 0.3, top, z1 - t, Mat.Deck, tint);
+  kerb(b, x0 - 0.3, z0 - 0.3, x1 + 0.3, z1 + 0.3, top, tint, true);
+  kerb(b, x0 + t - 0.35, z0 + t - 0.35, x1 - t + 0.35, z1 - t + 0.35, top, tint);
+  facadeStair(b, x0 - 0.3, z0 - 0.3, x1 + 0.3, z1 + 0.3, base, top, tint);
+  // the stair arrives on the south or east side, so the corner tower goes north-west
+  const hx = (x0 + x1) / 2, hz = (z0 + z1) / 2;
+  if (r.chance(0.55)) {
+    const s = t - 1.2;
+    tallTower(b, r, { x0: x0 + 1, z0: z1 - 1 - s, x1: x0 + 1 + s, z1: z1 - 1 }, top + KERB, tallHeight(r, top, dens), towerTint(r, tint), null);
+  } else {
+    b.box(x1 - t + 2, top, z0 + 2, x1 - 2, top + r.uniform(1.2, 2.4), z0 + t - 2, Mat.Metal, tint);
+  }
+  if (r.chance(0.5)) b.pad(hx, base, hz, r.int(0, 3) * Math.PI / 2);
+  else pergola(b, r, { x0: x0 + t + 1.5, z0: z0 + t + 1.5, x1: x1 - t - 1.5, z1: z1 - t - 1.5 }, base, tint);
+};
+
+const LAYOUTS: [Layout, (dens: number) => number][] = [
+  [single, (d) => 3 * (0.4 + d)],
+  [cluster, (d) => 2.5 * (0.1 + d)],
+  [pair, () => 3],
+  [quad, () => 3],
+  [slab, () => 2],
+  [terraces, (d) => 2 * (1.4 - d)],
+  [megablock, (d) => 2 * (1.3 - d)],
+  [garden, () => 1],
+  [gate, () => 2],
 ];
 
-function pickLayout(r: Rng): Layout {
-  const total = LAYOUTS.reduce((s, [, w]) => s + w, 0);
-  let x = r.uniform(0, total);
-  for (const [l, w] of LAYOUTS) {
-    x -= w;
-    if (x <= 0) return l;
+function pickLayout(r: Rng, dens: number): Layout {
+  const weights = LAYOUTS.map(([, w]) => w(dens));
+  let x = r.uniform(0, weights.reduce((s, w) => s + w, 0));
+  for (let i = 0; i < LAYOUTS.length; i++) {
+    x -= weights[i];
+    if (x <= 0) return LAYOUTS[i][0];
   }
   return LAYOUTS[0][0];
 }
@@ -712,8 +908,9 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
 
   // --- towers
   const zone = { x0: bx0 + INNER, z0: bz0 + INNER, x1: bx1 - INNER, z1: bz1 - INNER };
-  const layout = ci === 0 && cj === 0 ? quad : pickLayout(r);
-  layout(b, r, zone, E, tint);
+  const dens = districtDensity(ci, cj);
+  const layout = ci === 0 && cj === 0 ? quad : pickLayout(r, dens);
+  layout(b, r, zone, E, tint, dens);
 }
 
 // ---------------------------------------------------------------------------
