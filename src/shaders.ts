@@ -308,7 +308,7 @@ Facade facade(vec2 uv, vec2 size, float style, vec2 fwUV) {
   float margin = 1.0;
   float usable = size.x - 2.0 * margin;
   if (usable < 1.5 || size.y < 3.0) return o;
-  float cwTarget = style < 0.5 ? 3.0 : (style < 1.5 ? 1.5 : (style < 2.5 ? 1.8 : 2.6));
+  float cwTarget = style < 0.5 ? 3.0 : (style < 1.5 ? 1.5 : (style < 2.5 ? 1.8 : (style < 3.5 ? 2.6 : 2.2)));
   float cw = usable / max(1.0, floor(usable / cwTarget));
   float lu = uv.x - margin;
   vec2 f = vec2(lu / cw, uv.y / FLOOR_H);
@@ -321,7 +321,8 @@ Facade facade(vec2 uv, vec2 size, float style, vec2 fwUV) {
   if (style < 0.5)      { lo = vec2(0.20, 0.28); hi = vec2(0.80, 0.80); depth = 0.45; }
   else if (style < 1.5) { lo = vec2(-1.0, 0.30); hi = vec2(2.0, 0.74); depth = 0.35; }
   else if (style < 2.5) { lo = vec2(0.40, 0.10); hi = vec2(0.60, 0.92); depth = 0.6; }
-  else                  { lo = vec2(0.09, 0.10); hi = vec2(0.91, 0.90); depth = 1.1; }
+  else if (style < 3.5) { lo = vec2(0.09, 0.10); hi = vec2(0.91, 0.90); depth = 1.1; }
+  else                  { lo = vec2(0.2, 0.22); hi = vec2(0.8, 0.84); depth = 1.8; }
 
   // band of facade that carries windows (margins and the parapet stay solid)
   float band = smoothstep(-fwUV.x, fwUV.x, lu) * (1.0 - smoothstep(usable - fwUV.x, usable + fwUV.x, lu))
@@ -435,7 +436,16 @@ void main() {
   bool horizontal = abs(N.y) > 0.5;
   if (mat == 0) { layer = 2; tile = 8.0; }
   else if (mat == 1) { layer = 3; tile = 4.0; }
-  else if (mat == 2) { layer = 0; tile = 4.0; }
+  else if (mat == 2) {
+    // concrete finish: board-formed, bush-hammered ribs or plywood-formed
+    if (style > 1.5) { layer = 5; tile = 4.8; }
+    else if (style > 0.5) { layer = 4; tile = 3.0; }
+    else { layer = 0; tile = 4.0; }
+  }
+  else if (mat == 4) {
+    if (style > 3.5) { layer = 5; tile = 4.8; }
+    else if (style > 1.5 && style < 2.5) { layer = 4; tile = 3.0; }
+  }
   else if (mat == 8) { layer = horizontal ? 3 : 0; tile = 4.0; }
   else if (mat == 13) { layer = horizontal ? 3 : 0; tile = 4.0; }
   bool vehicle = mat >= 10 && mat <= 12;
@@ -458,6 +468,27 @@ void main() {
 
   float macro = texture(uNoise, vPos.xz * 0.004 + vPos.y * 0.003).g;
   albedo *= mix(0.86, 1.08, macro);
+
+  // weathering on concrete walls: stains running down from the top edge, splash-back dirt at the
+  // foot and a patchy tone per surface. Sampled unconditionally; the noise has no mipmaps, so the
+  // fine streaks fade out with distance instead.
+  float wStreak = texture(uNoise, vec2(vUV.x * 0.07 + seed * 37.0, vUV.y * 0.005 + seed * 5.0)).b;
+  float wPatch = texture(uNoise, vec2(vUV.x * 0.045 + seed * 11.0, vUV.y * 0.03 - seed * 3.0)).g;
+  float wBlot = texture(uNoise, vUV * 0.06 + seed * 13.0).g;
+  bool concrete = mat == 2 || mat == 3 || mat == 4 || mat == 8;
+  if (concrete) {
+    albedo *= mix(0.9, 1.06, wBlot);
+    if (!horizontal) {
+      float near = 1.0 - smoothstep(60.0, 220.0, dist);
+      float fromTop = vSize.y - vUV.y;
+      float run = exp(-fromTop / mix(2.5, 16.0, wPatch));
+      float streak = mix(0.35, smoothstep(0.42, 0.85, wStreak), near) * smoothstep(0.3, 0.75, wPatch);
+      float tall = smoothstep(1.5, 4.0, vSize.y);
+      albedo *= 1.0 - 0.45 * streak * mix(0.3, 1.0, run) * tall;
+      float foot = (1.0 - smoothstep(0.0, 0.8 + 1.8 * wPatch, vUV.y)) * tall;
+      albedo *= mix(vec3(1.0), vec3(0.7, 0.72, 0.66), foot * 0.85);
+    }
+  }
 
   vec3 emissive = vec3(0.0);
   float specAmt = 0.02;

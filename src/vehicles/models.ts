@@ -96,6 +96,18 @@ export function figureBoxes(stride: number): ModelBox[] {
   ];
 }
 
+/** A lift platform (LIFT_SIZE square, origin at the centre of its top): a concrete slab on a steel frame with lit edges. */
+export function liftBoxes(size: number, thick: number): ModelBox[] {
+  const h = size / 2;
+  return [
+    box(-h, -thick, -h, h, 0, h, Mat.Deck),
+    box(-h + 0.15, -thick - 0.35, -h + 0.15, h - 0.15, -thick, h - 0.15, Mat.Metal),
+    ...pair(h - 0.3, -thick - 0.02, -h + 0.3, h - 0.2, -thick, h - 0.3, Mat.Glow),
+    box(-h + 0.3, 0, h - 0.3, h - 0.3, 0.02, h - 0.2, Mat.Glow),
+    box(-h + 0.3, 0, -h + 0.2, h - 0.3, 0.02, -h + 0.3, Mat.Glow),
+  ];
+}
+
 /** Flatten a model to 12-float boxes with a white tint (for instanced meshes). */
 export function modelData(model: ModelBox[]): number[] {
   const out: number[] = [];

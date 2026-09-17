@@ -3,6 +3,11 @@
 A moody, experimental first-person run through an endless brutalist city,
 playable in the browser. You run across podium decks, climb stairs onto
 rooftops, and cross bridges between towers while the sky changes above you.
+Long stairs wrap around the podium corners from the street, and open lifts
+run beside some of them. Stair and lift towers on the block corners climb to
+skyways 36 or 42 m up, some railed, some covered and some just a bare
+concrete beam. Where a bridge has fallen, its broken stubs are still there to
+jump at a sprint.
 Cars stream along the avenues and flyers cross the air above the streets.
 Take a parked flyer from a landing pad, fly to another roof and step out,
 shoot other flyers out of the sky, or take a car and drive. Hunters come after
@@ -11,7 +16,9 @@ of them (or turn them off with H).
 
 Everything is generated in code, with no image or sound files:
 - the city
-- the textures: board-formed and precast concrete, asphalt, paving
+- the textures: board-formed, bush-hammered ribbed, plywood-formed and precast
+  concrete (with tie holes, rust runs, salt bloom and rain streaks), asphalt,
+  paving
 - the clouds and the weather
 - the sound: wind, drones, rain and footsteps
 
@@ -143,9 +150,10 @@ reversed-Z depth.
 
 | file | |
 |---|---|
-| `src/city/generate.ts` | Deterministic city on an 88 m grid. Streets are canyons; each block is a raised podium (18, 24 or 30 m) linked to its neighbours by bridges, which become stepped bridges when the heights differ. On top of the podiums sit skyscrapers (with setbacks, sky lobbies, cross or split plans, pilotis and plant-floor bands; their height is limited by their footprint), bundled towers, slab blocks with detached service cores, courtyard megablocks, mid-rise towers with stairs wrapping around the outside up to their roofs, terraces, and parkour pillars. A slowly varying district density decides where the dense high-rise quarters are. Switchback stair towers climb up from the street. The city is made only of boxes, meshed in batches of 3×3 blocks. |
+| `src/city/generate.ts` | Deterministic city on an 88 m grid. Streets are canyons; each block is a raised podium (18, 24 or 30 m) linked to its neighbours by bridges, which become stepped bridges when the heights differ. On top of the podiums sit skyscrapers (with setbacks, sky lobbies, cross or split plans, pilotis and plant-floor bands; their height is limited by their footprint), bundled towers, slab blocks with detached service cores, courtyard megablocks, gate towers joined by a high bridge block, inverted-ziggurat towers that cantilever outward as they rise, mid-rise towers with stairs wrapping around the outside up to their roofs, terraces, and parkour pillars. Street crossings may get skyways at 36 or 42 m (below the lowest flyer corridor), reached by stair or lift pylons on the podium corners. The stairs are two long flights with one turn. Where two podiums have no bridge, there are often broken stubs with a gap to jump. A slowly varying district density decides where the dense high-rise quarters are. From the street, a stair wraps around one podium corner (two long flights and a landing on a pier), and many blocks also have an open lift in another corner. The city is made only of boxes, meshed in batches of 3×3 blocks. |
+| `src/lifts.ts` | Lifts: open platforms on a fixed timetable (their height is a function of time, like the traffic). They add their platforms to the collision boxes, keep riders on while they move, lift anyone they come down on, and are drawn with instancing. |
 | `src/worker.ts`, `src/world.ts` | Web Worker pool that generates textures and city regions, streams regions in and out around the player, and draws simplified distant regions. |
-| `src/textures.ts` | Tileable procedural materials (value noise, fbm, height → normal maps). |
+| `src/textures.ts` | Tileable procedural materials (value noise, fbm, height → normal maps): four concrete finishes with stains, plus asphalt and paving. The city shader adds weathering on top: streaks running down from the top of walls and dirt at their foot. |
 | `src/shaders.ts` | Sky and cloud shadows; shadow-mapped sun; procedural recessed windows and road markings with anti-aliased edges; wet reflections; street-lamp pools; canyon mist; ACES tone mapping, bloom, grain and speed blur. |
 | `src/renderer.ts`, `src/gl.ts` | WebGL2 render passes, 4× MSAA HDR target, shadow map. |
 | `src/player.ts` | Runner movement, box collision, stepping, ledge climbing, camera bob, roll and FOV kick. |
@@ -165,7 +173,7 @@ reversed-Z depth.
 ## Development
 
 ```sh
-npm test                      # headless tests: stairs, bridges, climbing, collisions, flying, clear traffic lanes, demo autopilots, hunters
+npm test                      # headless tests: stairs, lifts, bridges, pylons and skyways, running lines, gap jumps, climbing, collisions, flying, clear traffic lanes, demo autopilots, hunters
 npm run build && npx vite preview --port 4173
 node scripts/shots.mjs out "clear sky,rain" deck,street   # screenshots via Chrome/Edge
 node scripts/landing.mjs out/landing.png                  # title screen as a visitor sees it

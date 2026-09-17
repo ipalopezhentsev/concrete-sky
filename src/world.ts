@@ -1,7 +1,7 @@
 // Streams city regions around the runner: generation happens in a worker pool,
 // meshes are uploaded as they arrive, and collision boxes are served per cell.
 
-import { buildRegion, CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Pad, type ParkedCar, type RegionMesh } from "./city/generate";
+import { buildRegion, CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Lift, type Pad, type ParkedCar, type RegionMesh } from "./city/generate";
 import { Mesh, type GL } from "./gl";
 import { aabbVisible, type Vec3 } from "./math";
 import type { TextureSet } from "./textures";
@@ -15,6 +15,7 @@ interface Region {
   mesh: Mesh;
   pads: (Pad & { id: string })[];
   cars: (ParkedCar & { id: string })[];
+  lifts: Lift[];
   groundCount: number;
   cells: CellRange[];
   lo: Vec3;
@@ -41,6 +42,10 @@ export class World {
 
   *parkedCars(): Iterable<ParkedCar & { id: string }> {
     for (const r of this.regions.values()) yield* r.cars;
+  }
+
+  *lifts(): Iterable<Lift> {
+    for (const r of this.regions.values()) yield* r.lifts;
   }
 
   constructor(private gl: GL, private seed: number) {
@@ -83,6 +88,7 @@ export class World {
       mesh: new Mesh(this.gl, m.vertices, VERTEX_LAYOUT, m.indices),
       pads: m.pads,
       cars: m.cars,
+      lifts: m.lifts,
       groundCount: m.groundCount,
       cells: m.cells,
       lo: [x0 - pad, -1, z0 - pad],

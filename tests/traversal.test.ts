@@ -1,5 +1,9 @@
 // Headless movement tests: run with `npx tsx tests/traversal.test.ts`.
-import { Builder, bridgeOn, buildRegion, CELL, edgeBridge, facadeStair, PODIUM_LEVELS, podiumHeight, spawnPoint, STREET, stairTower } from "../src/city/generate";
+import {
+  Builder, bridgeOn, buildRegion, CELL, cornerPylon, cornerStair, crossing, edgeBridge, facadeStair, PODIUM_LEVELS, podiumHeight,
+  pylonSize, spawnPoint, STREET, streetFlight, streetLift,
+} from "../src/city/generate";
+import { liftState, Lifts } from "../src/lifts";
 import { Rng, setWorldSeed } from "../src/math";
 import { Player, type Input } from "../src/player";
 import { Flyer, type FlyInput } from "../src/vehicles/flyer";
@@ -24,6 +28,25 @@ function boxesOf(b: Builder): Float32Array {
     if (b.data[o + 12]) out.push(...b.data.slice(o, o + 6));
   }
   return Float32Array.from(out);
+}
+
+/**
+ * Pairs of boxes with a face in the same plane, pointing the same way and overlapping: the two
+ * surfaces flicker through each other. Bottom faces are skipped (they rest on something).
+ */
+function coplanarFaces(boxes: Float32Array): number {
+  let n = 0;
+  for (let i = 0; i < boxes.length; i += 6)
+    for (let j = i + 6; j < boxes.length; j += 6)
+      for (let ax = 0; ax < 3; ax++)
+        for (const side of ax === 1 ? [3] : [0, 3]) {
+          if (Math.abs(boxes[i + ax + side] - boxes[j + ax + side]) > 1e-4) continue;
+          let area = 1;
+          for (let k = 0; k < 3; k++)
+            if (k !== ax) area *= Math.max(0, Math.min(boxes[i + k + 3], boxes[j + k + 3]) - Math.max(boxes[i + k], boxes[j + k]));
+          if (area > 1e-4) n++;
+        }
+  return n;
 }
 
 /** Walk through waypoints (x, z); returns the player. */
@@ -53,23 +76,74 @@ function penetrates(p: Player, boxes: Float32Array): boolean {
   return false;
 }
 
-// 1. switchback stair tower: axis z, u from 0, outer wall at x = 0, podium at x = 5.8
-{
+// 1. street stair round a podium corner at (0, 0): up beside the x = 0 face, round the corner,
+// along the z = 0 face and onto the deck
+for (const E of PODIUM_LEVELS) {
   const b = new Builder(new Rng(1));
-  const top = 24;
-  stairTower(b, "z", 0, 0, 1, top, [1, 1, 1]);
-  b.box(5.8, 0, -20, 40, top, 40, 2); // podium
+  cornerStair(b, 0, 0, 1, 1, E, [1, 1, 1]);
+  b.box(-0.5, 0, -0.5, 60, E, 60, 8); // podium with its deck overhang
   const boxes = boxesOf(b);
-  const p = new Player(1.6, 0, -3, 0);
-  // lane A centre x ~1.55, lane B centre x ~4.25; landings at z 0.4..2.8 and 6.2..8.6
-  const wps: [number, number][] = [[1.55, 1.6]];
-  for (let k = 0; k < top / 3; k++) {
-    if (k % 2 === 0) wps.push([1.55, 7.4], [4.25, 7.4]);
-    else wps.push([4.25, 1.6], [1.55, 1.6]);
+  const { length } = streetFlight(E);
+  const p = new Player(-2.1, 0, length + 2, Math.PI);
+  walk(p, boxes, [[-2.1, -2.1], [length + 0.6, -2.1], [length + 0.6, 3]], 120);
+  check(`corner stair reaches a ${E} m deck`, Math.abs(p.pos[1] - E) < 0.05 && p.pos[2] > 1, `pos=${p.pos.map((v) => v.toFixed(2))}`);
+}
+
+// 1b. street lift: wait on the platform, ride up, step off over the landing onto the deck
+{
+  const E = 24;
+  const b = new Builder(new Rng(11));
+  streetLift(b, 0, 0, 1, 1, E, [1, 1, 1]);
+  b.box(-0.5, 0, -0.5, 60, E, 60, 8);
+  b.box(-20, 0, -20, 0, 0.18, 0, 1); // sidewalk
+  const lifts = new Lifts();
+  lifts.sync(b.lifts);
+  const still = boxesOf(b);
+  const all = () => {
+    const l = lifts.boxes(0, 0);
+    const out = new Float32Array(still.length + l.length);
+    out.set(still);
+    out.set(l, still.length);
+    return out;
+  };
+  const lift = b.lifts[0];
+  const cx = (lift.x0 + lift.x1) / 2, cz = (lift.z0 + lift.z1) / 2;
+  const idle: Input = { moveX: 0, moveZ: 0, sprint: false, walk: false, jump: false };
+  let time = 0, maxOff = 0, rode = false;
+  // step on while it waits at the bottom
+  while (liftState(lift, time).moving || liftState(lift, time).y !== lift.y0) time += 0.1;
+  const p = new Player(cx, 0.2, cz, 0);
+  // stand until the lift has been to the top and is waiting there
+  for (let t = 0; t < 60 * 60; t++) {
+    time += 1 / 60;
+    lifts.update(time);
+    p.update(1 / 60, idle, all);
+    lifts.carry(p);
+    const { y, moving } = liftState(lift, time);
+    maxOff = Math.max(maxOff, Math.abs(p.pos[1] - y));
+    if (moving && y > 5) rode = true;
+    if (rode && !moving && y === lift.y1) break;
   }
-  wps.push([4.25, 1.6], [8, 1.6]);
-  walk(p, boxes, wps, 120);
-  check("stair tower reaches podium deck", Math.abs(p.pos[1] - top) < 0.05 && p.pos[0] > 6, `pos=${p.pos.map((v) => v.toFixed(2))}`);
+  check("street lift carries a rider up", rode && Math.abs(p.pos[1] - E) < 0.01 && maxOff < 0.06, `pos=${p.pos.map((v) => v.toFixed(2))} maxOff=${maxOff.toFixed(3)}`);
+  walk(p, all(), [[1.5, cz], [1.5, 3]], 10);
+  check("street lift lands beside the deck", Math.abs(p.pos[1] - E) < 0.01 && p.pos[2] > 2, `pos=${p.pos.map((v) => v.toFixed(2))}`);
+
+  // someone the lift comes down on ends up standing on it
+  const q = new Player(cx, 0.2, cz, 0);
+  let under = false, bad = 0;
+  for (let t = 0; t < 60 * 60; t++) {
+    time += 1 / 60;
+    lifts.update(time);
+    const { y } = liftState(lift, time);
+    if (y > 3 && !under) {
+      under = true;
+      q.pos = [cx, 0.2, cz];
+    }
+    q.update(1 / 60, idle, all);
+    lifts.carry(q);
+    if (under && y < q.pos[1] + 1.7 && q.pos[1] < y - 0.05) bad++;
+  }
+  check("a lift coming down lifts whoever is under it", under && bad === 0, `bad frames=${bad}`);
 }
 
 // 2. facade stair around a 14 m tower from a deck at 18 to a roof at 36
@@ -190,6 +264,163 @@ for (const seed of [1971, 42, 777777]) {
       else console.log(`  bridge ${ci},${cj} ${ha}->${hb} ended at ${p.pos.map((v) => v.toFixed(1))}`);
     }
   check(`stepped bridges connect podiums (seed ${seed})`, tested > 0 && passed === tested, `${passed}/${tested}`);
+
+  // 5b. up a corner pylon (stairs or lift) and over a skyway across the avenue to the next block
+  const PD = 5.8;
+  const tested5b = { stair: 0, lift: 0 }, passed5b = { stair: 0, lift: 0 };
+  for (let ci = -10; ci < 10 && (tested5b.stair < 5 || tested5b.lift < 4); ci++)
+    for (let cj = -10; cj < 10 && (tested5b.stair < 5 || tested5b.lift < 4); cj++) {
+      const west = cornerPylon(ci, cj, true, false);
+      const c = crossing(ci + 1, cj);
+      if (!west || west.axis !== "x" || !c?.xn) continue;
+      const kind = west.lift ? "lift" : "stair";
+      if (tested5b[kind] >= (west.lift ? 4 : 5)) continue;
+      tested5b[kind]++;
+      const E = podiumHeight(ci, cj);
+      const lifts = new Lifts();
+      lifts.sync(buildRegion(Math.floor(ci / 3), Math.floor(cj / 3)).lifts);
+      const withLifts = (x: number, z: number) => {
+        const a = colliders(x, z), l = lifts.boxes(x, z);
+        const out = new Float32Array(a.length + l.length);
+        out.set(a);
+        out.set(l, a.length);
+        return out;
+      };
+      // west pylon: u runs -x from the street end, v runs +z from the podium edge
+      const u0 = ci * CELL + CELL - STREET / 2 - 6.5 - 0.3, v0 = cj * CELL + STREET / 2 + 6.5 + 0.3;
+      const at = (u: number, v: number): [number, number] => [u0 - u, v0 + v];
+      const span = 2 * (6.5 + 0.3) + STREET;
+      // a route is a list of waypoints; `null` means wait for the lift to arrive at `level`
+      type Step = [number, number] | { wait: number };
+      const route: Step[] = [];
+      if (west.lift) {
+        const start = at(2.9, PD + 1.2);
+        route.push(start, { wait: E + 0.02 }, at(2.9, 2.9), { wait: west.level }, at(0.6, 2.9));
+      } else {
+        const [L] = pylonSize(false, west.level - E);
+        const farMid = L - 0.4 - 1.3;
+        route.push(at(1.3, 4.25), at(farMid, 4.25), at(farMid, 1.55), at(1.3, 1.55), at(1.3, 2.9), at(-3, 2.9));
+      }
+      route.push(at(-span - 1.3, 2.9));
+      const [sx0, sz0] = west.lift ? at(2.9, PD + 1.2) : at(2, PD + 1.5);
+      const p = new Player(sx0, E, sz0, 0);
+      let wi = 0, time = 0;
+      const input: Input = { moveX: 0, moveZ: 1, sprint: false, walk: false, jump: false };
+      for (let t = 0; t < 60 * 180 && wi < route.length; t++) {
+        time += 1 / 60;
+        lifts.update(time);
+        const step = route[wi];
+        if ("wait" in step) {
+          // wait until the platform stands at the level (it pauses there)
+          const l = lifts.boxes(p.pos[0], p.pos[2]);
+          let ready = false;
+          for (let i = 0; i < l.length; i += 6)
+            if (Math.abs(l[i + 4] - step.wait) < 1e-3 && Math.abs((l[i] + l[i + 3]) / 2 - at(2.9, 2.9)[0]) < 0.01 &&
+                Math.abs((l[i + 2] + l[i + 5]) / 2 - at(2.9, 2.9)[1]) < 0.01) ready = true;
+          input.moveZ = 0;
+          p.update(1 / 60, input, withLifts);
+          lifts.carry(p);
+          if (ready && t % 60 === 0) wi++;
+          continue;
+        }
+        input.moveZ = 1;
+        const [tx, tz] = step;
+        if (Math.hypot(tx - p.pos[0], tz - p.pos[2]) < 0.3) { wi++; continue; }
+        p.yaw = Math.atan2(tx - p.pos[0], tz - p.pos[2]);
+        p.update(1 / 60, input, withLifts);
+        lifts.carry(p);
+      }
+      const ok = wi === route.length && Math.abs(p.pos[1] - west.level) < 0.05 && p.pos[0] > u0 + span;
+      if (ok) passed5b[kind]++;
+      else console.log(`  ${kind} pylon ${ci},${cj} ${E}->${west.level} (${c.xn}) ended at ${p.pos.map((v) => v.toFixed(1))} step ${wi}/${route.length}`);
+    }
+  check(`stair pylons climb to skyways that cross the street (seed ${seed})`, tested5b.stair > 0 && passed5b.stair === tested5b.stair, `${passed5b.stair}/${tested5b.stair}`);
+  check(`lift pylons carry up to skyways that cross the street (seed ${seed})`, tested5b.lift > 0 && passed5b.lift === tested5b.lift, `${passed5b.lift}/${tested5b.lift}`);
+
+  // 5c. nothing else on the block runs into a pylon
+  let clashes = 0, pylons = 0;
+  for (let ci = -6; ci < 6; ci++)
+    for (let cj = -6; cj < 6; cj++) {
+      const E = podiumHeight(ci, cj);
+      const boxes = colliders(ci * CELL + CELL / 2, cj * CELL + CELL / 2);
+      for (const east of [false, true])
+        for (const north of [false, true]) {
+          const py = cornerPylon(ci, cj, east, north);
+          if (!py) continue;
+          pylons++;
+          const cx = ci * CELL + (east ? CELL - STREET / 2 - 6.5 : STREET / 2 + 6.5);
+          const cz = cj * CELL + (north ? CELL - STREET / 2 - 6.5 : STREET / 2 + 6.5);
+          const sx = east ? -1 : 1, sz = north ? -1 : 1;
+          const [PL, PW] = pylonSize(py.lift, py.level - E);
+          const [lx, lz] = py.axis === "x" ? [PL, PW] : [PW, PL];
+          const x0 = Math.min(cx + sx * 0.3, cx + sx * (0.3 + lx)), x1 = Math.max(cx + sx * 0.3, cx + sx * (0.3 + lx));
+          const z0 = Math.min(cz + sz * 0.3, cz + sz * (0.3 + lz)), z1 = Math.max(cz + sz * 0.3, cz + sz * (0.3 + lz));
+          const own: number[] = [];
+          for (let i = 0; i < boxes.length; i += 6) {
+            const [bx0, by0, bz0, bx1, by1, bz1] = boxes.subarray(i, i + 6);
+            if (bx0 >= x0 - 0.9 && bx1 <= x1 + 0.9 && bz0 >= z0 - 0.9 && bz1 <= z1 + 0.9 && by0 >= E - 0.01) own.push(bx0, by0, bz0, bx1, by1, bz1);
+            if (bx1 <= x0 || bx0 >= x1 || bz1 <= z0 || bz0 >= z1 || by1 <= E + 0.05 || by0 >= py.level - 3.5) continue;
+            const inside = bx0 >= x0 - 0.9 && bx1 <= x1 + 0.9 && bz0 >= z0 - 0.9 && bz1 <= z1 + 0.9;
+            if (!inside) {
+              if (clashes < 4) console.log(`  pylon ${ci},${cj} ${east ? "E" : "W"}${north ? "N" : "S"} hits ${[bx0, by0, bz0, bx1, by1, bz1].map((v) => v.toFixed(1))}`);
+              clashes++;
+            }
+          }
+          const flicker = coplanarFaces(Float32Array.from(own));
+          if (flicker) {
+            if (clashes < 4) console.log(`  pylon ${ci},${cj}: ${flicker} pairs of faces share a plane`);
+            clashes += flicker;
+          }
+        }
+    }
+  check(`pylons stand clear of the towers (seed ${seed})`, pylons > 10 && clashes === 0, `pylons=${pylons} clashes=${clashes}`);
+
+  // 5e. pylons, stairs and deck furniture leave every side of every deck a running line
+  {
+    const pilot = new RunPilot(0, 0, colliders) as unknown as { ring(ci: number, cj: number): { lines: (number | null)[] } };
+    let blocked = 0;
+    for (let ci = -6; ci < 6; ci++)
+      for (let cj = -6; cj < 6; cj++)
+        pilot.ring(ci, cj).lines.forEach((l, side) => {
+          if (l !== null) return;
+          if (blocked < 3) console.log(`  no running line on side ${side} of ${ci},${cj}`);
+          blocked++;
+        });
+    check(`every deck side has a running line (seed ${seed})`, blocked === 0, `blocked=${blocked}`);
+  }
+
+  // 5d. the stubs of a broken bridge can be jumped at a sprint
+  let gapTested = 0, gapPassed = 0;
+  for (let ci = -8; ci < 8 && gapTested < 4; ci++)
+    for (let cj = -8; cj < 8 && gapTested < 4; cj++) {
+      const E = podiumHeight(ci, cj);
+      if (edgeBridge(ci, cj, 0) !== null || podiumHeight(ci + 1, cj) !== E) continue;
+      const faceA = ci * CELL + CELL - STREET / 2 - 6.5;
+      const boxes = colliders(faceA + 15, cj * CELL + CELL / 2);
+      // find the stubs: deck tops at E spanning the street, and the gap between them
+      const tops: [number, number, number][] = [];
+      for (let i = 0; i < boxes.length; i += 6)
+        if (Math.abs(boxes[i + 4] - E) < 0.01 && boxes[i + 1] > E - 1 && boxes[i] >= faceA + 0.4 && boxes[i + 3] <= faceA + 31 &&
+            Math.abs(boxes[i + 5] - boxes[i + 2] - 3.2) < 0.01) tops.push([boxes[i], boxes[i + 3], (boxes[i + 2] + boxes[i + 5]) / 2]);
+      tops.sort((a, b) => a[0] - b[0]);
+      if (tops.length !== 2 || Math.abs(tops[0][2] - tops[1][2]) > 0.01) {
+        console.log(`  gap ${ci},${cj}: ${tops.length} stub decks`);
+        continue;
+      }
+      gapTested++;
+      const zc = tops[0][2], gap0 = tops[0][1], gap1 = tops[1][0];
+      const p = new Player(faceA - 3, E, zc, Math.PI / 2);
+      const input: Input = { moveX: 0, moveZ: 1, sprint: true, walk: false, jump: false };
+      for (let t = 0; t < 60 * 6; t++) {
+        input.jump = p.pos[0] > gap0 - 0.9 && p.pos[0] < gap0;
+        p.update(1 / 60, input, colliders);
+        if (p.grounded && p.pos[0] > gap1 + 1.5) break;
+      }
+      const ok = Math.abs(p.pos[1] - E) < 0.05 && p.pos[0] > gap1;
+      if (ok) gapPassed++;
+      else console.log(`  gap ${ci},${cj} ${gap0.toFixed(1)}..${gap1.toFixed(1)} ended at ${p.pos.map((v) => v.toFixed(1))}`);
+    }
+  check(`broken bridges can be jumped (seed ${seed})`, gapTested > 0 && gapPassed === gapTested, `${gapPassed}/${gapTested}`);
 }
 
 // 6. flyer: take off from a deck, fly to a taller roof, land, step out

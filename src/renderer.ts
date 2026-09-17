@@ -8,10 +8,12 @@ import {
   cross, dot, frustumPlanes, mul, normalize, ortho, perspective, perspectiveReversed, scale, sub, viewMatrix, type Vec3,
 } from "./math";
 import * as S from "./shaders";
-import { NOISE_SIZE, TEX_SIZE, type TextureSet } from "./textures";
+import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { carBoxes, figureBoxes, flyerBoxes, modelData } from "./vehicles/models";
+import { carBoxes, figureBoxes, flyerBoxes, liftBoxes, modelData } from "./vehicles/models";
+import { LIFT_SIZE } from "./city/generate";
+import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, type InstanceList } from "./vehicles/traffic";
 import { PARTICLE_INSTANCE_LAYOUT, type Particles } from "./effects/particles";
 import type { Weather } from "./weather";
@@ -45,6 +47,7 @@ export interface VehicleLists {
   flyers: InstanceList;
   /** People on foot, by pose: standing, left stride, right stride. */
   figures?: InstanceList[];
+  lifts?: InstanceList;
 }
 
 export interface RenderOptions {
@@ -67,7 +70,7 @@ export class Renderer {
   private post: Program;
   private cloudProg: Program;
   private vehicleProg: Program;
-  private vehicleMeshes: { car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; figures: InstancedMesh[] };
+  private vehicleMeshes: { car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; figures: InstancedMesh[]; lift: InstancedMesh };
   private particleProg: Program;
   private particleMesh: InstancedMesh;
   private tri: Mesh;
@@ -124,6 +127,7 @@ export class Renderer {
       van: instanced(modelData(carBoxes(true))),
       flyer: instanced(modelData(flyerBoxes())),
       figures: [0, 1, -1].map((stride) => instanced(modelData(figureBoxes(stride)))),
+      lift: instanced(modelData(liftBoxes(LIFT_SIZE, LIFT_THICK))),
     };
     this.tri = fullscreenTriangle(gl);
 
@@ -135,8 +139,8 @@ export class Renderer {
     }
     this.rain = new Mesh(gl, rain, [3, 1], null, gl.LINES);
 
-    this.albedo = textureArray(gl, TEX_SIZE, 4, tex.albedo, true);
-    this.normal = textureArray(gl, TEX_SIZE, 4, tex.normal, false);
+    this.albedo = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.albedo, true);
+    this.normal = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.normal, false);
     this.noise = texture2D(gl, NOISE_SIZE, tex.noise);
     this.shadow = new ShadowTarget(gl, this.shadowSize);
     this.clouds = new ColorTarget(gl, CLOUD_SIZE);
@@ -295,6 +299,7 @@ export class Renderer {
     this.vehicleMeshes.van.draw(vehicles.vans.data, vehicles.vans.count);
     this.vehicleMeshes.flyer.draw(vehicles.flyers.data, vehicles.flyers.count);
     vehicles.figures?.forEach((list, i) => this.vehicleMeshes.figures[i].draw(list.data, list.count));
+    if (vehicles.lifts) this.vehicleMeshes.lift.draw(vehicles.lifts.data, vehicles.lifts.count);
 
     // --- sky, only where no geometry was drawn
     timer.begin("sky");

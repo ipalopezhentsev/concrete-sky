@@ -3,7 +3,7 @@
 export const enum Mat {
   Asphalt = 0,
   Paving = 1,
-  Board = 2,
+  Board = 2, // style picks the finish (Finish)
   Panel = 3,
   Windows = 4,
   Lamp = 5,
@@ -22,6 +22,14 @@ export const enum Win {
   Ribbon = 1,
   Slit = 2,
   Grid = 3,
+  Crate = 4, // deep egg-crate of precast frames on plywood-formed concrete
 }
 
 export type Tint = [number, number, number];
+
+/** Surface finish of Mat.Board, passed as its style. */
+export const enum Finish {
+  Boards = 0, // board-formed
+  Ribbed = 1, // bush-hammered ribs
+  Cast = 2, // plywood-formed
+}

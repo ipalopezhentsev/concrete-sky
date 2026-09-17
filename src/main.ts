@@ -356,6 +356,7 @@ async function main(): Promise<void> {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     time += dt;
+    rides.lifts.update(time);
 
     const down = (...codes: string[]) => codes.some((c) => keys.has(c));
     // a light push on the stick walks, a full one sprints (it's the throttle in a car)
@@ -396,6 +397,7 @@ async function main(): Promise<void> {
         player.yaw += dt * 0.15 * Math.sin(time * 0.4);
       }
       player.update(dt, input, rides.colliders);
+      rides.lifts.carry(player);
       if (player.footstep) audio.step(player.speedNorm, weather.wet);
       if (player.landed > 0.2) audio.landing(player.landed);
     }

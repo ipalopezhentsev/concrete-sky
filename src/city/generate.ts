@@ -4,10 +4,10 @@
 // in deep canyons: every block is a raised podium (the main running level) connected
 // to its neighbours by bridges. Towers rise from the podiums; mid-rise towers have
 // external stairs to their roofs and link to each other and to sky lobbies of
-// skyscrapers. Stair towers lead up from the street.
+// skyscrapers. Long stairs and lifts lead up from the street.
 
 import { hashInt, Rng } from "../math";
-import { Mat, Win, type Tint } from "./materials";
+import { Finish, Mat, Win, type Tint } from "./materials";
 import { PAINT_COLORS } from "../vehicles/models";
 import { emitBox, FLOATS_PER_VERTEX } from "./mesh";
 
@@ -63,6 +63,17 @@ export interface ParkedCar {
   color: Tint;
 }
 
+/** A lift platform: its footprint and the height of its top at the bottom and top stops. */
+export interface Lift {
+  x0: number;
+  z0: number;
+  x1: number;
+  z1: number;
+  y0: number;
+  y1: number;
+  phase: number; // 0..1, where in its timetable the lift is at time 0
+}
+
 /** A landing pad with a parked flyer (feet level y, facing yaw). */
 export interface Pad {
   x: number;
@@ -76,12 +87,19 @@ export class Builder {
   count = 0;
   pads: Pad[] = [];
   cars: ParkedCar[] = [];
+  lifts: Lift[] = [];
+  /** Concrete finish given to Mat.Board boxes that don't ask for one. */
+  finish: Finish = Finish.Boards;
   constructor(private rng: Rng) {}
 
   /** Painted landing pad (5 x 5 m) centred at (x, z) on a surface at height y. */
   pad(x: number, y: number, z: number, yaw: number): void {
     this.box(x - 2.6, y, z - 2.6, x + 2.6, y + 0.04, z + 2.6, Mat.Pad, WHITE, 0, { detail: false });
     this.pads.push({ x, y: y + 0.04, z, yaw });
+  }
+
+  lift(x0: number, z0: number, x1: number, z1: number, y0: number, y1: number): void {
+    this.lifts.push({ x0, z0, x1, z1, y0, y1, phase: this.rng.next() });
   }
 
   box(
@@ -92,6 +110,7 @@ export class Builder {
     if (x1 - x0 < 1e-3 || y1 - y0 < 1e-3 || z1 - z0 < 1e-3) return;
     const volume = (x1 - x0) * (y1 - y0) * (z1 - z0);
     const detail = opts.detail ?? volume < 20;
+    if (mat === Mat.Board && style === 0) style = this.finish;
     this.data.push(
       x0, y0, z0, x1, y1, z1, tint[0], tint[1], tint[2], mat, style,
       opts.seed ?? this.rng.next(), opts.collide === false ? 0 : 1, detail ? 1 : 0,
@@ -152,47 +171,111 @@ function stairBridge(
   void r;
 }
 
-/** Switchback stair tower. u runs along the axis, v across (v = 6 faces the podium). */
-export function stairTower(
-  b: Builder, axis: "x" | "z", u0: number, v0: number, vSign: 1 | -1, yTop: number, tint: Tint,
-): void {
-  const L = 9, D = 5.8;
-  const put = (ua: number, ub: number, va: number, vb: number, y0: number, y1: number, mat: Mat, style = 0, collide = true) => {
-    // v measured from the outer side toward the podium
-    const p = vSign > 0 ? [v0 + va, v0 + vb] : [v0 - vb, v0 - va];
-    const opts = collide ? {} : { collide: false, detail: true };
-    if (axis === "x") b.box(u0 + ua, y0, p[0], u0 + ub, y1, p[1], mat, tint, style, opts);
-    else b.box(p[0], y0, u0 + ua, p[1], y1, u0 + ub, mat, tint, style, opts);
+/**
+ * Street stair wrapped around a podium corner: one long flight up the sidewalk beside one face
+ * to a landing on a concrete pier in the corner, then a second long flight along the other face
+ * to the deck. (cx, cz) is the podium corner; sx / sz point from it into the podium. Local a / b
+ * measure outward from the podium faces along x / z, so negative values run along a face.
+ */
+export function cornerStair(b: Builder, cx: number, cz: number, sx: number, sz: number, E: number, tint: Tint): void {
+  const put = cornerPut(b, cx, cz, sx, sz, tint);
+  const { rise, run, steps, length } = streetFlight(E);
+  const lane: [number, number] = [0.6, 3.6]; // off the podium face by a gap too narrow to fall into
+  const par: [number, number] = [3.6, 3.85];
+  const glow = { collide: false, detail: true };
+  const half = E / 2;
+  const tread = (i: number, y: number) => {
+    const top = y + rise * i;
+    return { top, bottom: top < 2.5 ? 0 : top - 0.45 };
   };
-  const wall = 0.4, lane = (D - 2 * wall - 0.4) / 2; // 2.3
-  const laneA = [wall, wall + lane];
-  const laneB = [D - wall - lane, D - wall];
-  const mid = [wall + lane, D - wall - lane];
-  const landU = 2.4;
-  const flightU0 = wall + landU, flightU1 = L - wall - landU;
-  // walls
-  put(0, L, 0, wall, 0, yTop + 1.1, Mat.Windows, Win.Slit);
-  put(0, L, D - wall, D, 0, yTop - 1.4, Mat.Board);
-  put(0, wall, wall, D - wall, 3.2, yTop + 1.1, Mat.Board);
-  put(L - wall, L, wall, D - wall, 0, yTop + 1.1, Mat.Board);
-  put(flightU0, flightU1, mid[0], mid[1], 0, yTop + 1.1, Mat.Board);
-  const flights = Math.round(yTop / 3);
-  const steps = 5;
-  const run = (flightU1 - flightU0) / steps;
-  for (let k = 0; k < flights; k++) {
-    const y = 3 * k;
-    const lanes = k % 2 === 0 ? laneA : laneB;
-    for (let i = 1; i <= steps; i++) {
-      const top = y + 0.5 * i;
-      const s0 = k % 2 === 0 ? flightU0 + (i - 1) * run : flightU1 - i * run;
-      put(s0, s0 + run, lanes[0], lanes[1], Math.max(y, top - 0.4), top, Mat.Board);
-    }
-    const landing = y + 3;
-    const [la, lb] = k % 2 === 0 ? [flightU1, L - wall] : [wall, flightU0];
-    put(la, lb, wall, D - 0.5, landing - 0.4, landing, Mat.Deck);
-    // a light strip under each landing
-    put(la + 0.4, lb - 0.4, wall + 1.2, wall + 1.4, landing - 0.45, landing - 0.4, Mat.Glow, 0, false);
+  // flight 1 beside the face that runs along z, climbing outward toward the corner
+  // treads one by one; parapet and stringer in lengths of three treads
+  const start1 = lane[0] - length;
+  for (let i = 1; i <= steps; i++) {
+    const { top, bottom } = tread(i, 0);
+    const s0 = start1 + (i - 1) * run;
+    put(lane[0], lane[1], s0, s0 + run, bottom, top, Mat.Board);
   }
+  for (let i = 1; i <= steps; i += 3) {
+    const j = Math.min(i + 2, steps), first = tread(i, 0);
+    const s0 = start1 + (i - 1) * run, s1 = start1 + j * run;
+    put(par[0], par[1], s0, s1, first.bottom, tread(j, 0).top + 1.05, Mat.Board);
+    if (first.bottom > 0) put(lane[1] - 0.6, lane[1], s0, s1, first.top - 1.5, first.bottom, Mat.Board);
+  }
+  // the corner landing on its pier
+  put(lane[0], lane[1], lane[0], lane[1], half - 0.6, half, Mat.Deck);
+  put(par[0], par[1], lane[0], par[1], half, half + 1.05, Mat.Board);
+  put(lane[0], par[0], par[0], par[1], half, half + 1.05, Mat.Board);
+  put(1.1, 3.1, 1.1, 3.1, 0.18, half - 0.6, Mat.Board, 0, { detail: false });
+  put(lane[0] + 0.3, lane[1] - 0.3, 3.2, 3.3, half - 0.65, half - 0.6, Mat.Glow, 0, glow);
+  // flight 2 beside the face that runs along x, climbing inward
+  for (let i = 1; i <= steps; i++) {
+    const { top, bottom } = tread(i, half);
+    const s1 = lane[0] - (i - 1) * run;
+    put(s1 - run, s1, lane[0], lane[1], bottom, top, Mat.Board);
+  }
+  for (let i = 1; i <= steps; i += 3) {
+    const j = Math.min(i + 2, steps), first = tread(i, half);
+    const s0 = lane[0] - j * run, s1 = lane[0] - (i - 1) * run;
+    put(s0, s1, par[0], par[1], first.bottom, tread(j, half).top + 1.05, Mat.Board);
+    put(s0, s1, lane[1] - 0.6, lane[1], first.top - 1.5, first.bottom, Mat.Board);
+  }
+  // top landing along the deck edge, closed at its far end
+  const t0 = lane[0] - length;
+  put(t0 - 2.4, t0, lane[0], lane[1], E - 0.6, E, Mat.Deck);
+  put(t0 - 2.4, t0, par[0], par[1], E, E + 1.05, Mat.Board);
+  put(t0 - 2.65, t0 - 2.4, lane[0], par[1], E - 0.6, E + 1.05, Mat.Board);
+  put(t0 - 2.0, t0 - 0.4, 3.2, 3.3, E - 0.65, E - 0.6, Mat.Glow, 0, glow);
+  // columns under the long flights
+  for (const f of [0.35, 0.7]) {
+    const s = lane[0] - length * f;
+    // slimmer than the stringers and stopping below them, so no faces coincide
+    put(lane[1] - 0.5, lane[1] - 0.1, s - 0.2, s + 0.2, 0.18, half * (1 - f) - 2.1, Mat.Board, 0, { detail: false });
+    put(s - 0.2, s + 0.2, lane[1] - 0.5, lane[1] - 0.1, 0.18, half * (1 + f) - 2.1, Mat.Board, 0, { detail: false });
+  }
+}
+
+type CornerPut = (a0: number, a1: number, b0: number, b1: number, y0: number, y1: number, mat: Mat, style?: number,
+  opts?: { collide?: boolean; detail?: boolean }) => void;
+
+/** Box placement around podium corner (cx, cz): a / b are distances outward from the faces. */
+function cornerPut(b: Builder, cx: number, cz: number, sx: number, sz: number, tint: Tint): CornerPut {
+  return (a0, a1, b0, b1, y0, y1, mat, style = 0, opts = {}) => {
+    const x0 = cx - sx * a0, x1 = cx - sx * a1, z0 = cz - sz * b0, z1 = cz - sz * b1;
+    b.box(Math.min(x0, x1), y0, Math.min(z0, z1), Math.max(x0, x1), y1, Math.max(z0, z1), mat, tint, style, opts);
+  };
+}
+
+/** Treads of one flight of a street stair (each flight climbs half the podium). */
+export function streetFlight(E: number): { rise: number; run: number; steps: number; length: number } {
+  const steps = Math.round(E / 2 / 0.5), run = 0.55;
+  return { rise: E / 2 / steps, run, steps, length: steps * run };
+}
+
+/** Platform size of every lift (they are all drawn with one model). */
+export const LIFT_SIZE = 3.2;
+
+/**
+ * Open lift from the sidewalk corner at podium corner (cx, cz) up to a landing beside the
+ * deck (same local a / b as cornerStair). Walls on the two street sides; open towards the
+ * landing and the podium.
+ */
+export function streetLift(b: Builder, cx: number, cz: number, sx: number, sz: number, E: number, tint: Tint): void {
+  const put = cornerPut(b, cx, cz, sx, sz, tint);
+  const X = (a: number) => cx - sx * a, Z = (v: number) => cz - sz * v;
+  const p0 = 1.0, p1 = p0 + LIFT_SIZE, q0 = 0.8, q1 = q0 + LIFT_SIZE;
+  const cap = E + 3.6;
+  const glow = { collide: false, detail: true };
+  b.lift(Math.min(X(p0), X(p1)), Math.min(Z(q0), Z(q1)), Math.max(X(p0), X(p1)), Math.max(Z(q0), Z(q1)), 0.2, E);
+  put(p1 + 0.25, p1 + 0.65, 0.5, q1 + 0.25, 0.18, cap, Mat.Windows, Win.Slit);
+  put(0.6, p1 + 0.65, q1 + 0.25, q1 + 0.65, 0.18, cap, Mat.Board, 0, { detail: false });
+  put(0.4, p1 + 0.85, 0.3, q1 + 0.85, cap, cap + 0.8, Mat.Board);
+  put(p0 + 0.4, p1 - 0.4, q0 + 1.5, q0 + 1.7, cap - 0.05, cap, Mat.Glow, 0, glow);
+  // the landing reaches over the other sidewalk to the deck edge
+  put(-2.5, p0, 0.5, q1, E - 0.6, E, Mat.Deck);
+  put(-2.5, 0.6, q1 - 0.2, q1, E, E + 1.05, Mat.Panel);
+  put(-2.75, -2.5, 0.5, q1, E - 0.6, E + 1.05, Mat.Board);
+  put(-2.0, 0.4, 2.2, 2.3, E - 0.65, E - 0.6, Mat.Glow, 0, glow);
 }
 
 /** Steps wrapping counter-clockwise around a tower footprint, from base up to top, with corner landings. */
@@ -265,11 +348,324 @@ function fins(b: Builder, r: Rng, x0: number, z0: number, x1: number, z1: number
 }
 
 // ---------------------------------------------------------------------------
+// Skyways: an upper walking level at 36 or 42 m, just below the lowest flyer corridor (45 m).
+// Open stair or lift pylons on the podium corners climb to it, and bridges cross the streets between
+// them: railed decks, bare beams with nothing to hold on to, and (over the east-west streets)
+// covered tubes.
+
+export const SKY_LEVELS = [36, 42];
+const PYLON_D = 5.8;
+const SKY_MID = PYLON_D / 2; // skyway centre line, measured from the podium edge side of a pylon
+const LIFT_PYLON_L = 5.2;
+
+/** Treads of one flight of a pylon stair (two flights, each climbing half the height). */
+function pylonFlight(rise: number): { steps: number; run: number; step: number; length: number } {
+  const steps = Math.round(rise / 2 / 0.5), run = 0.55;
+  return { steps, run, step: rise / 2 / steps, length: steps * run };
+}
+
+/** Footprint of a corner pylon: length along its axis, depth across it. */
+export function pylonSize(lift: boolean, rise: number): [number, number] {
+  return lift ? [LIFT_PYLON_L, PYLON_D] : [5.6 + pylonFlight(rise).length, PYLON_D];
+}
+
+type SkyKind = "rail" | "beam" | "covered";
+
+/**
+ * Skyways around the street crossing at (I * CELL, J * CELL). `xs` / `xn` cross the north-south
+ * street just south / north of it; `zw` / `ze` cross the east-west street just west / east of it.
+ * Each block corner belongs to one crossing and serves at most one arm.
+ */
+export interface Crossing {
+  level: number;
+  xs?: SkyKind;
+  xn?: SkyKind;
+  zw?: SkyKind;
+  ze?: SkyKind;
+}
+
+export function crossing(I: number, J: number): Crossing | null {
+  const r = new Rng(hashInt(I, J, 41));
+  if (!r.chance(0.5)) return null;
+  const c: Crossing = { level: r.pick(SKY_LEVELS) };
+  const xKind = (): SkyKind => (r.chance(0.6) ? "rail" : "beam");
+  const zKind = (): SkyKind => r.pick<SkyKind>(["rail", "rail", "beam", "covered", "covered"]);
+  // the runner starts on the south-west corner of block (0, 0): keep pylons off that corner
+  const start = I === 0 && J === 0;
+  const roll = r.next();
+  if (roll < 0.25 || start) {
+    c.xs = xKind();
+    c.xn = xKind();
+    if (start) delete c.xn;
+    else if (r.chance(0.3)) delete c.xs;
+  } else if (roll < 0.5) {
+    c.zw = zKind();
+    c.ze = zKind();
+  } else {
+    const arm = r.pick(["xs", "xn", "zw", "ze"] as const);
+    c[arm] = arm[0] === "x" ? xKind() : zKind();
+  }
+  return c;
+}
+
+/** Pylon on a podium corner: `east` / `north` say which corner of block (ci, cj). */
+export function cornerPylon(ci: number, cj: number, east: boolean, north: boolean): { axis: "x" | "z"; level: number; lift: boolean } | null {
+  const c = crossing(ci + (east ? 1 : 0), cj + (north ? 1 : 0));
+  if (!c) return null;
+  // the corner sits south-west (sw), south-east (se), ... of its crossing
+  const xArm = north ? c.xs : c.xn;
+  const zArm = east ? c.zw : c.ze;
+  const lift = hashInt(ci, cj, 43 + (east ? 1 : 0) + (north ? 2 : 0)) % 100 < 45;
+  if (xArm) return { axis: "x", level: c.level, lift };
+  if (zArm) return { axis: "z", level: c.level, lift };
+  return null;
+}
+
+type PylonPut = (ua: number, ub: number, va: number, vb: number, y0: number, y1: number, mat: Mat, style?: number,
+  opts?: { collide?: boolean; detail?: boolean }) => void;
+
+/** Box placement in pylon space: u along the axis from the street end, v from the podium edge inward. */
+function pylonPut(b: Builder, axis: "x" | "z", u0: number, us: number, v0: number, vs: number, tint: Tint): PylonPut {
+  return (ua, ub, va, vb, y0, y1, mat, style = 0, opts = {}) => {
+    const a0 = u0 + us * ua, a1 = u0 + us * ub, c0 = v0 + vs * va, c1 = v0 + vs * vb;
+    const [ax0, ax1] = a0 < a1 ? [a0, a1] : [a1, a0];
+    const [cx0, cx1] = c0 < c1 ? [c0, c1] : [c1, c0];
+    if (axis === "x") b.box(ax0, y0, cx0, ax1, y1, cx1, mat, tint, style, opts);
+    else b.box(cx0, y0, ax0, cx1, y1, ax1, mat, tint, style, opts);
+  };
+}
+
+/** Roof slab over a pylon, with a beacon or a concrete blade. */
+function pylonCrown(b: Builder, r: Rng, put: PylonPut, axis: "x" | "z", u0: number, us: number, v0: number, vs: number,
+  L: number, D: number, crown: number): void {
+  put(-0.5, L + 0.3, -0.4, D + 0.4, crown, crown + 1.1, Mat.Board);
+  put(0.6, L - 0.6, 1.2, D - 1.2, crown - 0.05, crown, Mat.Glow, 0, { collide: false, detail: true });
+  const at = (u: number, v: number): [number, number] => (axis === "x" ? [u0 + us * u, v0 + vs * v] : [v0 + vs * v, u0 + us * u]);
+  if (r.chance(0.5)) {
+    const blade = r.uniform(4, 14), end = Math.min(L - 0.4, 9);
+    put(1.4, end, 0, 0.5, crown + 1.1, crown + 1.1 + blade, Mat.Board, 0, { detail: false });
+    const [bx, bz] = at(end - 0.6, 0.25);
+    beacon(b, bx, crown + 1.1 + blade, bz);
+  } else {
+    const [bx, bz] = at(1, 1);
+    beacon(b, bx, crown + 1.1, bz);
+  }
+}
+
+/** Height above the deck where pylon structure may start without blocking the way past it. */
+const PASS_UNDER = 2.6;
+
+/**
+ * Open stair from `base` up to `top`: a long flight in the inner lane away from the street, a
+ * landing, and a long flight back in the outer lane to the top landing at the street end, where
+ * the skyway leaves. A spine wall runs between the flights. At deck level the edge side and the
+ * street end stay open (the upper flight is carried overhead), so runners can pass by the edge.
+ */
+function stairPylon(
+  b: Builder, r: Rng, axis: "x" | "z", u0: number, us: number, v0: number, vs: number,
+  base: number, top: number, tint: Tint, skyHalf: number,
+): void {
+  const put = pylonPut(b, axis, u0, us, v0, vs, tint);
+  const { steps, run, step, length } = pylonFlight(top - base);
+  const [L, D] = pylonSize(false, top - base);
+  const wall = 0.4;
+  const laneA: [number, number] = [wall, 2.7], laneB: [number, number] = [3.1, D - wall];
+  const f0 = 2.6, f1 = f0 + length, far = L - wall;
+  const glow = { collide: false, detail: true };
+  const half = (top - base) / 2;
+  for (let k = 0; k < 2; k++) {
+    const y = base + half * k;
+    // rails run beside the treads (not on them), clear of the piers, so no two faces share a plane
+    const rail: [number, number] = k === 0 ? [D - wall - 0.2, D - wall] : [wall, wall + 0.2];
+    const lane: [number, number] = k === 0 ? [laneB[0], rail[0]] : [rail[1], laneA[1]];
+    for (let i = 1; i <= steps; i++) {
+      const st = y + step * i;
+      const s0 = k === 0 ? f0 + (i - 1) * run : f1 - i * run;
+      put(s0, s0 + run, lane[0], lane[1], Math.max(base, st - 0.45), st, Mat.Board);
+    }
+    // the rail in lengths of three treads
+    for (let i = 1; i <= steps; i += 3) {
+      const j = Math.min(i + 2, steps);
+      const [s0, s1] = k === 0 ? [f0 + (i - 1) * run, f0 + j * run] : [f1 - j * run, f1 - (i - 1) * run];
+      put(s0, s1, rail[0], rail[1], y + step * i, y + step * j + 1.0, Mat.Panel);
+    }
+    const land = y + half;
+    const [la, lb] = k === 0 ? [f1, far] : [0, f0];
+    put(la, lb, wall, D - wall, land - 0.5, land, Mat.Deck);
+    put(la, lb, wall, wall + 0.2, land, land + 1.0, Mat.Panel);
+    put(la, lb, D - wall - 0.2, D - wall, land, land + 1.0, Mat.Panel);
+    put(la + 0.4, lb - 0.4, 2.8, 3.0, land - 0.55, land - 0.5, Mat.Glow, 0, glow);
+  }
+  // the street end of the top landing: a rail, except where the skyway leaves
+  put(0.02, 0.2, wall + 0.2, SKY_MID - skyHalf, top, top + 1.0, Mat.Panel);
+  put(0.02, 0.2, SKY_MID + skyHalf, D - wall - 0.2, top, top + 1.0, Mat.Panel);
+  const crown = top + 3.4;
+  // spine between the flights, far end wall, piers and a beam at the landing level
+  put(f0, f1, laneA[1], laneB[0], base, top + 1.1, Mat.Board);
+  const lintel = base + PASS_UNDER;
+  put(far, L, laneA[1], D, base, crown, Mat.Board);
+  put(far, L, 0, laneA[1], lintel, crown, Mat.Board);
+  const piers = Math.max(1, Math.round(far / 5));
+  for (let p = 0; p < piers; p++) {
+    const pu = (far * p) / piers;
+    put(pu, pu + wall, 0, wall, lintel, crown, Mat.Board, 0, { detail: false });
+    put(pu, pu + wall, D - wall, D, p === 0 ? lintel : base, crown, Mat.Board, 0, { detail: false });
+  }
+  // a beam at the landing level, where it clears the heads of people walking in
+  const mid = base + half;
+  if (mid - 1.2 > base + 2.4) {
+    put(-0.1, far, -0.15, 0.2, mid - 1.2, mid - 0.6, Mat.Board);
+    put(-0.1, far, D - 0.2, D + 0.15, mid - 1.2, mid - 0.6, Mat.Board);
+  }
+  pylonCrown(b, r, put, axis, u0, us, v0, vs, L, D, crown);
+}
+
+/**
+ * Lift pylon: an open shaft from the deck to the skyway. At the top the platform stops level
+ * with a short landing at the street end, where the skyway leaves.
+ */
+function liftPylon(
+  b: Builder, r: Rng, axis: "x" | "z", u0: number, us: number, v0: number, vs: number,
+  base: number, top: number, tint: Tint, skyHalf: number,
+): void {
+  const put = pylonPut(b, axis, u0, us, v0, vs, tint);
+  const [L, D] = pylonSize(true, top - base);
+  const p0 = 1.3, p1 = p0 + LIFT_SIZE, q0 = SKY_MID - LIFT_SIZE / 2, q1 = SKY_MID + LIFT_SIZE / 2;
+  const at = (u: number, v: number): [number, number] => (axis === "x" ? [u0 + us * u, v0 + vs * v] : [v0 + vs * v, u0 + us * u]);
+  const [ax, az] = at(p0, q0), [bx, bz] = at(p1, q1);
+  b.lift(Math.min(ax, bx), Math.min(az, bz), Math.max(ax, bx), Math.max(az, bz), base + 0.02, top);
+  const crown = top + 3.4;
+  const glow = { collide: false, detail: true };
+  // back wall with lit slits, a blank wall on the podium edge side, corner posts, open to the
+  // deck; along the edge and at the street end everything starts overhead so runners pass by
+  const lintel = base + PASS_UNDER;
+  put(p1 + 0.3, L, q0, D, base, crown, Mat.Windows, Win.Slit);
+  put(p1 + 0.3, L, 0.4, q0, lintel, crown, Mat.Windows, Win.Slit);
+  put(0, p1 + 0.3, 0.4, 0.9, lintel, crown, Mat.Board, 0, { detail: false });
+  put(0, 0.4, D - 0.4, D, lintel, crown, Mat.Board, 0, { detail: false });
+  put(p1 - 0.1, p1 + 0.3, D - 0.4, D, base, crown, Mat.Board, 0, { detail: false });
+  // guide rails in the back corners of the shaft
+  put(p1 + 0.1, p1 + 0.3, q0 - 0.25, q0 - 0.1, lintel, crown, Mat.Metal, 0, { detail: false });
+  put(p1 + 0.1, p1 + 0.3, q1 + 0.1, q1 + 0.25, base, crown, Mat.Metal, 0, { detail: false });
+  // the landing, its rails and the skyway opening
+  put(0, p0, 0.9, D - 0.4, top - 0.5, top, Mat.Deck);
+  put(0.02, 0.2, 0.9, SKY_MID - skyHalf, top, top + 1.0, Mat.Panel);
+  put(0.02, 0.2, SKY_MID + skyHalf, D - 0.4, top, top + 1.0, Mat.Panel);
+  put(0.3, p0 - 0.3, 3.2, 3.3, top - 0.55, top - 0.5, Mat.Glow, 0, glow);
+  pylonCrown(b, r, put, axis, u0, us, v0, vs, L, D, crown);
+}
+
+function skyHalfWidth(kind: SkyKind): number {
+  return kind === "beam" ? 0.7 : kind === "covered" ? 1.8 : 1.6;
+}
+
+/** Skyway along `axis` from a0 to a1 at deck height y, centred on c across. */
+function skyway(b: Builder, axis: "x" | "z", a0: number, a1: number, c: number, y: number, kind: SkyKind, tint: Tint): void {
+  const put = (s0: number, s1: number, y0: number, y1: number, t0: number, t1: number, mat: Mat, style = 0,
+    opts: { collide?: boolean; detail?: boolean } = {}) => {
+    if (axis === "x") b.box(s0, y0, t0, s1, y1, t1, mat, tint, style, opts);
+    else b.box(t0, y0, s0, t1, y1, s1, mat, tint, style, opts);
+  };
+  const hw = skyHalfWidth(kind);
+  const glow = { collide: false, detail: true };
+  if (kind === "beam") {
+    // a bare concrete beam: a narrow deck on a deep blade, nothing to hold on to
+    put(a0, a1, y - 0.6, y, c - hw, c + hw, Mat.Board, 0, { detail: false });
+    put(a0 + 0.3, a1 - 0.3, y - 3.4, y - 0.6, c - 0.3, c + 0.3, Mat.Board, 0, { detail: false });
+    put(a0 + 0.5, a1 - 0.5, y - 3.45, y - 3.4, c - 0.08, c + 0.08, Mat.Glow, 0, glow);
+    return;
+  }
+  put(a0, a1, y - 0.9, y, c - hw, c + hw, Mat.Board, 0, { detail: false });
+  // downstand beams under both edges
+  put(a0 + 0.4, a1 - 0.4, y - 2.6, y - 0.9, c - hw, c - hw + 0.5, Mat.Board, 0, { detail: false });
+  put(a0 + 0.4, a1 - 0.4, y - 2.6, y - 0.9, c + hw - 0.5, c + hw, Mat.Board, 0, { detail: false });
+  put(a0 + 1, a1 - 1, y - 0.95, y - 0.9, c - 0.12, c + 0.12, Mat.Glow, 0, glow);
+  if (kind === "covered") {
+    put(a0, a1, y, y + 3.5, c - hw, c - hw + 0.35, Mat.Windows, Win.Ribbon);
+    put(a0, a1, y, y + 3.5, c + hw - 0.35, c + hw, Mat.Windows, Win.Ribbon);
+    put(a0 - 0.3, a1 + 0.3, y + 3.5, y + 4.2, c - hw - 0.3, c + hw + 0.3, Mat.Board);
+    put(a0 + 1, a1 - 1, y + 3.45, y + 3.5, c - 0.1, c + 0.1, Mat.Glow, 0, glow);
+  } else {
+    put(a0, a1, y, y + 1.05, c - hw, c - hw + 0.25, Mat.Panel);
+    put(a0, a1, y, y + 1.05, c + hw - 0.25, c + hw, Mat.Panel);
+  }
+}
+
+/** Pylons on the corners of block (ci, cj), and the skyways leaving it east and north. */
+function skyways(b: Builder, r: Rng, ci: number, cj: number, px0: number, pz0: number, px1: number, pz1: number,
+  E: number, tint: Tint): Footprint[] {
+  const taken: Footprint[] = [];
+  const saved = b.finish;
+  b.finish = r.pick([Finish.Boards, Finish.Ribbed, Finish.Cast]);
+  for (const east of [false, true])
+    for (const north of [false, true]) {
+      const p = cornerPylon(ci, cj, east, north);
+      if (!p) continue;
+      const cx = east ? px1 : px0, cz = north ? pz1 : pz0;
+      const sx = east ? -1 : 1, sz = north ? -1 : 1;
+      const c = crossing(ci + (east ? 1 : 0), cj + (north ? 1 : 0))!;
+      const kind = p.axis === "x" ? (north ? c.xs : c.xn)! : (east ? c.zw : c.ze)!;
+      const [u0, us, v0, vs] = p.axis === "x" ? [cx + sx * 0.3, sx, cz + sz * 0.3, sz] : [cz + sz * 0.3, sz, cx + sx * 0.3, sx];
+      (p.lift ? liftPylon : stairPylon)(b, r, p.axis, u0, us, v0, vs, E, p.level, tint, skyHalfWidth(kind));
+      const [L, D] = pylonSize(p.lift, p.level - E);
+      const ua = u0 + us * -0.6, ub = u0 + us * (L + 0.4);
+      const va = v0 + vs * -0.5, vb = v0 + vs * (D + 0.5);
+      const [a0, a1] = [Math.min(ua, ub), Math.max(ua, ub)], [c0, c1] = [Math.min(va, vb), Math.max(va, vb)];
+      taken.push(p.axis === "x" ? { x0: a0, z0: c0, x1: a1, z1: c1 } : { x0: c0, z0: a0, x1: c1, z1: a1 });
+      // this block builds the skyways that leave its east and north corners
+      const centre = v0 + vs * SKY_MID;
+      const span = 2 * (INSET + 0.3) + STREET;
+      if (p.axis === "x" && east) skyway(b, "x", u0, u0 + span, centre, p.level, kind, tint);
+      if (p.axis === "z" && north) skyway(b, "z", u0, u0 + span, centre, p.level, kind, tint);
+    }
+  b.finish = saved;
+  return taken;
+}
+
+/**
+ * Where two podiums have no bridge, sometimes the stubs of one are left: two cantilevers
+ * with a gap to jump. Nothing but a runner uses them.
+ */
+function brokenBridge(b: Builder, r: Rng, axis: "x" | "z", a0: number, a1: number, c: number, ya: number, yb: number, tint: Tint): void {
+  const put = (s0: number, s1: number, y0: number, y1: number, t0: number, t1: number, mat: Mat,
+    opts: { collide?: boolean; detail?: boolean } = {}) => {
+    if (axis === "x") b.box(s0, y0, t0, s1, y1, t1, mat, tint, 0, opts);
+    else b.box(t0, y0, s0, t1, y1, s1, mat, tint, 0, opts);
+  };
+  const gap = r.uniform(2.6, 4.2);
+  const mid = (a0 + a1) / 2 + r.uniform(-3, 3);
+  const w = 3.2;
+  const bits = { collide: false, detail: true };
+  for (const [s0, s1, y, end] of [[a0, mid - gap / 2, ya, mid - gap / 2], [mid + gap / 2, a1, yb, mid + gap / 2]]) {
+    const dir = end === s1 ? 1 : -1;
+    put(s0, s1, y - 0.9, y, c - w / 2, c + w / 2, Mat.Board);
+    put(s0 + 0.4, s1 - 0.4, y - 2.2, y - 0.9, c - 0.8, c + 0.8, Mat.Board);
+    // parapet on one side only, stopping short of the broken end
+    const side = r.chance(0.5) ? -1 : 1;
+    const p0 = dir > 0 ? s0 : s0 + 2.5, p1 = dir > 0 ? s1 - 2.5 : s1;
+    put(p0, p1, y, y + 1.05, side < 0 ? c - w / 2 : c + w / 2 - 0.25, side < 0 ? c - w / 2 + 0.25 : c + w / 2, Mat.Panel);
+    // the broken edge: a ragged lip and bent reinforcing bars
+    const lip = r.uniform(0.4, 1.0);
+    put(dir > 0 ? end : end - lip, dir > 0 ? end + lip : end, y - 0.85, y - 0.4, c - w / 2 + 0.4, c + w / 2 - 0.9, Mat.Board, bits);
+    for (let k = 0; k < 5; k++) {
+      const t = c - w / 2 + 0.3 + k * 0.62, len = r.uniform(0.3, 1.3), drop = r.uniform(0, 0.6);
+      put(dir > 0 ? end - 0.1 : end - len, dir > 0 ? end + len : end + 0.1, y - 0.7 - drop, y - 0.62 - drop, t - 0.03, t + 0.03, Mat.Metal, bits);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Towers
 
 interface Footprint { x0: number; z0: number; x1: number; z1: number }
 
 /** Mid-rise with a walkable roof reached by an external stair. Optional tunnel. */
+/**
+ * Bridges between towers cross the facade stairs just below the roofs; lifting their decks a
+ * little keeps the top steps from sharing a face with them (which flickers).
+ */
+const LINK_LIFT = 0.02;
+
 function midTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, tint: Tint, tunnel: boolean): void {
   const style = r.pick([Win.Punched, Win.Grid, Win.Slit, Win.Ribbon]);
   const { x0, z0, x1, z1 } = f;
@@ -348,7 +744,61 @@ function tallTower(
   b: Builder, r: Rng, f: Footprint, base: number, top: number, tint: Tint, lobby: number | null,
   opts: { setbacks?: boolean; serviceShaft?: boolean } = {},
 ): number {
-  const style = r.pick([Win.Punched, Win.Ribbon, Win.Grid, Win.Slit, Win.Punched]);
+  const saved = b.finish;
+  if (r.chance(0.45)) b.finish = r.pick([Finish.Boards, Finish.Ribbed, Finish.Cast]);
+  const minSide = Math.min(f.x1 - f.x0, f.z1 - f.z0);
+  const out = lobby === null && opts.setbacks !== false && minSide > 17 && top - base > 50 && r.chance(0.22)
+    ? corbelTower(b, r, f, base, Math.min(top, base + minSide * r.uniform(4, 6)), tint)
+    : towerBody(b, r, f, base, top, tint, lobby, opts);
+  b.finish = saved;
+  return out;
+}
+
+/**
+ * Inverted ziggurat: a narrow plinth, then stages that each cantilever further out on a deep
+ * concrete tray, ending at the full footprint. Returns the roof height.
+ */
+function corbelTower(b: Builder, r: Rng, f: Footprint, base: number, top: number, tint: Tint): number {
+  const G = r.uniform(2.5, 4.5);
+  const n = r.int(3, 4);
+  const style = r.pick([Win.Crate, Win.Crate, Win.Grid, Win.Slit]);
+  const inset = (s: number): Footprint => {
+    const g = G * (1 - s / n);
+    return { x0: f.x0 + g, z0: f.z0 + g, x1: f.x1 - g, z1: f.z1 - g };
+  };
+  const plinth = r.uniform(7, 12);
+  const core = inset(0);
+  const ci = 1.5;
+  b.box(core.x0 + ci, base, core.z0 + ci, core.x1 - ci, base + plinth, core.z1 - ci, Mat.Board, tint, Finish.Ribbed);
+  b.box(core.x0 + ci - 0.05, base + plinth - 0.05, core.z0 + ci - 0.05, core.x1 - ci + 0.05, base + plinth, core.z1 - ci + 0.05, Mat.Glow, tint, 0, { collide: false });
+  const stageH = (top - base - plinth) / n;
+  let y = base + plinth;
+  for (let s = 1; s <= n; s++) {
+    const g = inset(s);
+    // tray: a deep slab that steps out beyond the stage below
+    b.box(g.x0 - 0.3, y, g.z0 - 0.3, g.x1 + 0.3, y + 1.6, g.z1 + 0.3, Mat.Board, tint);
+    b.box(g.x0, y + 1.6, g.z0, g.x1, y + stageH, g.z1, Mat.Windows, tint, style);
+    y += stageH;
+  }
+  b.box(f.x0 - 0.6, y, f.z0 - 0.6, f.x1 + 0.6, y + 2.4, f.z1 + 0.6, Mat.Board, tint);
+  const cx = (f.x0 + f.x1) / 2, cz = (f.z0 + f.z1) / 2;
+  if (r.chance(0.5)) {
+    b.pad(cx, y + 2.4, cz, r.int(0, 3) * Math.PI / 2);
+    beacon(b, f.x0 - 0.3, y + 2.4, f.z0 - 0.3);
+    beacon(b, f.x1 - 0.4, y + 2.4, f.z1 - 0.4);
+  } else {
+    const hw = (f.x1 - f.x0) * 0.3, hd = (f.z1 - f.z0) * 0.15, cap = r.uniform(3, 7);
+    b.box(cx - hw, y + 2.4, cz - hd, cx + hw, y + 2.4 + cap, cz + hd, Mat.Board, tint);
+    beacon(b, cx, y + 2.4 + cap, cz);
+  }
+  return y;
+}
+
+function towerBody(
+  b: Builder, r: Rng, f: Footprint, base: number, top: number, tint: Tint, lobby: number | null,
+  opts: { setbacks?: boolean; serviceShaft?: boolean },
+): number {
+  const style = r.pick([Win.Punched, Win.Ribbon, Win.Grid, Win.Slit, Win.Punched, Win.Crate]);
   let { x0, z0, x1, z1 } = f;
   const minSide = Math.min(x1 - x0, z1 - z0);
   top = Math.min(top, base + minSide * r.uniform(5, 8));
@@ -398,7 +848,8 @@ function tallTower(
     }
     if (bandEvery) bands(b, cur, ya, yb, bandEvery, tint);
     if (s < levels.length - 2) {
-      b.box(x0 - 0.6, yb - 0.8, z0 - 0.6, x1 + 0.6, yb, z1 + 0.6, Mat.Board, tint);
+      // a hair above the shaft top, so the two top faces never share a plane
+      b.box(x0 - 0.6, yb - 0.8, z0 - 0.6, x1 + 0.6, yb + 0.02, z1 + 0.6, Mat.Board, tint);
       // step back on one or two sides
       const inset = r.uniform(1.5, 4);
       const sides = r.int(1, 15);
@@ -478,7 +929,7 @@ function terraces(b: Builder, r: Rng, zone: Footprint, base: number, tint: Tint,
     const zStart = r.uniform(z0 + 1, z1 - 5);
     for (let i = 1; i <= 5; i++)
       b.box(sx, y, zStart + (i - 1) * 0.6, sx + 2.2, y + 0.5 * i, zStart + i * 0.6, Mat.Board, tint);
-    b.box(sx, y, zStart + 3.0, sx + 2.2, y + h, zStart + 4.2, Mat.Board, tint);
+    b.box(dx > 0 ? sx : sx + 0.2, y, zStart + 3.0, dx > 0 ? sx + 2.0 : sx + 2.2, y + h, zStart + 4.2, Mat.Board, tint);
     y += h;
     const step = r.uniform(4, 7);
     if (dx > 0) x0 += step;
@@ -530,11 +981,18 @@ function towerTint(r: Rng, tint: Tint): Tint {
 
 const single: Layout = (b, r, z, base, tint, dens) => {
   const w = r.uniform(20, 34), d = r.uniform(20, 34);
-  const cx = (z.x0 + z.x1) / 2 + r.uniform(-1, 1) * (40 - w) / 2 * 0.7;
-  const cz = (z.z0 + z.z1) / 2 + r.uniform(-1, 1) * (40 - d) / 2 * 0.7;
+  let cx = (z.x0 + z.x1) / 2 + r.uniform(-1, 1) * (40 - w) / 2 * 0.7;
+  let cz = (z.z0 + z.z1) / 2 + r.uniform(-1, 1) * (40 - d) / 2 * 0.7;
+  const annex = r.chance(0.5) && w < 31 && d < 31;
+  if (annex) {
+    // annex (3 m) plus its facade stair (2.1 m) may stick out of the zone by 2 m at most
+    const mx = (40 - w) / 2 - 3.1, mz = (40 - d) / 2 - 3.1;
+    cx = (z.x0 + z.x1) / 2 + Math.max(-mx, Math.min(mx, cx - (z.x0 + z.x1) / 2));
+    cz = (z.z0 + z.z1) / 2 + Math.max(-mz, Math.min(mz, cz - (z.z0 + z.z1) / 2));
+  }
   const f = { x0: cx - w / 2, z0: cz - d / 2, x1: cx + w / 2, z1: cz + d / 2 };
   const t = towerTint(r, tint);
-  if (r.chance(0.5) && w < 31 && d < 31) {
+  if (annex) {
     // an accessible low annex wrapped around the base
     const top = midHeight(r, base, 2);
     midTower(b, r, { x0: f.x0 - 3, z0: f.z0 - 3, x1: f.x1 + 3, z1: f.z1 + 3 }, base, top, tint, false);
@@ -565,7 +1023,7 @@ const pair: Layout = (b, r, z, base, tint, dens) => {
   }
   if (bridge) {
     const off = r.uniform(-d / 2 + 4, d / 2 - 4);
-    stairBridge(b, r, alongX ? "x" : "z", a0 + w1 + 0.3, a1 - w2 - 0.4, c + off, 3.5, level, level, tint, r.chance(0.5));
+    stairBridge(b, r, alongX ? "x" : "z", a0 + w1 + 0.3, a1 - w2 - 0.4, c + off, 3.5, level + LINK_LIFT, level + LINK_LIFT, tint, r.chance(0.5));
   }
 };
 
@@ -602,11 +1060,11 @@ const quad: Layout = (b, r, z, base, tint, dens) => {
     if (alongX) {
       const lo = Math.max(a.f.z0, c.f.z0), hi = Math.min(a.f.z1, c.f.z1);
       const zc = sz(a.f) === 0 ? hi - 4 : lo + 4;
-      stairBridge(b, r, "x", a.f.x1 + 0.3, c.f.x0 - 0.4, zc, 3.2, level, level, tint, r.chance(0.3));
+      stairBridge(b, r, "x", a.f.x1 + 0.3, c.f.x0 - 0.4, zc, 3.2, level + LINK_LIFT, level + LINK_LIFT, tint, r.chance(0.3));
     } else {
       const lo = Math.max(a.f.x0, c.f.x0), hi = Math.min(a.f.x1, c.f.x1);
       const xc = sx(a.f) === 0 ? hi - 4 : lo + 4;
-      stairBridge(b, r, "z", a.f.z1 + 0.3, c.f.z0 - 0.4, xc, 3.2, level, level, tint, r.chance(0.3));
+      stairBridge(b, r, "z", a.f.z1 + 0.3, c.f.z0 - 0.4, xc, 3.2, level + LINK_LIFT, level + LINK_LIFT, tint, r.chance(0.3));
     }
   };
   const sx = (f: Footprint) => (f.x0 < cx ? 0 : 1);
@@ -740,6 +1198,65 @@ const megablock: Layout = (b, r, z, base, tint, dens) => {
   else pergola(b, r, { x0: x0 + t + 1.5, z0: z0 + t + 1.5, x1: x1 - t - 1.5, z1: z1 - t - 1.5 }, base, tint);
 };
 
+/**
+ * Gate towers: two slender shafts with ribbed service cores, joined high up by a heavy bridge
+ * block whose bare roof carries a landing pad; one shaft runs on above it to a drum crown.
+ */
+const twin: Layout = (b, r, z, base, tint, dens) => {
+  const alongX = r.chance(0.5);
+  const w = r.uniform(11, 14), d = r.uniform(15, 19);
+  const zc = (alongX ? z.z0 + z.z1 : z.x0 + z.x1) / 2 + r.uniform(-1, 1) * (40 - d) / 2 * 0.6;
+  const a0 = alongX ? z.x0 : z.z0, a1 = alongX ? z.x1 : z.z1;
+  const fp = (s0: number, s1: number, c0: number, c1: number): Footprint =>
+    alongX ? { x0: s0, z0: c0, x1: s1, z1: c1 } : { x0: c0, z0: s0, x1: c1, z1: s1 };
+  const t = towerTint(r, tint);
+  const saved = b.finish;
+  b.finish = Finish.Ribbed;
+  const H = base + Math.max(90, (0.8 + 0.6 * dens) * r.uniform(90, 150));
+  const bridgeTop = H - r.uniform(4, 10), bridgeH = r.uniform(10, 16);
+  const style = r.pick([Win.Crate, Win.Grid, Win.Slit]);
+  const plain = r.chance(0.5) ? 0 : 1; // which tower runs on above the bridge
+  for (const k of [0, 1]) {
+    const s0 = k === 0 ? a0 : a1 - w, s1 = k === 0 ? a0 + w : a1;
+    const shaftTop = k === plain ? bridgeTop + 2 : H + r.uniform(18, 34);
+    // the shaft, with a ribbed core on its inner side between two strips of slit windows
+    solid(b, fp(s0 + (k === 0 ? 0 : 3), s1 - (k === 0 ? 3 : 0), zc - d / 2, zc + d / 2), base, shaftTop, Mat.Windows, t, style);
+    const core = fp(k === 0 ? s1 - 3 : s0, k === 0 ? s1 : s0 + 3, zc - d / 2 + 2, zc + d / 2 - 2);
+    solid(b, core, base, shaftTop + 3, Mat.Board, t);
+    const inner = fp(k === 0 ? s1 - 3 : s0, k === 0 ? s1 : s0 + 3, zc - d / 2, zc - d / 2 + 2);
+    solid(b, inner, base + 6, shaftTop, Mat.Windows, t, Win.Slit);
+    const inner2 = fp(k === 0 ? s1 - 3 : s0, k === 0 ? s1 : s0 + 3, zc + d / 2 - 2, zc + d / 2);
+    solid(b, inner2, base + 6, shaftTop, Mat.Windows, t, Win.Slit);
+    bands(b, fp(s0, s1, zc - d / 2, zc + d / 2), base, shaftTop, r.pick([18, 24]), t);
+    if (k !== plain) {
+      const cs = fp(s0 - 1.5, s1 + 1.5, zc - d / 2 - 1.5, zc + d / 2 + 1.5);
+      solid(b, cs, shaftTop, shaftTop + 5, Mat.Windows, t, Win.Ribbon);
+      solid(b, fp(s0 - 1.8, s1 + 1.8, zc - d / 2 - 1.8, zc + d / 2 + 1.8), shaftTop + 5, shaftTop + 6, Mat.Board, t);
+      const mx = (s0 + s1) / 2;
+      const mast = r.uniform(10, 30);
+      const m = fp(mx - 0.4, mx + 0.4, zc - 0.4, zc + 0.4);
+      solid(b, m, shaftTop + 6, shaftTop + 6 + mast, Mat.Metal, t, 0, { detail: false });
+      beacon(b, (m.x0 + m.x1) / 2, shaftTop + 6 + mast, (m.z0 + m.z1) / 2);
+    }
+  }
+  // the bridge block, a little deeper than the shafts
+  const br = fp(a0 + w, a1 - w, zc - d / 2 - 1, zc + d / 2 + 1);
+  solid(b, br, bridgeTop - bridgeH, bridgeTop - 1.4, Mat.Windows, t, Win.Crate);
+  solid(b, fp(a0 + w - 0.5, a1 - w + 0.5, zc - d / 2 - 1.5, zc + d / 2 + 1.5), bridgeTop - 1.4, bridgeTop, Mat.Board, t);
+  solid(b, fp(a0 + w, a1 - w, zc - d / 2 - 0.5, zc + d / 2 + 0.5), bridgeTop - bridgeH - 2.2, bridgeTop - bridgeH, Mat.Board, t);
+  const pc = fp((a0 + a1) / 2, (a0 + a1) / 2, zc, zc);
+  b.pad(pc.x0, bridgeTop, pc.z0, alongX ? Math.PI / 2 : 0);
+  b.finish = saved;
+  // a plaza pergola between the feet of the towers
+  pergola(b, r, fp(a0 + w + 2, a1 - w - 2, zc - d / 2, zc + d / 2), base, tint);
+};
+
+/** A box over footprint f from y0 to y1. */
+function solid(b: Builder, f: Footprint, y0: number, y1: number, mat: Mat, tint: Tint, style = 0,
+  opts: { collide?: boolean; detail?: boolean } = {}): void {
+  b.box(f.x0, y0, f.z0, f.x1, y1, f.z1, mat, tint, style, opts);
+}
+
 const LAYOUTS: [Layout, (dens: number) => number][] = [
   [single, (d) => 3 * (0.4 + d)],
   [cluster, (d) => 2.5 * (0.1 + d)],
@@ -748,6 +1265,7 @@ const LAYOUTS: [Layout, (dens: number) => number][] = [
   [slab, () => 2],
   [terraces, (d) => 2 * (1.4 - d)],
   [megablock, (d) => 2 * (1.3 - d)],
+  [twin, (d) => 0.6 + 1.2 * d],
   [garden, () => 1],
   [gate, () => 2],
 ];
@@ -837,6 +1355,14 @@ export function bridgeOn(ci: number, cj: number, side: number): number | null {
   return edgeBridge(ci, cj - 1, 1);
 }
 
+/** Podium corner k (0 south-west, 1 south-east, 2 north-west, 3 north-east) of block (ci, cj), with the directions into the podium. */
+export function streetCorner(ci: number, cj: number, k: number): [number, number, number, number] {
+  const east = k % 2 === 1, north = k >= 2;
+  const x = ci * CELL + (east ? CELL - STREET / 2 - INSET : STREET / 2 + INSET);
+  const z = cj * CELL + (north ? CELL - STREET / 2 - INSET : STREET / 2 + INSET);
+  return [x, z, east ? -1 : 1, north ? -1 : 1];
+}
+
 export function buildCell(ci: number, cj: number, b: Builder): void {
   const r = new Rng(hashInt(ci, cj, 1));
   const ox = ci * CELL, oz = cj * CELL;
@@ -845,6 +1371,7 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
   const px0 = bx0 + INSET, pz0 = bz0 + INSET, px1 = bx1 - INSET, pz1 = bz1 - INSET;
   const E = podiumHeight(ci, cj);
   const tint = r.pick(TINTS);
+  b.finish = r.pick([Finish.Boards, Finish.Boards, Finish.Ribbed, Finish.Cast]);
 
   streetLevel(b, ox, oz);
   expressways(b, ci, cj, ox, oz);
@@ -868,29 +1395,37 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
     b.box(px0, 0.18, z - 0.6, px0 + 1.2, arcade, z + 0.6, Mat.Board, tint);
     b.box(px1 - 1.2, 0.18, z - 0.6, px1, arcade, z + 0.6, Mat.Board, tint);
   }
-  b.box(px0, arcade, pz0, px1, E - 1.4, pz1, Mat.Windows, tint, r.pick([Win.Ribbon, Win.Grid, Win.Punched]));
+  b.box(px0, arcade, pz0, px1, E - 1.4, pz1, Mat.Windows, tint, r.pick([Win.Ribbon, Win.Grid, Win.Punched, Win.Crate]));
   b.box(px0 - 0.5, E - 1.4, pz0 - 0.5, px1 + 0.5, E, pz1 + 0.5, Mat.Deck, tint);
   kerb(b, px0 - 0.5, pz0 - 0.5, px1 + 0.5, pz1 + 0.5, E, tint, true);
 
-  // --- stair tower from the street up to the deck
-  const side = r.int(0, 3);
-  const ts = r.uniform(1, 3);
-  if (side === 0) stairTower(b, "z", pz0 + ts, px0 - 5.8, 1, E, tint);
-  else if (side === 1) stairTower(b, "z", pz1 - 9 - ts, px1 + 5.8, -1, E, tint);
-  else if (side === 2) stairTower(b, "x", px0 + ts, pz0 - 5.8, 1, E, tint);
-  else stairTower(b, "x", px1 - 9 - ts, pz1 + 5.8, -1, E, tint);
+  // --- from the street up to the deck: a stair round one corner, often a lift in another
+  const stairAt = r.int(0, 3);
+  cornerStair(b, ...streetCorner(ci, cj, stairAt), E, tint);
+  if (r.chance(0.55)) streetLift(b, ...streetCorner(ci, cj, (stairAt + r.int(1, 3)) % 4), E, tint);
 
   // --- bridges to the east and north neighbours
   const east = edgeBridge(ci, cj, 0);
   if (east !== null) {
     const En = podiumHeight(ci + 1, cj);
     stairBridge(b, r, "x", px1 + 0.5, px1 + 0.5 + 2 * INSET + STREET - 1, oz + CELL / 2 + east, 4.5, E, En, tint, r.chance(0.35));
+  } else if (hashInt(ci, cj, 26) % 100 < 70) {
+    const off = (hashInt(ci, cj, 27) % 15) - 6;
+    brokenBridge(b, r, "x", px1 + 0.5, px1 + 0.5 + 2 * INSET + STREET - 1, oz + CELL / 2 + off, E, podiumHeight(ci + 1, cj), tint);
   }
   const north = edgeBridge(ci, cj, 1);
   if (north !== null) {
     const En = podiumHeight(ci, cj + 1);
     stairBridge(b, r, "z", pz1 + 0.5, pz1 + 0.5 + 2 * INSET + STREET - 1, ox + CELL / 2 + north, 4.5, E, En, tint, r.chance(0.35));
+  } else if (hashInt(ci, cj, 28) % 100 < 70) {
+    const off = (hashInt(ci, cj, 29) % 15) - 6;
+    brokenBridge(b, r, "z", pz1 + 0.5, pz1 + 0.5 + 2 * INSET + STREET - 1, ox + CELL / 2 + off, E, podiumHeight(ci, cj + 1), tint);
   }
+
+  // --- stair pylons on the corners and the skyways between them
+  const taken = skyways(b, r, ci, cj, px0, pz0, px1, pz1, E, tint);
+  const free = (x0: number, z0: number, x1: number, z1: number) =>
+    taken.every((t) => x1 < t.x0 - 0.8 || x0 > t.x1 + 0.8 || z1 < t.z0 - 0.8 || z0 > t.z1 + 0.8);
 
   // --- deck furniture in the ring between podium edge and towers
   const ringVents = r.int(1, 4);
@@ -899,12 +1434,19 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
     // keep clear of the bridge landings around the middle of the east and west faces
     const cz = oz + CELL / 2;
     const vz = r.chance(0.5) ? r.uniform(pz0 + 2, cz - 13) : r.uniform(cz + 13, pz1 - 4);
-    b.box(vx, E, vz, vx + r.uniform(1.2, 2.5), E + r.uniform(0.8, 1.6), vz + r.uniform(1.2, 2.5), Mat.Metal, tint);
+    const vw = r.uniform(1.2, 2.5), vh = r.uniform(0.8, 1.6), vd = r.uniform(1.2, 2.5);
+    // leave a walkway along the deck edge, as on the west side
+    const x0 = Math.min(vx, px1 - 1.3 - vw);
+    if (free(x0, vz, x0 + vw, vz + vd)) b.box(x0, E, vz, x0 + vw, E + vh, vz + vd, Mat.Metal, tint);
   }
-  if (!(ci === 0 && cj === 0) && r.chance(0.5)) {
+  if (!(ci === 0 && cj === 0) && r.chance(0.5) && free(px1 - 4.5, pz0 + 3, px1 - 2.5, pz0 + 19)) {
     parkourPillars(b, r, px1 - 3.5, pz0 + 4, 0, 1, E, tint);
   }
-  if ((ci === 0 && cj === 0) || r.chance(0.6)) b.pad(ox + CELL / 2 - 16, E, pz0 + 2.6, Math.PI / 2);
+  if ((ci === 0 && cj === 0) || r.chance(0.6)) {
+    // beside the south face, or failing that beside the west face
+    if (free(ox + CELL / 2 - 20, pz0, ox + CELL / 2 - 12, pz0 + 5.2)) b.pad(ox + CELL / 2 - 16, E, pz0 + 2.6, Math.PI / 2);
+    else if (free(px0, pz0 + 9, px0 + 5.8, pz0 + 15)) b.pad(px0 + 2.9, E, pz0 + 12, 0);
+  }
 
   // --- towers
   const zone = { x0: bx0 + INNER, z0: bz0 + INNER, x1: bx1 - INNER, z1: bz1 - INNER };
@@ -935,6 +1477,7 @@ export interface RegionMesh {
   cells: CellRange[];
   pads: (Pad & { id: string })[];
   cars: (ParkedCar & { id: string })[];
+  lifts: (Lift & { id: string })[];
   maxHeight: number;
   colliders: { ci: number; cj: number; boxes: Float32Array }[];
 }
@@ -999,7 +1542,8 @@ export function buildRegion(rx: number, rz: number): RegionMesh {
 
   const pads = cells.flatMap(({ ci, cj, b }) => b.pads.map((pd, k) => ({ ...pd, id: `p${ci},${cj},${k}` })));
   const cars = cells.flatMap(({ ci, cj, b }) => b.cars.map((c, k) => ({ ...c, id: `c${ci},${cj},${k}` })));
-  return { rx, rz, vertices, indices: indices.slice(0, idx), groundCount, cells: ranges, pads, cars, maxHeight, colliders };
+  const lifts = cells.flatMap(({ ci, cj, b }) => b.lifts.map((l, k) => ({ ...l, id: `l${ci},${cj},${k}` })));
+  return { rx, rz, vertices, indices: indices.slice(0, idx), groundCount, cells: ranges, pads, cars, lifts, maxHeight, colliders };
 }
 
 /** Where the runner starts: on the podium deck of cell (0, 0). */

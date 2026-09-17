@@ -7,10 +7,11 @@ import { Particles } from "./effects/particles";
 import { Hunters, type Quarry } from "./hunters";
 import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
+import { Lifts } from "./lifts";
 import { Car } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { Parking } from "./vehicles/parking";
-import { Traffic } from "./vehicles/traffic";
+import { InstanceList, Traffic } from "./vehicles/traffic";
 import type { VehicleLists } from "./renderer";
 import type { World } from "./world";
 
@@ -64,13 +65,31 @@ export class Rides {
   private carLookPitch = 0;
   private lookIdle = 0;
   private combined = new WeakMap<Float32Array, { b: Float32Array; out: Float32Array }>();
+  readonly lifts = new Lifts();
+  private liftList = new InstanceList(64);
+  private withLifts = new WeakMap<Float32Array, WeakMap<Float32Array, Float32Array>>();
 
   constructor(private world: World, private player: Player) {
     this.hunters = new Hunters(this);
   }
 
-  /** City collision plus parked vehicles. */
+  /** City collision plus parked vehicles and lift platforms. */
   colliders: Colliders = (x, z) => {
+    const still = this.staticColliders(x, z), l = this.lifts.boxes(x, z);
+    if (l.length === 0) return still;
+    let byLift = this.withLifts.get(still);
+    if (!byLift) this.withLifts.set(still, (byLift = new WeakMap()));
+    let out = byLift.get(l);
+    if (!out) {
+      out = new Float32Array(still.length + l.length);
+      out.set(still);
+      out.set(l, still.length);
+      byLift.set(l, out);
+    }
+    return out;
+  };
+
+  private staticColliders: Colliders = (x, z) => {
     const a = this.world.colliders(x, z), b = this.parking.boxes(x, z);
     let c = this.combined.get(a);
     if (!c || c.b !== b) {
@@ -100,6 +119,7 @@ export class Rides {
     if (this.world.version === this.worldVersion) return;
     this.worldVersion = this.world.version;
     this.parking.sync(this.world.pads(), this.world.parkedCars());
+    this.lifts.sync(this.world.lifts());
   }
 
   /** What E would do right now, for the on-screen prompt. */
@@ -326,11 +346,12 @@ export class Rides {
     }
     this.combat.drawWrecks(t.flyers, t.cars, t.vans);
     this.hunters.draw(t.flyers, t.cars, t.vans);
+    this.lifts.instances(this.liftList, eye, 400);
   }
 
   /** Everything the renderer draws with vehicle meshes. */
   get vehicleLists(): VehicleLists {
     const t = this.traffic;
-    return { cars: t.cars, vans: t.vans, flyers: t.flyers, figures: this.hunters.figures };
+    return { cars: t.cars, vans: t.vans, flyers: t.flyers, figures: this.hunters.figures, lifts: this.liftList };
   }
 }
