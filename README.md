@@ -101,6 +101,8 @@ What keeps the game fast:
 - **Anti-aliasing:** 2× MSAA on integrated GPUs, 4× on discrete ones.
 - **Culling:** only city blocks inside the view are drawn, nearest first.
   A depth pre-pass means only the visible surface of each pixel gets shaded.
+  It is off on Apple GPUs (iPhone, iPad, Mac), where it made surfaces flicker;
+  `?prepass=1` turns it back on.
 - **Level of detail:** small detail (steps, railings, fins) is dropped
   beyond 230 m.
 - **Sun shadows:** the shadow map is re-rendered only after moving 12 m or

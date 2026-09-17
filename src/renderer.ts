@@ -96,7 +96,9 @@ export class Renderer {
     const maxSamples = gl.getParameter(gl.MAX_SAMPLES) as number;
     // 4x MSAA costs integrated GPUs ~15% of the frame; 2x keeps edges smooth enough
     this.samples = Math.min(opts.msaa ?? (this.integrated ? 2 : 4), maxSamples);
-    this.prepass = opts.prepass ?? true;
+    // The colour pass matches the pre-pass depth with EQUAL, which needs bit-identical depth
+    // from both. Apple's Metal-backed WebGL doesn't always give that, and surfaces flicker.
+    this.prepass = opts.prepass ?? !/Apple/i.test(this.renderer);
     this.shadowSize = opts.shadowSize ?? (this.integrated ? 2048 : 4096);
     this.timer = new GpuTimer(gl);
 

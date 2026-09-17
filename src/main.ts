@@ -353,7 +353,7 @@ async function main(): Promise<void> {
       }
       rides.drive(dt, controls);
     } else if (active) {
-      player.look(mouseDX, mouseDY);
+      player.look(controls.mouseDX, controls.mouseDY);
       const input: Input = {
         moveX: controls.moveX, moveZ: controls.moveZ, sprint: controls.sprint, walk: controls.down, jump: controls.up,
       };
@@ -468,7 +468,7 @@ async function main(): Promise<void> {
         statsEl.textContent = [
           `${fps.toFixed(0)} fps  ${renderer.width}x${renderer.height} x${renderer.samples} msaa  worst ${worstShown.toFixed(1)} ms`,
           renderer.renderer,
-          `reversed z: ${renderer.reversedZ}`,
+          `reversed z: ${renderer.reversedZ}   depth pre-pass: ${renderer.prepass}`,
           `regions ${world.stats.regions} (drawn ${world.stats.drawn}, pending ${world.stats.pending})`,
           `pos ${player.pos.map((v) => v.toFixed(1)).join(" ")}`,
           `weather: ${weather.name}   city seed ${seed}`,
