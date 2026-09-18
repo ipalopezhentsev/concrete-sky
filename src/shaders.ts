@@ -1,7 +1,10 @@
 // GLSL ES 3.00 sources.
 
 import { CELL, LAMP_HEIGHT, STREET, lampHeadsLocal } from "./city/generate";
+import { YAW_STEP } from "./city/mesh";
 import { Layer, NOISE_SIZE } from "./textures";
+
+const YAW_STEP_GLSL = YAW_STEP.toFixed(9);
 
 const HEADER = `#version 300 es
 precision highp float;
@@ -208,6 +211,18 @@ const vec3 FACE_NORMALS[6] = vec3[6](
   vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0),
   vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0), vec3(0.0, -1.0, 0.0));
 
+// aFace holds the face index plus the box's turn about its own vertical axis (see
+// YAW_STEPS in mesh.ts) times eight. The corners were already turned on the CPU by
+// exactly this angle, so rebuilding it here keeps the normal on the face it belongs to.
+vec3 faceNormal(float packed) {
+  float turn = floor(packed * 0.125);
+  vec3 n = FACE_NORMALS[int(packed - turn * 8.0)];
+  if (turn == 0.0) return n;
+  float a = turn * ${YAW_STEP_GLSL};
+  float c = cos(a), s = sin(a);
+  return vec3(c * n.x - s * n.z, n.y, s * n.x + c * n.z);
+}
+
 vec3 unpackTint(float p) {
   float r = floor(p / 65536.0);
   float g = floor((p - r * 65536.0) / 256.0);
@@ -238,7 +253,7 @@ flat out vec2 vSize;
 flat out vec3 vInfo;
 void main() {
   vPos = aPos;
-  vNrm = FACE_NORMALS[int(aFace)];
+  vNrm = faceNormal(aFace);
   vUV = aUV;
   vSize = aSize;
   vTint = unpackTint(aTint);
@@ -278,7 +293,7 @@ void main() {
   mat3 R = rotation(iRot);
   vec3 info = unpackInfo(aInfo);
   vPos = iPos + R * aPos;
-  vNrm = R * FACE_NORMALS[int(aFace)];
+  vNrm = R * faceNormal(aFace);
   vUV = aUV;
   vSize = aSize;
   // style 1 marks painted parts, which take the instance colour
