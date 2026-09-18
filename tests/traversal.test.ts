@@ -1,7 +1,7 @@
 // Headless movement tests: run with `npx tsx tests/traversal.test.ts`.
 import {
-  Builder, bridgeOn, buildRegion, CELL, cornerPylon, cornerStair, crossing, edgeBridge, facadeStair, PODIUM_LEVELS, podiumHeight,
-  pylonSize, spawnPoint, STREET, streetFlight, streetLift,
+  Builder, bridgeOn, buildRegion, CELL, collidersOf, cornerPylon, cornerStair, crossing, edgeBridge, facadeStair,
+  deckEdge, PODIUM_LEVELS, podiumHeight, podiumInset, pylonSize, spawnPoint, STREET, streetFlight, streetLift,
 } from "../src/city/generate";
 import { liftState, Lifts } from "../src/lifts";
 import { Rng, setWorldSeed } from "../src/math";
@@ -21,14 +21,7 @@ const check = (name: string, ok: boolean, detail = "") => {
   if (!ok) failures++;
 };
 
-function boxesOf(b: Builder): Float32Array {
-  const out: number[] = [];
-  for (let i = 0; i < b.count; i++) {
-    const o = i * 14;
-    if (b.data[o + 12]) out.push(...b.data.slice(o, o + 6));
-  }
-  return Float32Array.from(out);
-}
+const boxesOf = (b: Builder): Float32Array => collidersOf(b);
 
 /**
  * Pairs of boxes with a face in the same plane, pointing the same way and overlapping: the two
@@ -252,14 +245,16 @@ for (const seed of [1971, 42, 777777]) {
       if (off === null || ha === hb) continue;
       tested++;
       const zc = cj * CELL + CELL / 2 + off;
-      const faceA = ci * CELL + CELL - STREET / 2 - 6.5;
+      const faceA = ci * CELL + deckEdge(ci, cj, 0);
+      const faceB = (ci + 1) * CELL + deckEdge(ci + 1, cj, 2);
       const p = new Player(faceA - 2, ha, zc, Math.PI / 2);
       const input: Input = { moveX: 0, moveZ: 1, sprint: false, walk: false, jump: false };
       for (let t = 0; t < 60 * 12; t++) {
         p.yaw = Math.PI / 2 - Math.max(-0.5, Math.min(0.5, (p.pos[2] - zc) * 0.3));
         p.update(1 / 60, input, colliders);
+        if (p.pos[0] > faceB + 2) break; // across: running on would just climb the far block
       }
-      const ok = Math.abs(p.pos[1] - hb) < 0.5 && p.pos[0] > faceA + 32;
+      const ok = Math.abs(p.pos[1] - hb) < 0.5 && p.pos[0] > faceB + 1;
       if (ok) passed++;
       else console.log(`  bridge ${ci},${cj} ${ha}->${hb} ended at ${p.pos.map((v) => v.toFixed(1))}`);
     }
@@ -287,9 +282,9 @@ for (const seed of [1971, 42, 777777]) {
         return out;
       };
       // west pylon: u runs -x from the street end, v runs +z from the podium edge
-      const u0 = ci * CELL + CELL - STREET / 2 - 6.5 - 0.3, v0 = cj * CELL + STREET / 2 + 6.5 + 0.3;
+      const u0 = ci * CELL + deckEdge(ci, cj, 0) - 0.3, v0 = cj * CELL + deckEdge(ci, cj, 3) + 0.3;
       const at = (u: number, v: number): [number, number] => [u0 - u, v0 + v];
-      const span = 2 * (6.5 + 0.3) + STREET;
+      const span = STREET + 0.6 + podiumInset(ci, cj, 0) + podiumInset(ci + 1, cj, 2);
       // a route is a list of waypoints; `null` means wait for the lift to arrive at `level`
       type Step = [number, number] | { wait: number };
       const route: Step[] = [];
@@ -348,8 +343,8 @@ for (const seed of [1971, 42, 777777]) {
           const py = cornerPylon(ci, cj, east, north);
           if (!py) continue;
           pylons++;
-          const cx = ci * CELL + (east ? CELL - STREET / 2 - 6.5 : STREET / 2 + 6.5);
-          const cz = cj * CELL + (north ? CELL - STREET / 2 - 6.5 : STREET / 2 + 6.5);
+          const cx = ci * CELL + deckEdge(ci, cj, east ? 0 : 2);
+          const cz = cj * CELL + deckEdge(ci, cj, north ? 1 : 3);
           const sx = east ? -1 : 1, sz = north ? -1 : 1;
           const [PL, PW] = pylonSize(py.lift, py.level - E);
           const [lx, lz] = py.axis === "x" ? [PL, PW] : [PW, PL];
@@ -395,12 +390,12 @@ for (const seed of [1971, 42, 777777]) {
     for (let cj = -8; cj < 8 && gapTested < 4; cj++) {
       const E = podiumHeight(ci, cj);
       if (edgeBridge(ci, cj, 0) !== null || podiumHeight(ci + 1, cj) !== E) continue;
-      const faceA = ci * CELL + CELL - STREET / 2 - 6.5;
+      const faceA = ci * CELL + deckEdge(ci, cj, 0);
       const boxes = colliders(faceA + 15, cj * CELL + CELL / 2);
       // find the stubs: deck tops at E spanning the street, and the gap between them
       const tops: [number, number, number][] = [];
       for (let i = 0; i < boxes.length; i += 6)
-        if (Math.abs(boxes[i + 4] - E) < 0.01 && boxes[i + 1] > E - 1 && boxes[i] >= faceA + 0.4 && boxes[i + 3] <= faceA + 31 &&
+        if (Math.abs(boxes[i + 4] - E) < 0.01 && boxes[i + 1] > E - 1 && boxes[i] >= faceA + 0.4 && boxes[i + 3] <= (ci + 1) * CELL + deckEdge(ci + 1, cj, 2) &&
             Math.abs(boxes[i + 5] - boxes[i + 2] - 3.2) < 0.01) tops.push([boxes[i], boxes[i + 3], (boxes[i + 2] + boxes[i + 5]) / 2]);
       tops.sort((a, b) => a[0] - b[0]);
       if (tops.length !== 2 || Math.abs(tops[0][2] - tops[1][2]) > 0.01) {

@@ -19,7 +19,7 @@ export const REGION_CELLS = 3;
 export const REGION = CELL * REGION_CELLS;
 export const LAMP_HEIGHT = 7.2;
 export const PODIUM_LEVELS = [18, 24, 30];
-export const INSET = 6.5; // block edge -> podium face
+export const INSET = 6.5; // block edge -> podium face, for a block that takes the standard setback
 export const INNER = 15; // block edge -> tower zone
 const KERB = 0.4;
 
@@ -40,6 +40,58 @@ const WHITE: Tint = [1, 1, 1];
 
 export function podiumHeight(ci: number, cj: number): number {
   return PODIUM_LEVELS[hashInt(ci, cj, 11) % PODIUM_LEVELS.length];
+}
+
+/**
+ * Setbacks a block may take on the two faces of one axis. No pair adds up to more than two
+ * standard insets, because the 40 m tower zone plus the depth a corner pylon needs behind
+ * each face already fills a standard podium exactly — a deeper pair on one side has to be
+ * paid for on the other. Uneven pairs are the point: they slide the podium off the middle
+ * of its block, so the two walls of a street stop being parallel.
+ */
+const SETBACKS: [number, number][] = [
+  [INSET, INSET],
+  [INSET, INSET],
+  [INSET, INSET],
+  [3.5, 9.5],
+  [9.5, 3.5],
+  [3, 10],
+  [10, 3],
+  [5, 8],
+  [8, 5],
+  [4.5, 4.5],
+];
+
+/**
+ * How far block (ci, cj)'s podium stands back from the block edge on `side` (0 east, 1 north,
+ * 2 west, 3 south). Each axis draws its own pair, so a street is bounded by two lines of
+ * podium faces that step in and out along its length instead of running dead straight —
+ * which is most of what made the place read as a grid of identical blocks.
+ */
+export function podiumInset(ci: number, cj: number, side: number): number {
+  // The east and west faces vary down a column, the north and south faces across a row, and
+  // never the other way about: a skyway leaves one podium's corner for the corner of the one
+  // opposite, so the two have to present their cross faces on the same line or it meets thin
+  // air. Within that, the pair is uneven as often as not, which slides the podium off the
+  // middle of its block and sets each street its own width.
+  const pair = SETBACKS[hashInt(side % 2 === 0 ? ci : cj, 40 + (side % 2)) % SETBACKS.length];
+  return side < 2 ? pair[1] : pair[0]; // 0 east and 1 north are the far faces
+}
+
+/**
+ * How far block (ci, cj)'s podium corners are cut back, on a flat chamfer or an arc (0 for a
+ * square corner). Whether a given corner actually takes the cut also depends on what stands
+ * on it, so this is the worst case — which is what anyone routing round the deck wants.
+ */
+export function podiumCut(ci: number, cj: number): number {
+  const roll = hashInt(ci, cj, 41) % 100;
+  return roll < 38 ? 0 : 3.5 + (roll % 4);
+}
+
+/** Block-local coordinate of the podium face on `side`, as the deck's outer edge. */
+export function deckEdge(ci: number, cj: number, side: number): number {
+  const inset = podiumInset(ci, cj, side);
+  return side < 2 ? CELL - STREET / 2 - inset : STREET / 2 + inset;
 }
 
 /** Lamp head (x, z) positions in cell-local coordinates (shared with the shader). */
@@ -191,7 +243,7 @@ function stairBridge(
   const c0 = c - w / 2, c1 = c + w / 2;
   const thick = 0.9;
   const dh = yb - ya;
-  const land = 3;
+  let land = 3;
   if (Math.abs(dh) < 0.01) {
     put(a0, a1, ya - thick, ya, c0, c1, Mat.Board);
     if (covered && a1 - a0 > 6) {
@@ -206,6 +258,10 @@ function stairBridge(
     return;
   }
   const n = Math.ceil(Math.abs(dh) / 0.45) - 1;
+  // A tread narrower than a runner is wide is one they wedge on, so where a short bridge and
+  // a big drop leave no room the landings give way first: they only square up the deck ends,
+  // while the flight is what has to be walkable.
+  while (land > 1 && (a1 - a0 - 2 * land) / n < 0.8) land -= 0.1;
   const span = a1 - a0 - 2 * land;
   const run = span / n;
   put(a0, a0 + land, ya - thick, ya, c0, c1, Mat.Board);
@@ -366,16 +422,24 @@ export function facadeStair(b: Builder, x0: number, z0: number, x1: number, z1: 
   }
 }
 
-function kerb(b: Builder, x0: number, z0: number, x1: number, z1: number, y: number, tint: Tint, glow = false): void {
+function kerb(b: Builder, x0: number, z0: number, x1: number, z1: number, y: number, tint: Tint, glow = false,
+  cut = 0, segs = 1, mask = 0b1111): void {
   const t = 0.35;
-  b.box(x0, y, z0, x1, y + KERB, z0 + t, Mat.Board, tint);
-  b.box(x0, y, z1 - t, x1, y + KERB, z1, Mat.Board, tint);
-  b.box(x0, y, z0 + t, x0 + t, y + KERB, z1 - t, Mat.Board, tint);
-  b.box(x1 - t, y, z0 + t, x1, y + KERB, z1 - t, Mat.Board, tint);
+  const c = !mask || 2 * cut > Math.min(x1 - x0, z1 - z0) ? 0 : cut;
+  const at = (k: number) => (mask & (1 << k) ? c : 0);
+  b.box(x0 + at(CORNER_SW), y, z0, x1 - at(CORNER_SE), y + KERB, z0 + t, Mat.Board, tint);
+  b.box(x0 + at(CORNER_NW), y, z1 - t, x1 - at(CORNER_NE), y + KERB, z1, Mat.Board, tint);
+  b.box(x0, y, z0 + at(CORNER_SW), x0 + t, y + KERB, z1 - at(CORNER_NW), Mat.Board, tint);
+  b.box(x1 - t, y, z0 + at(CORNER_SE), x1, y + KERB, z1 - at(CORNER_NE), Mat.Board, tint);
+  // the parapet carries on round a cut-back corner, one box to a chord
+  cornerChords(x0, z0, x1, z1, c, segs, (mx, mz, nx, nz, chord, angle) => {
+    const qx = mx - nx * (t / 2), qz = mz - nz * (t / 2);
+    b.box(qx - chord / 2, y, qz - t / 2, qx + chord / 2, y + KERB, qz + t / 2, Mat.Board, tint, 0, { turn: angle });
+  }, mask);
   if (glow) {
     const g = { collide: false, detail: true };
-    b.box(x0 + 0.1, y + KERB, z0 + 0.12, x1 - 0.1, y + KERB + 0.03, z0 + 0.2, Mat.Glow, tint, 0, g);
-    b.box(x0 + 0.1, y + KERB, z1 - 0.2, x1 - 0.1, y + KERB + 0.03, z1 - 0.12, Mat.Glow, tint, 0, g);
+    b.box(x0 + at(CORNER_SW) + 0.1, y + KERB, z0 + 0.12, x1 - at(CORNER_SE) - 0.1, y + KERB + 0.03, z0 + 0.2, Mat.Glow, tint, 0, g);
+    b.box(x0 + at(CORNER_NW) + 0.1, y + KERB, z1 - 0.2, x1 - at(CORNER_NE) - 0.1, y + KERB + 0.03, z1 - 0.12, Mat.Glow, tint, 0, g);
   }
 }
 
@@ -667,7 +731,10 @@ function skyways(b: Builder, r: Rng, ci: number, cj: number, px0: number, pz0: n
       taken.push(p.axis === "x" ? { x0: a0, z0: c0, x1: a1, z1: c1 } : { x0: c0, z0: a0, x1: c1, z1: a1 });
       // this block builds the skyways that leave its east and north corners
       const centre = v0 + vs * SKY_MID;
-      const span = 2 * (INSET + 0.3) + STREET;
+      // pylon origin to pylon origin, across whatever the two podiums leave between them
+      const alongX = p.axis === "x";
+      const span = STREET + 0.6 + podiumInset(ci, cj, alongX ? 0 : 1)
+        + (alongX ? podiumInset(ci + 1, cj, 2) : podiumInset(ci, cj + 1, 3));
       if (p.axis === "x" && east) skyway(b, "x", u0, u0 + span, centre, p.level, kind, tint);
       if (p.axis === "z" && north) skyway(b, "z", u0, u0 + span, centre, p.level, kind, tint);
     }
@@ -777,6 +844,65 @@ function drum(
     b.box(px - side / 2, y0, pz - t / 2, px + side / 2, y1, pz + t / 2, mat, tint, style, { ...pass, turn: -th });
   }
   if (opts.core !== false) b.box(cx - q, y0, cz - q, cx + q, y1, cz + q, Mat.Board, tint, 0, pass);
+}
+
+/**
+ * A rectangular mass with its four corners cut back on an arc of radius `c`: a cross of two
+ * axis-aligned boxes, plus `segs` turned boxes filling each corner out to the arc. One
+ * segment is a flat chamfer, three or four read as round.
+ *
+ * Each corner box sits with its outer face on a chord of the arc and reaches inward past the
+ * arc's centre, so whatever it covers beyond the corner square is solid podium anyway.
+ */
+function roundedMass(
+  b: Builder, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number,
+  c: number, segs: number, mat: Mat, tint: Tint, style = 0,
+  opts: { collide?: boolean; detail?: boolean; mask?: number } = {},
+): void {
+  const mask = opts.mask ?? 0b1111;
+  if (c <= 0.05 || !mask || 2 * c > Math.min(x1 - x0, z1 - z0)) {
+    b.box(x0, y0, z0, x1, y1, z1, mat, tint, style, opts);
+    return;
+  }
+  const at = (k: number) => (mask & (1 << k) ? c : 0);
+  b.box(x0, y0, z0 + c, x1, y1, z1 - c, mat, tint, style, opts);
+  b.box(x0 + at(CORNER_SW), y0, z0, x1 - at(CORNER_SE), y1, z0 + c, mat, tint, style, opts);
+  b.box(x0 + at(CORNER_NW), y0, z1 - c, x1 - at(CORNER_NE), y1, z1, mat, tint, style, opts);
+  cornerChords(x0, z0, x1, z1, c, segs, (mx, mz, nx, nz, chord, angle) => {
+    const qx = mx - nx * (c / 2), qz = mz - nz * (c / 2);
+    b.box(qx - chord / 2, y0, qz - c / 2, qx + chord / 2, y1, qz + c / 2, mat, tint, style, { ...opts, turn: angle });
+  }, mask);
+}
+
+// Corner order shared by roundedMass, cornerChords and the cut mask.
+const CORNER_SW = 0, CORNER_SE = 1, CORNER_NE = 2, CORNER_NW = 3;
+
+/**
+ * Walks the chords of the four corner arcs of a rectangle cut back by `c`, giving each one's
+ * midpoint, outward normal, length and turn — enough to lay a box along it.
+ */
+function cornerChords(
+  x0: number, z0: number, x1: number, z1: number, c: number, segs: number,
+  fn: (mx: number, mz: number, nx: number, nz: number, chord: number, angle: number) => void,
+  mask = 0b1111,
+): void {
+  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]]; // SW, SE, NE, NW
+  for (let k = 0; k < 4; k++) {
+    if (!(mask & (1 << k))) continue;
+    const [sx, sz] = corners[k];
+    const ax = sx < 0 ? x0 + c : x1 - c, az = sz < 0 ? z0 + c : z1 - c;
+    const from = sx < 0 ? Math.PI : 0; // the quadrant this corner faces, swept toward sz
+    for (let k = 0; k < segs; k++) {
+      const ta = from + ((sx * sz) * (Math.PI / 2) * k) / segs;
+      const tb = from + ((sx * sz) * (Math.PI / 2) * (k + 1)) / segs;
+      const pax = ax + c * Math.cos(ta), paz = az + c * Math.sin(ta);
+      const pbx = ax + c * Math.cos(tb), pbz = az + c * Math.sin(tb);
+      const mx = (pax + pbx) / 2, mz = (paz + pbz) / 2;
+      const nl = Math.hypot(mx - ax, mz - az) || 1;
+      fn(mx, mz, (mx - ax) / nl, (mz - az) / nl, Math.hypot(pbx - pax, pbz - paz),
+        Math.atan2(pbz - paz, pbx - pax));
+    }
+  }
 }
 
 /** Plan of a tower shaft: a plain box, a cross with cut-back corners, or twin slabs joined by a core. */
@@ -1487,8 +1613,8 @@ export function bridgeOn(ci: number, cj: number, side: number): number | null {
 /** Podium corner k (0 south-west, 1 south-east, 2 north-west, 3 north-east) of block (ci, cj), with the directions into the podium. */
 export function streetCorner(ci: number, cj: number, k: number): [number, number, number, number] {
   const east = k % 2 === 1, north = k >= 2;
-  const x = ci * CELL + (east ? CELL - STREET / 2 - INSET : STREET / 2 + INSET);
-  const z = cj * CELL + (north ? CELL - STREET / 2 - INSET : STREET / 2 + INSET);
+  const x = ci * CELL + deckEdge(ci, cj, east ? 0 : 2);
+  const z = cj * CELL + deckEdge(ci, cj, north ? 1 : 3);
   return [x, z, east ? -1 : 1, north ? -1 : 1];
 }
 
@@ -1496,8 +1622,9 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
   const r = new Rng(hashInt(ci, cj, 1));
   const ox = ci * CELL, oz = cj * CELL;
   const s = STREET / 2;
-  const bx0 = ox + s, bz0 = oz + s, bx1 = ox + CELL - s, bz1 = oz + CELL - s;
-  const px0 = bx0 + INSET, pz0 = bz0 + INSET, px1 = bx1 - INSET, pz1 = bz1 - INSET;
+  const bx0 = ox + s, bz0 = oz + s;
+  const px0 = ox + deckEdge(ci, cj, 2), pz0 = oz + deckEdge(ci, cj, 3);
+  const px1 = ox + deckEdge(ci, cj, 0), pz1 = oz + deckEdge(ci, cj, 1);
   const E = podiumHeight(ci, cj);
   const tint = r.pick(TINTS);
   b.finish = r.pick([Finish.Boards, Finish.Boards, Finish.Ribbed, Finish.Cast]);
@@ -1506,9 +1633,24 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
   expressways(b, ci, cj, ox, oz);
   parkedCars(b, r, ox, oz);
 
-  // --- podium: arcade on the street, office floors, walkable deck on top
+  // --- podium: arcade on the street, office floors, walkable deck on top.
+  // Many blocks cut their corners back, on a flat chamfer or on an arc, so the intersections
+  // open out instead of being four right angles meeting.
+  const cut = podiumCut(ci, cj);
+  const segs = hashInt(ci, cj, 41) % 100 < 66 ? 1 : 3;
+  // a corner can only be cut away if nothing stands on it: the street stair, the lift, or a
+  // stair pylon all wrap a square corner and would be left hanging over the gap
+  const stairAt = r.int(0, 3);
+  const liftAt = r.chance(0.55) ? (stairAt + r.int(1, 3)) % 4 : -1;
+  const CUT_OF_K = [CORNER_SW, CORNER_SE, CORNER_NW, CORNER_NE]; // streetCorner's k order
+  let mask = 0b1111;
+  mask &= ~(1 << CUT_OF_K[stairAt]);
+  if (liftAt >= 0) mask &= ~(1 << CUT_OF_K[liftAt]);
+  for (const [east, north, k] of [[0, 0, CORNER_SW], [1, 0, CORNER_SE], [1, 1, CORNER_NE], [0, 1, CORNER_NW]] as const)
+    if (cornerPylon(ci, cj, !!east, !!north)) mask &= ~(1 << k);
   const arcade = 5.5;
-  b.box(px0 + 3, 0.18, pz0 + 3, px1 - 3, arcade, pz1 - 3, Mat.Windows, tint, Win.Grid);
+  const cutOpts = { mask };
+  roundedMass(b, px0 + 3, 0.18, pz0 + 3, px1 - 3, arcade, pz1 - 3, cut - 3, segs, Mat.Windows, tint, Win.Grid, cutOpts);
   // light strips under the overhang
   const g = { collide: false, detail: true };
   b.box(px0 + 1.4, arcade - 0.05, pz0 + 1.4, px1 - 1.4, arcade, pz0 + 1.6, Mat.Glow, tint, 0, g);
@@ -1516,39 +1658,42 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
   b.box(px0 + 1.4, arcade - 0.05, pz0 + 1.6, px0 + 1.6, arcade, pz1 - 1.6, Mat.Glow, tint, 0, g);
   b.box(px1 - 1.6, arcade - 0.05, pz0 + 1.6, px1 - 1.4, arcade, pz1 - 1.6, Mat.Glow, tint, 0, g);
   const colStep = 7.1;
-  for (let x = px0 + 0.6; x < px1; x += colStep) {
+  // columns stop short of a cut-back corner, where there is no longer a face for them to stand on
+  for (let x = px0 + 0.6 + cut; x < px1 - cut; x += colStep) {
     b.box(x - 0.6, 0.18, pz0, x + 0.6, arcade, pz0 + 1.2, Mat.Board, tint);
     b.box(x - 0.6, 0.18, pz1 - 1.2, x + 0.6, arcade, pz1, Mat.Board, tint);
   }
-  for (let z = pz0 + 0.6 + colStep; z < pz1 - colStep; z += colStep) {
+  for (let z = pz0 + 0.6 + colStep + cut; z < pz1 - colStep - cut; z += colStep) {
     b.box(px0, 0.18, z - 0.6, px0 + 1.2, arcade, z + 0.6, Mat.Board, tint);
     b.box(px1 - 1.2, 0.18, z - 0.6, px1, arcade, z + 0.6, Mat.Board, tint);
   }
-  b.box(px0, arcade, pz0, px1, E - 1.4, pz1, Mat.Windows, tint, r.pick([Win.Ribbon, Win.Grid, Win.Punched, Win.Crate]));
-  b.box(px0 - 0.5, E - 1.4, pz0 - 0.5, px1 + 0.5, E, pz1 + 0.5, Mat.Deck, tint);
-  kerb(b, px0 - 0.5, pz0 - 0.5, px1 + 0.5, pz1 + 0.5, E, tint, true);
+  roundedMass(b, px0, arcade, pz0, px1, E - 1.4, pz1, cut, segs, Mat.Windows, tint,
+    r.pick([Win.Ribbon, Win.Grid, Win.Punched, Win.Crate]), cutOpts);
+  roundedMass(b, px0 - 0.5, E - 1.4, pz0 - 0.5, px1 + 0.5, E, pz1 + 0.5, cut + 0.5, segs, Mat.Deck, tint, 0, cutOpts);
+  kerb(b, px0 - 0.5, pz0 - 0.5, px1 + 0.5, pz1 + 0.5, E, tint, true, cut + 0.5, segs, mask);
 
   // --- from the street up to the deck: a stair round one corner, often a lift in another
-  const stairAt = r.int(0, 3);
   cornerStair(b, ...streetCorner(ci, cj, stairAt), E, tint);
-  if (r.chance(0.55)) streetLift(b, ...streetCorner(ci, cj, (stairAt + r.int(1, 3)) % 4), E, tint);
+  if (liftAt >= 0) streetLift(b, ...streetCorner(ci, cj, liftAt), E, tint);
 
-  // --- bridges to the east and north neighbours
+  // --- bridges to the east and north neighbours. Both podiums set their own face back, so
+  // a bridge is as long as the gap it actually has to cross.
+  const far = (di: 0 | 1) => (di === 0 ? (ci + 1) * CELL + deckEdge(ci + 1, cj, 2) : (cj + 1) * CELL + deckEdge(ci, cj + 1, 3)) - 0.5;
   const east = edgeBridge(ci, cj, 0);
   if (east !== null) {
     const En = podiumHeight(ci + 1, cj);
-    stairBridge(b, r, "x", px1 + 0.5, px1 + 0.5 + 2 * INSET + STREET - 1, oz + CELL / 2 + east, 4.5, E, En, tint, r.chance(0.35));
+    stairBridge(b, r, "x", px1 + 0.5, far(0), oz + CELL / 2 + east, 4.5, E, En, tint, r.chance(0.35));
   } else if (hashInt(ci, cj, 26) % 100 < 70) {
     const off = (hashInt(ci, cj, 27) % 15) - 6;
-    brokenBridge(b, r, "x", px1 + 0.5, px1 + 0.5 + 2 * INSET + STREET - 1, oz + CELL / 2 + off, E, podiumHeight(ci + 1, cj), tint);
+    brokenBridge(b, r, "x", px1 + 0.5, far(0), oz + CELL / 2 + off, E, podiumHeight(ci + 1, cj), tint);
   }
   const north = edgeBridge(ci, cj, 1);
   if (north !== null) {
     const En = podiumHeight(ci, cj + 1);
-    stairBridge(b, r, "z", pz1 + 0.5, pz1 + 0.5 + 2 * INSET + STREET - 1, ox + CELL / 2 + north, 4.5, E, En, tint, r.chance(0.35));
+    stairBridge(b, r, "z", pz1 + 0.5, far(1), ox + CELL / 2 + north, 4.5, E, En, tint, r.chance(0.35));
   } else if (hashInt(ci, cj, 28) % 100 < 70) {
     const off = (hashInt(ci, cj, 29) % 15) - 6;
-    brokenBridge(b, r, "z", pz1 + 0.5, pz1 + 0.5 + 2 * INSET + STREET - 1, ox + CELL / 2 + off, E, podiumHeight(ci, cj + 1), tint);
+    brokenBridge(b, r, "z", pz1 + 0.5, far(1), ox + CELL / 2 + off, E, podiumHeight(ci, cj + 1), tint);
   }
 
   // --- stair pylons on the corners and the skyways between them
@@ -1578,13 +1723,20 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
   }
 
   // --- towers
-  const zone = { x0: bx0 + INNER, z0: bz0 + INNER, x1: bx1 - INNER, z1: bz1 - INNER };
+  // The tower zone is the standard 40 m square, slid (never shrunk) to keep the same margin
+  // behind every podium face that it has on a standard block, so a deep setback on one side
+  // carries its towers back with it and the corner pylons keep their room.
+  const ring = INNER - INSET;
+  const zx = Math.max(px0 + ring, Math.min(px1 - ring - 40, bx0 + INNER));
+  const zz = Math.max(pz0 + ring, Math.min(pz1 - ring - 40, bz0 + INNER));
+  const zone = { x0: zx, z0: zz, x1: zx + 40, z1: zz + 40 };
   const dens = districtDensity(ci, cj);
   const home = ci === 0 && cj === 0;
   const layout = home ? quad : pickLayout(r, dens);
-  // some blocks stand their towers askew to the street. The zone is 40 m across inside a
-  // 57 m podium, so up to about 15 degrees still lands clear of the deck edge.
-  const skew = !home && r.chance(0.3) ? r.uniform(-0.26, 0.26) : 0;
+  // some blocks stand their towers askew to the street; the turn is limited by how much
+  // room the zone has left inside the podium, since turning it grows its footprint
+  const slack = Math.min(px1 - zone.x1, zone.x0 - px0, pz1 - zone.z1, zone.z0 - pz0);
+  const skew = !home && r.chance(0.3) ? r.uniform(-1, 1) * Math.min(0.26, slack / 40) : 0;
   b.turned((zone.x0 + zone.x1) / 2, (zone.z0 + zone.z1) / 2, skew, () => layout(b, r, zone, E, tint, dens));
 }
 
@@ -1620,6 +1772,25 @@ export interface RegionMesh {
   lifts: (Lift & { id: string })[];
   maxHeight: number;
   colliders: { ci: number; cj: number; boxes: Float32Array }[];
+}
+
+/**
+ * Collision boxes (six floats each: min, max) for everything a builder has placed. Turned
+ * boxes are broken into axis-aligned slabs, since nothing downstream knows about turns.
+ */
+export function collidersOf(b: Builder): Float32Array {
+  const list: number[] = [];
+  for (let i = 0; i < b.count; i++) {
+    const o = i * FLOATS_PER_BOX;
+    if (!b.data[o + 12]) continue;
+    const y0 = b.data[o + 1], y1 = b.data[o + 4];
+    if (!b.data[o + 14]) {
+      list.push(b.data[o], y0, b.data[o + 2], b.data[o + 3], y1, b.data[o + 5]);
+      continue;
+    }
+    turnedSlabs(b.data, o, (x0, z0, x1, z1) => list.push(x0, y0, z0, x1, y1, z1));
+  }
+  return Float32Array.from(list);
 }
 
 /** Widest slab `turnedSlabs` will cut: the staircase it leaves is about this times the tilt. */
@@ -1822,20 +1993,7 @@ export function buildRegion(rx: number, rz: number, faceCull = true): RegionMesh
     });
   }
 
-  const colliders = cells.map(({ ci, cj, b }) => {
-    const list: number[] = [];
-    for (let i = 0; i < b.count; i++) {
-      const o = i * FLOATS_PER_BOX;
-      if (!b.data[o + 12]) continue;
-      const y0 = b.data[o + 1], y1 = b.data[o + 4];
-      if (!b.data[o + 14]) {
-        list.push(b.data[o], y0, b.data[o + 2], b.data[o + 3], y1, b.data[o + 5]);
-        continue;
-      }
-      turnedSlabs(b.data, o, (x0, z0, x1, z1) => list.push(x0, y0, z0, x1, y1, z1));
-    }
-    return { ci, cj, boxes: Float32Array.from(list) };
-  });
+  const colliders = cells.map(({ ci, cj, b }) => ({ ci, cj, boxes: collidersOf(b) }));
 
   const pads = cells.flatMap(({ ci, cj, b }) => b.pads.map((pd, k) => ({ ...pd, id: `p${ci},${cj},${k}` })));
   const cars = cells.flatMap(({ ci, cj, b }) => b.cars.map((c, k) => ({ ...c, id: `c${ci},${cj},${k}` })));
@@ -1848,7 +2006,7 @@ export function buildRegion(rx: number, rz: number, faceCull = true): RegionMesh
 
 /** Where the runner starts: on the podium deck of cell (0, 0). */
 export function spawnPoint(): { x: number; y: number; z: number; yaw: number } {
-  return { x: STREET / 2 + INSET + 3, y: podiumHeight(0, 0), z: 26, yaw: 0 };
+  return { x: deckEdge(0, 0, 2) + 3, y: podiumHeight(0, 0), z: 26, yaw: 0 };
 }
 
 /** Test hook: the collision slabs of a box `w` x `d` centred on the origin, turned by `a`. */

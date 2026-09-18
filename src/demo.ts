@@ -1,7 +1,7 @@
 // Demo mode: autopilots that run the decks, fly the air corridors and drive the
 // cross streets, and a director that cuts between them as the weather moves on.
 
-import { bridgeOn, CELL, INSET, PODIUM_LEVELS, podiumHeight, STREET } from "./city/generate";
+import { bridgeOn, CELL, deckEdge, PODIUM_LEVELS, podiumCut, podiumHeight, STREET } from "./city/generate";
 import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import type { Controls, Rides } from "./rides";
@@ -23,7 +23,9 @@ const turnToward = (from: number, to: number, rate: number, dt: number) =>
 // Running: round the edge of each podium deck and over its bridges. Vents and
 // facade stairs vary per block, so each side's line is probed for a clear path.
 
-export const DECK_EDGE = STREET / 2 + INSET - 0.5; // block-local coordinate of the deck's outer edge
+/** Block-local coordinate of the deck's outer edge on `side`, just inside the parapet. */
+const edgeOf = (ci: number, cj: number, side: number) =>
+  deckEdge(ci, cj, side) + (side < 2 ? 0.5 : -0.5);
 export const SIDE_STEP = [[1, 0], [0, 1], [-1, 0], [0, -1]]; // east, north, west, south
 const CLEARANCE = 0.5; // runner radius plus a margin
 
@@ -68,11 +70,13 @@ export class RunPilot {
     if (r) return r;
     const ox = ci * CELL, oz = cj * CELL, deck = podiumHeight(ci, cj);
     const boxes = this.colliders(ox + CELL / 2, oz + CELL / 2);
-    const lo = DECK_EDGE + 1, hi = CELL - DECK_EDGE - 1;
     const lines = [0, 1, 2, 3].map((side) => {
+      // each side runs between the two deck edges it meets, which is its own pair of setbacks
+      const lo = edgeOf(ci, cj, side % 2 === 0 ? 3 : 2) + 1;
+      const hi = edgeOf(ci, cj, side % 2 === 0 ? 1 : 0) - 1;
       // hug the edge where possible: the view over the street is the point
       for (let inset = 1.2; inset < 9; inset += 0.1) {
-        const local = side < 2 ? CELL - DECK_EDGE - inset : DECK_EDGE + inset;
+        const local = edgeOf(ci, cj, side) + (side < 2 ? -inset : inset);
         const along = side % 2 === 0 ? ox + local : oz + local;
         const a: Point = side % 2 === 0 ? [along, oz + lo] : [ox + lo, along];
         const b: Point = side % 2 === 0 ? [along, oz + hi] : [ox + hi, along];
@@ -85,11 +89,28 @@ export class RunPilot {
     return r;
   }
 
-  /** Corner after `side` going anticlockwise (east -> north -> west -> south). */
-  private corner(ci: number, cj: number, side: number): Point | null {
+  /**
+   * How the route turns the corner after `side`, going anticlockwise (east -> north -> west
+   * -> south): normally the one point where the two running lines cross.
+   *
+   * Where the corner is cut back, that crossing is out over the street. Rather than move it
+   * inboard — which would take the long runs off the lines that were probed clear — the
+   * corner is cut by two points that each stay on one line, far enough along it that their
+   * distances from the two faces add up to the cut, with a short diagonal between them.
+   * Returned as [point on the x line, point on the z line].
+   */
+  private corner(ci: number, cj: number, side: number): Point[] | null {
     const [e, n, w, s] = this.ring(ci, cj).lines;
     const c = [[e, n], [w, n], [w, s], [e, s]][side];
-    return c[0] === null || c[1] === null ? null : [c[0], c[1]];
+    if (c[0] === null || c[1] === null) return null;
+    const [cx, cz] = c;
+    const cut = podiumCut(ci, cj) + 1;
+    if (cut <= 1) return [[cx, cz]];
+    const [xs, zs] = [[0, 1], [2, 1], [2, 3], [0, 3]][side]; // the faces this corner stands on
+    const fx = ci * CELL + edgeOf(ci, cj, xs), fz = cj * CELL + edgeOf(ci, cj, zs);
+    const t = cut - Math.abs(cx - fx) - Math.abs(cz - fz);
+    if (t <= 0) return [[cx, cz]];
+    return [[cx, cz + (zs < 2 ? -t : t)], [cx + (xs < 2 ? -t : t), cz]];
   }
 
   /** Where the running line meets the bridge on `side`, if the way to the deck edge is clear. */
@@ -98,7 +119,7 @@ export class RunPilot {
     const line = r.lines[side];
     if (line === null) return null;
     const ox = ci * CELL, oz = cj * CELL, mid = CELL / 2 + offset;
-    const edge = side < 2 ? CELL - DECK_EDGE : DECK_EDGE;
+    const edge = edgeOf(ci, cj, side);
     const p: Point = side % 2 === 0 ? [line, oz + mid] : [ox + mid, line];
     const e: Point = side % 2 === 0 ? [ox + edge, oz + mid] : [ox + mid, oz + edge];
     return clearPath(this.colliders(p[0], p[1]), p, e, r.deck) ? p : null;
@@ -108,7 +129,7 @@ export class RunPilot {
   get start(): Vec3 {
     const c = this.corner(this.ci, this.cj, 2);
     const ox = this.ci * CELL, oz = this.cj * CELL;
-    const [x, z] = c ?? [ox + DECK_EDGE + 1.5, oz + DECK_EDGE + 1.5];
+    const [x, z] = c?.[0] ?? [ox + edgeOf(this.ci, this.cj, 2) + 1.5, oz + edgeOf(this.ci, this.cj, 3) + 1.5];
     return [x, podiumHeight(this.ci, this.cj), z];
   }
 
@@ -121,7 +142,7 @@ export class RunPilot {
   joinAt(x: number, z: number): void {
     const [e, n, w, s] = this.ring(this.ci, this.cj).lines;
     const ox = this.ci * CELL, oz = this.cj * CELL;
-    const lo = DECK_EDGE + 1.5, hi = CELL - DECK_EDGE - 1.5;
+    const lo = edgeOf(this.ci, this.cj, 2) + 1.5, hi = edgeOf(this.ci, this.cj, 0) - 1.5;
     let side = -1, best = Infinity;
     [e, n, w, s].forEach((line, k) => {
       const d = line === null ? Infinity : Math.abs((k % 2 === 0 ? x : z) - line);
@@ -146,7 +167,8 @@ export class RunPilot {
     for (let s = this.from; s !== exit; s = (s + dir + 4) % 4) {
       const c = this.corner(this.ci, this.cj, dir > 0 ? s : (s + 3) % 4);
       if (!c) return null;
-      out.push(c);
+      // arriving along an east or west line means meeting the x-line point first
+      out.push(...(s % 2 === 0 ? c : [...c].reverse()));
     }
     return out;
   }
