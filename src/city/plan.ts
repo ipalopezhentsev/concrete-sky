@@ -10,7 +10,7 @@ import { Finish, Mat, Win, type Tint } from "./materials";
 import { PAINT_COLORS } from "../vehicles/models";
 import {
   ARTERY, ARTERY_HALF, arteryFrame, arteryLines, blocksIn, cellOf, checkSeed, grain, RIVER_HALF,
-  neighbours, QUAY, rememberBySeed, riverFrame, riverLines, riverNear, ROAD, streetsOf, TERRACE, terrainAt, TILE,
+  neighbours, QUAY, QUAY_RISE, rememberBySeed, riverFrame, riverLines, riverNear, ROAD, streetsOf, TERRACE, terrainAt, TILE,
   waterLevel,
   type Site, type Street, type Vec2,
 } from "./network";
@@ -1073,6 +1073,39 @@ function rideY(x: number, z: number): number {
 const APRON_TILES = 8;
 const APRON_GRADE = TERRACE / TILE;
 
+/** How far inboard from the water's edge the stone quay reaches. */
+const QUAY_SLAB = 16;
+/** Stations to a bay of quay. The same grid the water is laid on, so the two edges agree. */
+const BAY = 8;
+/** The diagonal of a ground tile: how far a corner's height can carry across the grid. */
+const TILE_DIAG = TILE * 1.45;
+
+/**
+ * The ceiling the river puts on the ground at a point.
+ *
+ * The bank is a curve and the ground is a five-metre grid, so the two can never meet along
+ * the water's edge. A tile that straddles it is one plane from the quay top down to the bed:
+ * it juts out over the river at the corner still on land, and falls away from under the
+ * coping at the corner that is not — the teeth, and the holes between them. No cut placed
+ * *at* the edge mends that, because the edge is exactly where the grid cannot follow.
+ *
+ * So the ground is not asked to make the edge at all. It is cut to the bed a tile's diagonal
+ * *behind* the water, which is far enough that nothing left standing can reach out over the
+ * river; and for a slab's width behind that it is held a few centimetres under the quay,
+ * which is where the stone laid along the river's own spline covers it. Ground comes back to
+ * its own height only past the far edge of that stone, where the two are flush.
+ */
+function channelCap(x: number, z: number): number {
+  const r = riverNear(x, z, RIVER_HALF + QUAY_SLAB + TILE_DIAG);
+  if (!r) return Infinity;
+  const w = waterLevel(r.line);
+  if (r.dist < RIVER_HALF + TILE_DIAG) return w - 1.5;
+  // A tile with one corner inside this has every corner inside it, so no tile the slab
+  // overlaps is ever left at full height to fight with the stone over it.
+  if (r.dist < RIVER_HALF + QUAY_SLAB + TILE_DIAG) return w + QUAY_RISE - 0.06;
+  return Infinity;
+}
+
 /**
  * The ground of one region: a field of tiles, each the plane through the four corners it
  * shares with its neighbours.
@@ -1108,14 +1141,11 @@ function terrain(
       const on = covered(x, z);
       if (under !== null) h = Math.min(h, under - 0.05);
       if (on) h = Math.min(h, on.base - 0.05);
-      // Inside the channel the ground is riverbed, and the bed is under the water — not level
-      // with it. Left at the height the land happens to be, it stands up through the surface
-      // wherever it is a few centimetres high, and since the bank here is flat and cut to
-      // terraces it does that in whole tiles: the water's edge comes out as a staircase of
-      // right angles however smoothly the river itself is laid. Cut to a bed, the water is
-      // unobstructed and the shoreline is the channel's own edge against the quay.
-      const chan = riverNear(x, z, RIVER_HALF + 4);
-      if (chan && chan.dist < RIVER_HALF) h = Math.min(h, waterLevel(chan.line) - 1.5);
+      // Inside the channel the ground is riverbed, and the bed is under the water, not level
+      // with it: left at the height the land happens to be, it stands up through the surface
+      // wherever it is a few centimetres high. How far back that cut runs, and what happens
+      // between it and the quay, is `channelCap`.
+      h = Math.min(h, channelCap(x, z));
       if (over !== null) seed = Math.max(seed, over);
       if (on) seed = Math.max(seed, on.base);
       // A road standing over the ground has to be reachable from it, but no higher than the
@@ -1169,7 +1199,7 @@ function terrain(
       const gx = ((c10 + c11) - (c00 + c01)) / 2;
       const gz = ((c01 + c11) - (c00 + c10)) / 2;
       const h = (c00 + c10 + c01 + c11) / 4;
-      const r = riverNear(cx, cz, RIVER_HALF + 4);
+      const r = riverNear(cx, cz, RIVER_HALF + TILE_DIAG + 4);
       const w = r ? waterLevel(r.line) : Infinity;
       // Only ground that is actually under a river is riverbed. Comparing against a water
       // level of Infinity where there is no river said yes to every tile in the city, so
@@ -1204,8 +1234,7 @@ function capOf(
   // taken and leaving it out of this let the embankment sweeps raise it straight back up
   // again, since they are allowed to climb to whatever the cap says — and the bed came back
   // to the waterline, taking the staircase with it.
-  const chan = riverNear(x, z, RIVER_HALF + 4);
-  if (chan && chan.dist < RIVER_HALF) cap = Math.min(cap, waterLevel(chan.line) - 1.5);
+  cap = Math.min(cap, channelCap(x, z));
   return cap;
 }
 
@@ -2040,22 +2069,40 @@ function waterfront(b: Builder, x0: number, z0: number): void {
   const pad = 200;
   for (const line of riverLines(x0 + REGION / 2, REGION / 2 + pad)) {
     const from = z0 - pad, to = z0 + REGION + pad;
-    for (let s = from; s < to; s += 8) {
-      const { p, dir } = riverFrame(line, s + 4);
+    for (let s = from; s < to; s += BAY) {
+      // The bay taken between its own two ends, as the water is, rather than off the nominal
+      // spacing of the stations. A station is a fraction of the river's lattice and not arc
+      // length, so eight of them is anywhere from five to thirteen metres of bank — and boxes
+      // cut to the nominal eight left the quay open at every joint where the spline stretches:
+      // a missing tooth of parapet with the water showing through behind it.
+      const a = riverFrame(line, s).p, c = riverFrame(line, s + BAY).p;
+      const px = (a[0] + c[0]) / 2, pz = (a[1] + c[1]) / 2;
+      const dx = c[0] - a[0], dz = c[1] - a[1];
+      const chord = Math.hypot(dx, dz) || BAY;
+      const dir: Vec2 = [dx / chord, dz / chord];
+      const turn = Math.atan2(dz, dx);
+      // Bays overrun both ends by the mitre: two of them turned against each other leave the
+      // joint open on the inside of the bend otherwise, and the wider the thing laid the wider
+      // that opening. The boxes are opaque, so the seam is buried inside the stone.
+      const halfL = chord / 2 + 1.6;
       for (const side of [1, -1] as const) {
-        const ex = p[0] - dir[1] * RIVER_HALF * side, ez = p[1] + dir[0] * RIVER_HALF * side;
+        const ex = px - dir[1] * RIVER_HALF * side, ez = pz + dir[0] * RIVER_HALF * side;
         if (ex < x0 - 4 || ex >= x0 + REGION + 4 || ez < z0 - 4 || ez >= z0 + REGION + 4) continue;
-        const w = waterLevel(line), top = w + 5;
-        const turn = Math.atan2(dir[1], dir[0]);
+        const w = waterLevel(line), top = w + QUAY_RISE;
         const put = (halfW: number, y0: number, y1: number, off: number, mat: Mat, tn: Tint, style = 0, opts = {}) => {
           const cx = ex - dir[1] * off * side, cz = ez + dir[0] * off * side;
-          b.box(cx - 4, y0, cz - halfW, cx + 4, y1, cz + halfW, mat, tn, style, { turn, detail: false, ...opts });
+          b.box(cx - halfL, y0, cz - halfW, cx + halfL, y1, cz + halfW, mat, tn, style, { turn, detail: false, ...opts });
         };
+        // The quay: the wall out of the water and the strip of deck behind it. The ground
+        // under all of it is cut away (see `channelCap`), because a five-metre grid cannot
+        // make a curved shoreline — so this stone *is* the edge of the city against the
+        // water, and the ground only picks up again, flush, behind its inner edge.
+        put(QUAY_SLAB / 2, w - 4, top, QUAY_SLAB / 2, Mat.Deck, stone);
         // A solid parapet along the top of the wall. Nothing thin: a slender rail here runs
         // the whole length of the bank and, seen down the quay, reads as a wire over the
         // water rather than as anything anyone would build.
         put(1.1, top, top + 0.42, 1.0, Mat.Board, stone, Finish.Cast);
-        const k = Math.round(s / 8);
+        const k = Math.round(s / BAY);
         put(0.42, top + 0.42, top + 1.15, 1.7, Mat.Board, stone, Finish.Cast);
         // a bollard now and then, and steps down to the water every so often
         if (k % 5 === 0) put(0.3, top + 0.42, top + 1.1, 1.0, Mat.Board, stone, Finish.Ribbed);

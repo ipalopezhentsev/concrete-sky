@@ -688,7 +688,7 @@ export function terrainAt(x: number, z: number): number {
   // Behind the water.s edge the bank is not a slope but an embankment: a wall straight out of
   // the river up to a flat quay, and only past that does the ground climb away to the city.
   const q = r.dist - RIVER_HALF;
-  const top = w + 5;
+  const top = w + QUAY_RISE;
   if (q < QUAY) return top;
   // Out of the quay the ground climbs at a hill's grade until it meets the land, so the bank
   // behind a hill's flank is a long climb and the bank behind flat ground is a short one.
@@ -712,6 +712,8 @@ export const RIVER = 2600;
 export const RIVER_HALF = 62;
 /** Width of the quay between the water.s edge and the building line on each bank. */
 export const QUAY = 30;
+/** Height of the quay over the water, which is the face of the embankment wall. */
+export const QUAY_RISE = 5;
 const RIVER_STEP = 950;
 /** Bank seed pairs along one river span; they must be close enough to hold the channel. */
 const RIVER_STATIONS = 12;
