@@ -1,7 +1,7 @@
 // A drivable car: arcade handling, box collision, kerb stepping.
 
 import type { Vec3 } from "../math";
-import type { Colliders } from "../player";
+import { FLOOR, type Colliders } from "../player";
 import { exitSpot } from "./exit";
 import { footprint } from "./parking";
 
@@ -108,7 +108,7 @@ export class Car {
 
     // vertical: settle on the highest surface under the car (kerbs are stepped over)
     const f = footprint(this.kind, this.yaw);
-    let ground = 0;
+    let ground = FLOOR;
     for (let i = 0; i < boxes.length; i += 6) {
       if (boxes[i] < this.pos[0] + f.hx && boxes[i + 3] > this.pos[0] - f.hx &&
           boxes[i + 2] < this.pos[2] + f.hz && boxes[i + 5] > this.pos[2] - f.hz &&

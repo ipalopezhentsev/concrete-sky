@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { carBoxes, carBoxesFar, figureBoxes, flyerBoxes, flyerBoxesFar, liftBoxes, modelData } from "./vehicles/models";
+import { boatBoxes, carriageBoxes, carBoxes, carBoxesFar, figureBoxes, flyerBoxes, flyerBoxesFar, liftBoxes, modelData } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
@@ -42,10 +42,16 @@ export interface Camera {
   vel: Vec3;
 }
 
+/** How many street lamps the network city lights at once, nearest the camera. */
+export const LAMP_SLOTS = 24;
+const NO_LAMPS = new Float32Array(LAMP_SLOTS * 3).fill(-1e5);
+
 export interface VehicleLists {
   cars: InstanceList;
   vans: InstanceList;
   flyers: InstanceList;
+  boats: InstanceList;
+  trains?: InstanceList;
   /** People on foot, by pose: standing, left stride, right stride. */
   figures?: InstanceList[];
   lifts?: InstanceList;
@@ -119,6 +125,15 @@ export interface RenderOptions {
 }
 
 export class Renderer {
+  /**
+   * Height of the ground near the camera, where the city has ground that is not y = 0: the
+   * street mist and the shade at the foot of walls are measured up from it.
+   */
+  groundAt: ((x: number, z: number) => number) | null = null;
+  private groundRef = 0;
+  /** Lamp heads near the camera (LAMP_SLOTS x, y, z), or null before the first pick. */
+  lamps: Float32Array | null = null;
+
   readonly renderer: string;
   readonly integrated: boolean;
   readonly samples: number;
@@ -132,13 +147,15 @@ export class Renderer {
   private clip: ClipControl | null;
   private sky: Program;
   private city: Program;
+  /** Anisotropy the textures were built with, so a view can be reproduced on another GPU. */
+  readonly aniso: number;
   private depthProg: Program;
   private rainProg: Program;
   private post: Program;
   private cloudProg: Program;
   private vehicleProg: Program;
   private vehicleMeshes: {
-    car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh;
+    car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh;
     carFar: InstancedMesh; vanFar: InstancedMesh; flyerFar: InstancedMesh;
     figures: InstancedMesh[]; lift: InstancedMesh;
   };
@@ -151,7 +168,7 @@ export class Renderer {
   private noise: WebGLTexture;
   private scene: SceneTarget | null = null;
   private shadow: ShadowTarget;
-  private shadowSize: number;
+  readonly shadowSize: number;
   private clouds: ColorTarget;
   private lightVP: Float32Array = new Float32Array(16);
   private shadowCenter: Vec3 | null = null;
@@ -205,6 +222,8 @@ export class Renderer {
       car: instanced(modelData(carBoxes(false))),
       van: instanced(modelData(carBoxes(true))),
       flyer: instanced(modelData(flyerBoxes())),
+      boat: instanced(modelData(boatBoxes())),
+      train: instanced(modelData(carriageBoxes())),
       carFar: instanced(modelData(carBoxesFar(false))),
       vanFar: instanced(modelData(carBoxesFar(true))),
       flyerFar: instanced(modelData(flyerBoxesFar())),
@@ -221,7 +240,12 @@ export class Renderer {
     }
     this.rain = new Mesh(gl, rain, [3, 1], null, gl.LINES);
 
-    const aniso = opts.aniso ?? (this.integrated ? 4 : 8);
+    // Road seen from a car is the most grazing surface in the city — a pixel of it covers
+    // metres along the road and centimetres across — and that is exactly the case anisotropy
+    // is for. Eight taps run out at that angle and the asphalt crawls; sixteen is the cap on
+    // every desktop part and costs nothing a discrete GPU notices.
+    const aniso = opts.aniso ?? (this.integrated ? 8 : 16);
+    this.aniso = aniso;
     this.albedo = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.albedo, true, aniso);
     this.normal = textureArray(gl, TEX_SIZE, TEX_LAYERS, tex.normal, false, aniso);
     this.noise = texture2D(gl, NOISE_SIZE, tex.noise);
@@ -305,7 +329,12 @@ export class Renderer {
     const timer = this.timer;
     timer.poll();
     const wu = weather.uniforms();
-    const common = { ...wu, uTime: time, uCamPos: cam.eye };
+    if (this.groundAt) {
+      // eased, so the mist does not jump as the terrace underfoot changes
+      const target = this.groundAt(cam.eye[0], cam.eye[2]);
+      this.groundRef += (target - this.groundRef) * (Math.abs(target - this.groundRef) > 40 ? 1 : 0.05);
+    }
+    const common = { ...wu, uTime: time, uCamPos: cam.eye, uGroundRef: this.groundRef };
     const aspect = scene.width / scene.height;
     const cloudCenter = [
       Math.round(cam.eye[0] / 32) * 32,
@@ -364,6 +393,9 @@ export class Renderer {
     }
 
     timer.begin("city");
+    // How much of the shadow map one screen pixel covers, per metre of distance: what the
+    // surface shader widens its filter by so the penumbra stays a constant width on screen.
+    const shadowPixel = ((2 * Math.tan(cam.fov / 2)) / this.height) / (2 * SHADOW_EXTENT);
     bindTexture(gl, 0, this.albedo, gl.TEXTURE_2D_ARRAY);
     bindTexture(gl, 1, this.normal, gl.TEXTURE_2D_ARRAY);
     bindTexture(gl, 2, this.shadow.depth);
@@ -371,11 +403,12 @@ export class Renderer {
     bindTexture(gl, 5, this.clouds.tex);
     const surface = (prog: Program) => prog.use().setAll(common)
       .mat4("uViewProj", viewProj).mat4("uLightVP", this.lightVP)
-      .float("uShadowTexel", 1 / this.shadowSize)
+      .float("uShadowTexel", 1 / this.shadowSize).float("uShadowPixel", shadowPixel)
       .float("uDetailDist", this.detailDist).float("uCheap", this.cheap)
       .int("uAlbedo", 0).int("uNormal", 1).int("uShadow", 2).int("uNoise", 3)
       .int("uCloudTex", 5).vec("uCloudCenter", cloudCenter)
-      .float("uCloudExtent", CLOUD_EXTENT).float("uCloudTexels", this.cloudSize);
+      .float("uCloudExtent", CLOUD_EXTENT).float("uCloudTexels", this.cloudSize)
+      .vec3s("uLampPos[0]", this.lamps ?? NO_LAMPS);
     surface(this.city);
     world.draw(planes, cam.eye, 1, true);
 
@@ -399,6 +432,8 @@ export class Renderer {
     drawCulled(m.car, m.carFar, vehicles.cars, 3.2);
     drawCulled(m.van, m.vanFar, vehicles.vans, 3.6);
     drawCulled(m.flyer, m.flyerFar, vehicles.flyers, 3.6);
+    drawCulled(m.boat, null, vehicles.boats, 5.6);
+    if (vehicles.trains) drawCulled(m.train, null, vehicles.trains, 10.2);
     vehicles.figures?.forEach((list, i) => drawCulled(m.figures[i], null, list, 1.4));
     if (vehicles.lifts) drawCulled(m.lift, null, vehicles.lifts, LIFT_SIZE);
 

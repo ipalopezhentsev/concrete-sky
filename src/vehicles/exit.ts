@@ -1,7 +1,7 @@
 // Finding a free place to stand next to a vehicle.
 
 import type { Vec3 } from "../math";
-import type { Colliders } from "../player";
+import { FLOOR, type Colliders } from "../player";
 
 const R = 0.35;
 
@@ -18,7 +18,7 @@ export function exitSpot(pos: Vec3, yaw: number, offsets: [number, number][], co
   for (const [side, ahead] of offsets) {
     const x = pos[0] + right[0] * side + fwd[0] * ahead;
     const z = pos[2] + right[1] * side + fwd[1] * ahead;
-    let ground = 0;
+    let ground = FLOOR;
     for (let i = 0; i < boxes.length; i += 6) {
       if (boxes[i] < x + R && boxes[i + 3] > x - R && boxes[i + 2] < z + R && boxes[i + 5] > z - R &&
           boxes[i + 4] <= pos[1] + 0.6) ground = Math.max(ground, boxes[i + 4]);

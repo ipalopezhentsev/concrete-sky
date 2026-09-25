@@ -1,7 +1,8 @@
 // Streams city regions around the runner: generation happens in a worker pool,
 // meshes are uploaded as they arrive, and collision boxes are served per cell.
 
-import { buildRegion, CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Lift, type Pad, type ParkedCar, type RegionMesh } from "./city/generate";
+import { buildPlanRegion } from "./city/plan";
+import { CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Lift, type Pad, type ParkedCar, type RegionMesh } from "./city/generate";
 import { Mesh, type GL } from "./gl";
 import { aabbVisible, type Vec3 } from "./math";
 import type { TextureSet } from "./textures";
@@ -15,20 +16,26 @@ const FAR_DISTANCE = 700; // beyond this only the boxes that still read as shape
 interface Region {
   mesh: Mesh;
   pads: (Pad & { id: string })[];
+  lamps: number[];
   cars: (ParkedCar & { id: string })[];
   lifts: Lift[];
+  boats: (Pad & { id: string })[];
   groundCount: number;
   cells: CellRange[];
   lo: Vec3;
   hi: Vec3;
   center: [number, number];
+  /** Grid cells this region put colliders into — its own, and a few of its neighbours'. */
+  touched: string[];
 }
 
 const key = (rx: number, rz: number) => `${rx},${rz}`;
 
 export class World {
   private regions = new Map<string, Region>();
-  private cells = new Map<string, Float32Array>();
+  // Colliders per grid cell, kept per region: a block or bridge that straddles a region seam
+  // lands boxes in the neighbour's cells too, and neither region may overwrite the other's.
+  private cells = new Map<string, Map<string, Float32Array>>();
   private pending = new Set<string>();
   private workers: Worker[] = [];
   private busy: number[] = [];
@@ -43,6 +50,23 @@ export class World {
   /** Bumped whenever regions are added or removed. */
   version = 0;
 
+  /**
+   * The street lamps nearest a point, as x, y, z triples, nearest first: the renderer lights
+   * the network city's streets from these, since there is no lamp grid to work them out from.
+   */
+  lampsNear(x: number, z: number, n: number): Float32Array {
+    const found: [number, number, number, number][] = [];
+    for (const r of this.regions.values()) {
+      if (Math.abs(r.center[0] - x) > REGION * 1.5 || Math.abs(r.center[1] - z) > REGION * 1.5) continue;
+      const l = r.lamps;
+      for (let i = 0; i < l.length; i += 3) found.push([(l[i] - x) ** 2 + (l[i + 2] - z) ** 2, l[i], l[i + 1], l[i + 2]]);
+    }
+    found.sort((a, b) => a[0] - b[0]);
+    const out = new Float32Array(n * 3).fill(-1e5);
+    for (let i = 0; i < Math.min(n, found.length); i++) out.set(found[i].slice(1), i * 3);
+    return out;
+  }
+
   *pads(): Iterable<Pad & { id: string }> {
     for (const r of this.regions.values()) yield* r.pads;
   }
@@ -53,6 +77,10 @@ export class World {
 
   *lifts(): Iterable<Lift> {
     for (const r of this.regions.values()) yield* r.lifts;
+  }
+
+  *boats(): Iterable<Pad & { id: string }> {
+    for (const r of this.regions.values()) yield* r.boats;
   }
 
   constructor(private gl: GL, private seed: number) {
@@ -91,18 +119,40 @@ export class World {
   private add(m: RegionMesh): void {
     const x0 = m.rx * REGION, z0 = m.rz * REGION;
     const pad = 36; // bridges and stairs poke into neighbouring regions
-    this.regions.set(key(m.rx, m.rz), {
+    // The region's box is the union of what it actually holds. A fixed pad round its square
+    // was enough for the grid city, but on the network a block belongs to the region its seed
+    // is in and can reach a hundred metres and more into the next, and the ground there lies
+    // well below zero: cull on the square and whole pavements vanish as the view turns.
+    const lo: Vec3 = [x0 - pad, -1, z0 - pad];
+    const hi: Vec3 = [x0 + REGION + pad, m.maxHeight + 1, z0 + REGION + pad];
+    for (const c of m.cells)
+      for (let a = 0; a < 3; a++) {
+        lo[a] = Math.min(lo[a], c.lo[a]);
+        hi[a] = Math.max(hi[a], c.hi[a]);
+      }
+    const rk = key(m.rx, m.rz);
+    const touched: string[] = [];
+    for (const c of m.colliders) {
+      const ck = key(c.ci, c.cj);
+      let cell = this.cells.get(ck);
+      if (!cell) this.cells.set(ck, (cell = new Map()));
+      cell.set(rk, c.boxes);
+      touched.push(ck);
+    }
+    this.regions.set(rk, {
       mesh: new Mesh(this.gl, m.vertices, VERTEX_LAYOUT, m.indices, this.gl.TRIANGLES, m.positions),
       pads: m.pads,
+      lamps: m.lamps,
       cars: m.cars,
       lifts: m.lifts,
+      boats: m.boats,
       groundCount: m.groundCount,
       cells: m.cells,
-      lo: [x0 - pad, -1, z0 - pad],
-      hi: [x0 + REGION + pad, m.maxHeight + 1, z0 + REGION + pad],
+      lo,
+      hi,
       center: [x0 + REGION / 2, z0 + REGION / 2],
+      touched,
     });
-    for (const c of m.colliders) this.cells.set(key(c.ci, c.cj), c.boxes);
     this.collideCache.clear();
     this.version++;
   }
@@ -140,8 +190,11 @@ export class World {
         this.regions.delete(k);
         this.version++;
         this.collideCache.clear();
-        for (let ci = i * REGION_CELLS; ci < (i + 1) * REGION_CELLS; ci++)
-          for (let cj = j * REGION_CELLS; cj < (j + 1) * REGION_CELLS; cj++) this.cells.delete(key(ci, cj));
+        for (const ck of r.touched) {
+          const cell = this.cells.get(ck);
+          cell?.delete(k);
+          if (cell && cell.size === 0) this.cells.delete(ck);
+        }
       }
     }
     this.stats.regions = this.regions.size;
@@ -175,14 +228,13 @@ export class World {
     const parts: Float32Array[] = [];
     for (let i = ci - 1; i <= ci + 1; i++)
       for (let j = cj - 1; j <= cj + 1; j++) {
-        let cell = this.cells.get(key(i, j));
-        if (!cell) {
+        const rx = Math.floor(i / REGION_CELLS), rz = Math.floor(j / REGION_CELLS);
+        if (!this.regions.has(key(rx, rz))) {
           // not streamed in yet: build synchronously (rare)
-          const m = buildRegion(Math.floor(i / REGION_CELLS), Math.floor(j / REGION_CELLS), this.faceCull);
-          this.add(m);
-          cell = this.cells.get(key(i, j))!;
+          this.add(buildPlanRegion(rx, rz, this.faceCull));
         }
-        parts.push(cell);
+        const cell = this.cells.get(key(i, j));
+        if (cell) for (const boxes of cell.values()) parts.push(boxes);
       }
     const total = parts.reduce((s, p) => s + p.length, 0);
     const out = new Float32Array(total);

@@ -8,6 +8,7 @@ import { Hunters, type Quarry } from "./hunters";
 import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import { Lifts } from "./lifts";
+import { Boat } from "./vehicles/boat";
 import { Car } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { Parking } from "./vehicles/parking";
@@ -59,6 +60,7 @@ export class Rides {
   readonly hunters: Hunters;
   flyer: Flyer | null = null;
   car: Car | null = null;
+  boat: Boat | null = null;
   cockpit = false;
   private worldVersion = -1;
   private carLookYaw = 0;
@@ -103,22 +105,24 @@ export class Rides {
   };
 
   get riding(): boolean {
-    return this.flyer !== null || this.car !== null;
+    return this.flyer !== null || this.car !== null || this.boat !== null;
   }
 
   /** Position that drives world streaming and sound. */
   get focus(): Vec3 {
-    return this.flyer?.pos ?? this.car?.pos ?? this.player.pos;
+    return this.flyer?.pos ?? this.car?.pos ?? this.boat?.pos ?? this.player.pos;
   }
 
   get speedNorm(): number {
-    return this.flyer?.speedNorm ?? this.car?.speedNorm ?? this.player.speedNorm;
+    return this.flyer?.speedNorm ?? this.car?.speedNorm
+      ?? (this.boat ? Math.min(1, Math.abs(this.boat.speed) / 13) : undefined)
+      ?? this.player.speedNorm;
   }
 
   sync(): void {
     if (this.world.version === this.worldVersion) return;
     this.worldVersion = this.world.version;
-    this.parking.sync(this.world.pads(), this.world.parkedCars());
+    this.parking.sync(this.world.pads(), this.world.parkedCars(), this.world.boats());
     this.lifts.sync(this.world.lifts());
   }
 
@@ -126,9 +130,10 @@ export class Rides {
   promptText(): string {
     if (this.flyer) return this.flyer.canExit ? "E  step out" : "";
     if (this.car) return this.car.canExit ? "E  step out" : "";
+    if (this.boat) return "E  step ashore";
     const p = this.player.pos;
     const parked = this.parking.nearest(p[0], p[1], p[2], REACH);
-    if (parked) return parked.kind === "flyer" ? "E  board flyer" : "E  get in";
+    if (parked) return parked.kind === "flyer" ? "E  board flyer" : parked.kind === "boat" ? "E  board boat" : "E  get in";
     if (this.traffic.nearestCar(p[0], p[1], p[2], REACH + 1)) return "E  take this car";
     return "";
   }
@@ -136,6 +141,17 @@ export class Rides {
   /** The E key. Returns a message if nothing could be done. */
   interact(): string | null {
     const pl = this.player;
+    if (this.boat) {
+      const b = this.boat;
+      if (Math.abs(b.speed) > 1.5) return "stop first";
+      this.parking.drop("boat", b.pos, b.yaw, [0.42, 0.44, 0.46]);
+      pl.pos = b.exitSpot();
+      pl.vel = [0, 0, 0];
+      pl.yaw = b.yaw;
+      pl.pitch = 0;
+      this.boat = null;
+      return null;
+    }
     if (this.flyer || this.car) {
       const v = this.flyer ?? this.car!;
       if (!v.canExit) return this.flyer ? "land first" : "stop first";
@@ -155,7 +171,9 @@ export class Rides {
     const parked = this.parking.nearest(p[0], p[1], p[2], REACH);
     if (parked) {
       this.parking.remove(parked);
-      if (parked.kind === "flyer") {
+      if (parked.kind === "boat") {
+        this.boat = new Boat(parked.x, parked.y, parked.z, parked.yaw);
+      } else if (parked.kind === "flyer") {
         this.flyer = new Flyer(parked.x, parked.y, parked.z, parked.yaw, parked.color);
         pl.pitch = -0.15;
       } else {
@@ -190,9 +208,18 @@ export class Rides {
     return this.car;
   }
 
+  /** Start in a boat where the player stands (test hook, demo). */
+  spawnBoat(): Boat {
+    const p = this.player.pos;
+    this.boat = new Boat(p[0], p[1], p[2], this.player.yaw);
+    return this.boat;
+  }
+
   /** Drop the current vehicle without parking it (demo cuts). */
   leave(): void {
     this.flyer = this.car = null;
+    this.boat = null;
+    this.carLookYaw = this.carLookPitch = 0;
     this.cockpit = false;
   }
 
@@ -226,6 +253,14 @@ export class Rides {
       pl.yaw = car.yaw + this.carLookYaw;
       pl.pitch = this.carLookPitch;
       pl.pos = [...car.pos];
+    } else if (this.boat) {
+      const boat = this.boat;
+      boat.update(dt, { moveX: c.moveX, moveZ: c.moveZ });
+      this.carLookYaw -= c.mouseDX * 0.0022;
+      this.carLookPitch = Math.max(-0.6, Math.min(0.5, this.carLookPitch - c.mouseDY * 0.0022));
+      pl.yaw = boat.yaw + this.carLookYaw;
+      pl.pitch = this.carLookPitch;
+      pl.pos = [boat.pos[0], boat.pos[1] + 1.4, boat.pos[2]];
     }
   }
 
@@ -235,6 +270,10 @@ export class Rides {
     if (this.car) {
       const c = this.car;
       return { pos: c.pos, vel: [Math.sin(c.yaw) * c.speed, c.vy, Math.cos(c.yaw) * c.speed], mode: "car", yaw: c.yaw, van: c.van };
+    }
+    if (this.boat) {
+      const b = this.boat;
+      return { pos: b.pos, vel: [Math.sin(b.yaw) * b.speed, 0, Math.cos(b.yaw) * b.speed], mode: "foot", yaw: b.yaw };
     }
     const p = this.player;
     return { pos: p.pos, vel: p.vel, mode: "foot", yaw: p.yaw };
@@ -335,7 +374,11 @@ export class Rides {
   /** Vehicles to draw this frame (parked, piloted, wrecks). Traffic is already in the lists. */
   collectInstances(eye: Vec3): void {
     const t = this.traffic;
-    this.parking.instances({ flyer: t.flyers, car: t.cars, van: t.vans }, eye, 300);
+    this.parking.instances({ flyer: t.flyers, car: t.cars, van: t.vans, boat: t.boats }, eye, 300);
+    if (this.boat) {
+      const v = this.boat;
+      t.boats.push(v.pos[0], v.pos[1], v.pos[2], v.yaw, 0, 0, [0.42, 0.44, 0.46]);
+    }
     if (this.flyer) {
       const f = this.flyer;
       t.flyers.push(f.pos[0], f.pos[1], f.pos[2], f.yaw, f.pitch, f.roll, f.color);
@@ -352,6 +395,6 @@ export class Rides {
   /** Everything the renderer draws with vehicle meshes. */
   get vehicleLists(): VehicleLists {
     const t = this.traffic;
-    return { cars: t.cars, vans: t.vans, flyers: t.flyers, figures: this.hunters.figures, lifts: this.liftList };
+    return { cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, figures: this.hunters.figures, lifts: this.liftList };
   }
 }

@@ -60,6 +60,12 @@ export class Program {
     return this;
   }
 
+  vec3s(name: string, v: Float32Array): this {
+    const l = this.loc(name);
+    if (l) this.gl.uniform3fv(l, v);
+    return this;
+  }
+
   mat4(name: string, m: Float32Array): this {
     const l = this.loc(name);
     if (l) this.gl.uniformMatrix4fv(l, false, m);

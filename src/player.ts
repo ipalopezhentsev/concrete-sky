@@ -2,6 +2,20 @@
 
 import type { Vec3 } from "./math";
 
+/**
+ * Lowest the world goes, and the level anyone falls back onto where nothing else holds them.
+ *
+ * The grid city has no collision geometry for its streets at all — everyone stands on this
+ * implicit plane at zero. The city built on the road network has real ground, which is often
+ * well below zero, and a floor at zero would leave you walking on air across the valleys. So
+ * it is a setting, not a constant.
+ */
+export let FLOOR = 0;
+
+export function setFloor(y: number): void {
+  FLOOR = y;
+}
+
 const RADIUS = 0.35;
 const HEIGHT = 1.8;
 const EYE = 1.68;
@@ -24,6 +38,93 @@ function ceilingAbove(boxes: Float32Array, x: number, z: number, y: number): num
 }
 
 export type Colliders = (x: number, z: number) => Float32Array;
+
+/**
+ * Whether a runner with their feet at `y` fits in the column at (x, z) without being inside
+ * anything.
+ */
+function standsClear(boxes: Float32Array, x: number, z: number, y: number): boolean {
+  for (let i = 0; i < boxes.length; i += 6)
+    if (boxes[i] < x + RADIUS && boxes[i + 3] > x - RADIUS && boxes[i + 2] < z + RADIUS && boxes[i + 5] > z - RADIUS &&
+        boxes[i + 1] < y + HEIGHT - 0.02 && boxes[i + 4] > y + 0.02) return false;
+  return true;
+}
+
+/**
+ * The surface a runner would come to rest on in the column at (x, z), taking the *lowest* one
+ * between `lo` and `hi` that they have room to stand up on, or null if there is none.
+ *
+ * The lowest, not the highest, which is what the spawn used to take. A spawn is worked out
+ * from the plan before there is any geometry to check it against, so it can land inside
+ * something, and inside a block every floor but the roof has the rest of the block sitting on
+ * it. Taking the highest surface under a fixed ceiling stood the runner on one of those: shut
+ * in a room with the inner faces of the walls round them, a slab overhead and no gap anywhere.
+ * The fill inside a mass is solid and never drawn, so there was not even anything to see.
+ *
+ * Only a real surface counts — a box top, or the floor everyone falls back onto. An empty
+ * column is not somewhere to stand, it is somewhere to fall.
+ */
+function restsOn(boxes: Float32Array, x: number, z: number, lo: number, hi: number): number | null {
+  const tops: number[] = [];
+  if (FLOOR >= lo && FLOOR <= hi) tops.push(FLOOR);
+  for (let i = 0; i < boxes.length; i += 6)
+    if (boxes[i] < x + RADIUS && boxes[i + 3] > x - RADIUS && boxes[i + 2] < z + RADIUS && boxes[i + 5] > z - RADIUS &&
+        boxes[i + 4] >= lo && boxes[i + 4] <= hi) tops.push(boxes[i + 4]);
+  tops.sort((a, b) => a - b);
+  for (const t of tops) if (standsClear(boxes, x, z, t + 0.15)) return t + 0.15;
+  return null;
+}
+
+/**
+ * Whether a runner standing here can get anywhere, or is walled in.
+ *
+ * Headroom alone does not say they are not shut in: a light well between four towers has all
+ * the headroom in the world and no way out of it. So this walks a little way out in every
+ * direction over ground it could actually take — a step up or down at a time, as the runner
+ * does — and asks whether any of them gets clear.
+ */
+function canWalkOut(colliders: Colliders, x: number, y: number, z: number, far = 15): boolean {
+  for (let k = 0; k < 12; k++) {
+    const a = (k / 12) * Math.PI * 2;
+    const sx = Math.sin(a) * 0.75, sz = Math.cos(a) * 0.75;
+    let cx = x, cz = z, cy = y, gone = 0;
+    for (; gone < far; gone += 0.75) {
+      const nx = cx + sx, nz = cz + sz;
+      const surf = cy - 0.15;
+      const next = restsOn(colliders(nx, nz), nx, nz, surf - STEP, surf + STEP);
+      if (next === null || Math.abs(next - cy) > STEP + 0.2) break;
+      cx = nx;
+      cz = nz;
+      cy = next;
+    }
+    if (gone >= far) return true;
+  }
+  return false;
+}
+
+/**
+ * Somewhere near (x, y, z) a runner can be put down: standing on something, with room to
+ * stand up, and with somewhere to walk. Rings outward from the spot asked for and takes the
+ * first that passes, so a spawn that the plan put inside a pier or a block comes out on the
+ * street beside it rather than sealed inside it.
+ */
+export function openSpot(colliders: Colliders, x: number, y: number, z: number): Vec3 {
+  for (const r of [0, 6, 12, 20, 30, 45, 65, 90, 120]) {
+    const n = r === 0 ? 1 : Math.max(8, Math.round(r / 2));
+    for (let k = 0; k < n; k++) {
+      const a = (k / n) * Math.PI * 2 + r;
+      const px = x + Math.sin(a) * r, pz = z + Math.cos(a) * r;
+      // near the level the plan asked for: a roof two hundred metres up is clear of
+      // everything and no use to anyone
+      const top = restsOn(colliders(px, pz), px, pz, y - 2, y + 6);
+      if (top !== null && canWalkOut(colliders, px, top, pz)) return [px, top, pz];
+    }
+  }
+  // nothing open within reach: stand them on the first thing with headroom, at any height,
+  // which is at worst a roof and is never the inside of a wall
+  const top = restsOn(colliders(x, z), x, z, y - 2, y + 400);
+  return [x, top ?? y, z];
+}
 
 export interface Input {
   moveX: number; // strafe, +1 = right
@@ -196,7 +297,7 @@ export class Player {
   private moveVertical(dt: number, boxes: Float32Array): boolean {
     const [x, oldFeet, z] = this.pos;
     let newFeet = oldFeet + this.vel[1] * dt;
-    let ground = 0;
+    let ground = FLOOR;
     let ceiling = Infinity;
     for (let i = 0; i < boxes.length; i += 6) {
       if (!(boxes[i] < x + RADIUS && boxes[i + 3] > x - RADIUS &&

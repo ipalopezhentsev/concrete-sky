@@ -3,11 +3,12 @@
 
 import type { Pad, ParkedCar } from "../city/generate";
 import type { Vec3 } from "../math";
+import { BOAT_DIMS } from "./boat";
 import { FLYER_PALETTE } from "./flyer";
 import { CAR_DIMS } from "./models";
 import { h32, type InstanceList } from "./traffic";
 
-export type VehicleKind = "flyer" | "car" | "van";
+export type VehicleKind = "flyer" | "car" | "van" | "boat";
 
 export interface Parked {
   id: string;
@@ -24,6 +25,10 @@ export interface Parked {
 /** Axis-aligned bounds of a vehicle footprint rotated by yaw. */
 export function footprint(kind: VehicleKind, yaw: number): { hx: number; hz: number; h: number } {
   if (kind === "flyer") return { hx: 1.0, hz: 1.0, h: 1.55 };
+  if (kind === "boat") {
+    const c = Math.abs(Math.cos(yaw)), s = Math.abs(Math.sin(yaw));
+    return { hx: c * BOAT_DIMS.hx + s * BOAT_DIMS.hz, hz: s * BOAT_DIMS.hx + c * BOAT_DIMS.hz, h: BOAT_DIMS.h };
+  }
   const d = CAR_DIMS[kind];
   const c = Math.abs(Math.cos(yaw)), s = Math.abs(Math.sin(yaw));
   return { hx: c * d.hx + s * d.hz, hz: s * d.hx + c * d.hz, h: d.h };
@@ -39,7 +44,11 @@ export class Parking {
   private boxVersion = -1;
 
   /** Replace the city-spawned vehicles with those of the currently loaded regions. */
-  sync(pads: Iterable<Pad & { id: string }>, cars: Iterable<ParkedCar & { id: string }>): void {
+  sync(
+    pads: Iterable<Pad & { id: string }>,
+    cars: Iterable<ParkedCar & { id: string }>,
+    boats: Iterable<Pad & { id: string }> = [],
+  ): void {
     this.fromCity.clear();
     for (const p of pads) {
       if (this.gone.has(p.id)) continue;
@@ -51,6 +60,10 @@ export class Parking {
     for (const c of cars) {
       if (this.gone.has(c.id)) continue;
       this.fromCity.set(c.id, { id: c.id, kind: c.van ? "van" : "car", x: c.x, y: c.y, z: c.z, yaw: c.yaw, color: c.color });
+    }
+    for (const v of boats) {
+      if (this.gone.has(v.id)) continue;
+      this.fromCity.set(v.id, { id: v.id, kind: "boat", x: v.x, y: v.y, z: v.z, yaw: v.yaw, color: [0.42, 0.44, 0.46] });
     }
     this.version++;
   }

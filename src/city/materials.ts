@@ -15,6 +15,8 @@ export const enum Mat {
   VGlass = 11, // vehicle glass
   Tail = 12, // red tail light
   Pad = 13, // landing pad markings
+  Signal = 14, // traffic signal aspect; style picks red, amber or green and seed the cycle phase
+  Water = 15, // river surface
 }
 
 export const enum Win {

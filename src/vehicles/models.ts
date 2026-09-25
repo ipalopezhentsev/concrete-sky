@@ -154,3 +154,33 @@ export const PAINT_COLORS: Tint[] = [
   [0.82, 0.8, 0.74],
   [0.1, 0.12, 0.18],
 ];
+
+/** A river launch: hull, a low foredeck and a wheelhouse aft. */
+export function boatBoxes(): ModelBox[] {
+  return [
+    box(-1.9, -1.1, -5.4, 1.9, 0.35, 5.4, Mat.Paint, true),
+    box(-1.6, 0.35, -4.6, 1.6, 0.5, 4.6, Mat.Board),
+    box(-1.9, 0.35, -5.4, -1.6, 0.95, 5.4, Mat.Panel),
+    box(1.6, 0.35, -5.4, 1.9, 0.95, 5.4, Mat.Panel),
+    box(-1.3, 0.5, 1.1, 1.3, 2.3, 3.9, Mat.VGlass),
+    box(-1.45, 2.3, 0.9, 1.45, 2.55, 4.1, Mat.Board),
+    box(-0.2, 2.55, 2.2, 0.2, 3.6, 2.6, Mat.Metal),
+    ...pair(0.5, 0.55, -5.2, 0.9, 0.75, -4.9, Mat.Tail),
+  ];
+}
+
+/** Length of one railway carriage, coupling to coupling. */
+export const CARRIAGE = 20;
+
+/** A railway carriage: a long painted body, a band of windows, a roof and a lit front. */
+export function carriageBoxes(): ModelBox[] {
+  return [
+    box(-1.55, 0.9, -9.6, 1.55, 3.9, 9.6, Mat.Paint, true),
+    box(-1.58, 2.3, -8.8, 1.58, 3.3, 8.8, Mat.VGlass),
+    box(-1.3, 3.9, -9.2, 1.3, 4.3, 9.2, Mat.Metal),
+    box(-1.2, 0.3, -8.4, 1.2, 0.9, -5.4, Mat.Metal),
+    box(-1.2, 0.3, 5.4, 1.2, 0.9, 8.4, Mat.Metal),
+    ...pair(0.6, 1.4, 9.6, 1.2, 1.7, 9.64, Mat.Glow),
+    ...pair(0.6, 1.4, -9.64, 1.2, 1.7, -9.6, Mat.Tail),
+  ];
+}

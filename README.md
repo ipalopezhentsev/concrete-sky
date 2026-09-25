@@ -89,9 +89,9 @@ the vehicle view and pause. On foot, fire shoots while the hunters are on.
 It plays best held sideways.
 
 **Demo:** *watch the demo* on the title screen (or `?demo`) hands the city to
-an autopilot. It flies the air corridors and shoots at passing flyers, runs
-along the podium decks and over their bridges, then drives a cross street,
-giving way to avenue traffic. Each scene brings in the next weather. There are
+an autopilot. It flies an arterial's air corridor, runs along the podium decks
+and over their bridges, drives an arterial, and sails the river where there is
+one within reach. Each scene brings in the next weather. There are
 no hunters in the demo. It also starts by itself after 45 seconds on the first
 title screen. Click, tap or press a key to take over wherever it is, including
 the vehicle it is in. Esc goes back to the title screen.
@@ -151,7 +151,9 @@ reversed-Z depth.
 
 | file | |
 |---|---|
-| `src/city/generate.ts` | Deterministic city on an 88 m grid. Streets are canyons; each block is a raised podium (18, 24 or 30 m) linked to its neighbours by bridges, which become stepped bridges when the heights differ. On top of the podiums sit skyscrapers (with setbacks, sky lobbies, cross or split plans, pilotis and plant-floor bands; their height is limited by their footprint), bundled towers, slab blocks with detached service cores, courtyard megablocks, gate towers joined by a high bridge block, inverted-ziggurat towers that cantilever outward as they rise, mid-rise towers with stairs wrapping around the outside up to their roofs, terraces, and parkour pillars. Street crossings may get skyways at 36 or 42 m (below the lowest flyer corridor), reached by stair or lift pylons on the podium corners. The stairs are two long flights with one turn. Where two podiums have no bridge, there are often broken stubs with a gap to jump. A slowly varying district density decides where the dense high-rise quarters are. From the street, a stair wraps around one podium corner (two long flights and a landing on a pier), and many blocks also have an open lift in another corner. The city is made only of boxes, meshed in batches of 3×3 blocks. |
+| `src/city/network.ts` | The road network the city is laid out on: an endless, deterministic plan of arterials, streets and the blocks between them, from a jittered Voronoi diagram with through-routes added, plus the landform the whole thing sits on and the rivers that cut it. |
+| `src/city/plan.ts` | The city built on that network. Every block is a polygon rather than a cell of a grid, so a podium is a wall of turned boxes wrapped round an outline. Also the ground tiles, the roads, their bridges over the rivers and railways, the stairs and lifts up to the decks, and the spawn. |
+| `src/city/generate.ts` | Shared geometry primitives — the box builder, region assembly, stairs, lift shafts, pylons — and the older fixed-grid city they were written for, which is no longer built (the tests still cover it). Deterministic city on an 88 m grid. Streets are canyons; each block is a raised podium (18, 24 or 30 m) linked to its neighbours by bridges, which become stepped bridges when the heights differ. On top of the podiums sit skyscrapers (with setbacks, sky lobbies, cross or split plans, pilotis and plant-floor bands; their height is limited by their footprint), bundled towers, slab blocks with detached service cores, courtyard megablocks, gate towers joined by a high bridge block, inverted-ziggurat towers that cantilever outward as they rise, mid-rise towers with stairs wrapping around the outside up to their roofs, terraces, and parkour pillars. Street crossings may get skyways at 36 or 42 m (below the lowest flyer corridor), reached by stair or lift pylons on the podium corners. The stairs are two long flights with one turn. Where two podiums have no bridge, there are often broken stubs with a gap to jump. A slowly varying district density decides where the dense high-rise quarters are. From the street, a stair wraps around one podium corner (two long flights and a landing on a pier), and many blocks also have an open lift in another corner. The city is made only of boxes, meshed in batches of 3×3 blocks. |
 | `src/lifts.ts` | Lifts: open platforms on a fixed timetable (their height is a function of time, like the traffic). They add their platforms to the collision boxes, keep riders on while they move, lift anyone they come down on, and are drawn with instancing. |
 | `src/worker.ts`, `src/world.ts` | Web Worker pool that generates textures and city regions, streams regions in and out around the player, and draws simplified distant regions. |
 | `src/textures.ts` | Tileable procedural materials (value noise, fbm, height → normal maps): four concrete finishes with stains, plus asphalt and paving. The city shader adds weathering on top: streaks running down from the top of walls and dirt at their foot. |
@@ -160,7 +162,7 @@ reversed-Z depth.
 | `src/player.ts` | Runner movement, box collision, stepping, ledge climbing, camera bob, roll and FOV kick. |
 | `src/weather.ts` | Nine mood states (clear sky, drifting cumulus, white noon, overcast, rain, fog, golden hour, storm light, blue hour) that blend smoothly. |
 | `src/audio.ts` | Web Audio synthesis (including flyer engine and street rumble). |
-| `src/vehicles/traffic.ts` | Endless traffic streams: a vehicle's position is a function of its slot and time, so nothing is simulated. Cars run on the north-south avenues and both elevated expressways (east-west streets hold parked cars, so no traffic crosses); flyers use air corridors above the streets at 48–122 m, above every bridge. Drawn with GPU instancing. |
+| `src/vehicles/traffic.ts` | Endless traffic streams: a vehicle's position is a function of its slot and time, so nothing is simulated. Cars drive the arterials, following each one's spline; flyers use air corridors over the same arterials at 48–122 m, above every bridge; trains run the elevated railways and boats the rivers. Drawn with GPU instancing. |
 | `src/vehicles/car.ts` | Drivable car: arcade handling, box collision, kerb stepping. |
 | `src/vehicles/parking.ts` | Vehicles standing still: flyers on pads, kerbside cars, and anything the player parked. |
 | `src/rides.ts` | The player's side of vehicles: boarding, driving, flying, shooting and their cameras. |

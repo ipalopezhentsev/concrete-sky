@@ -103,7 +103,7 @@ export function lampHeadsLocal(): [number, number][] {
   return [[over, a], [over, b], [far, a], [far, b], [a, over], [b, over], [a, far], [b, far]];
 }
 
-export const FLOATS_PER_BOX = 15; // x0 y0 z0 x1 y1 z1 r g b mat style seed collide detail turn
+export const FLOATS_PER_BOX = 17; // x0 y0 z0 x1 y1 z1 r g b mat style seed collide detail turn rise riseZ
 
 /** A car parked at the kerb (dynamic: it can be driven away). */
 export interface ParkedCar {
@@ -138,7 +138,11 @@ export class Builder {
   data: number[] = [];
   count = 0;
   pads: Pad[] = [];
+  /** Street lamp heads (x, y, z), for lighting the network city, which has no lamp grid. */
+  lamps: number[] = [];
   cars: ParkedCar[] = [];
+  /** Small craft tied up along a quay, which can be boarded. */
+  boats: Pad[] = [];
   lifts: Lift[] = [];
   /** Concrete finish given to Mat.Board boxes that don't ask for one. */
   finish: Finish = Finish.Boards;
@@ -183,7 +187,7 @@ export class Builder {
   box(
     x0: number, y0: number, z0: number, x1: number, y1: number, z1: number,
     mat: Mat, tint: Tint = WHITE, style = 0,
-    opts: { collide?: boolean; detail?: boolean; seed?: number; turn?: number } = {},
+    opts: { collide?: boolean; detail?: boolean; seed?: number; turn?: number; hidden?: boolean; rise?: number; riseZ?: number } = {},
   ): void {
     if (x1 - x0 < 1e-3 || y1 - y0 < 1e-3 || z1 - z0 < 1e-3) return;
     const volume = (x1 - x0) * (y1 - y0) * (z1 - z0);
@@ -202,7 +206,8 @@ export class Builder {
     }
     this.data.push(
       x0, y0, z0, x1, y1, z1, tint[0], tint[1], tint[2], mat, style,
-      opts.seed ?? this.rng.next(), opts.collide === false ? 0 : 1, detail ? 1 : 0, turn,
+      opts.seed ?? this.rng.next(), opts.collide === false ? 0 : opts.hidden ? HIDDEN : 1, detail ? 1 : 0, turn,
+      opts.rise ?? 0, opts.riseZ ?? 0,
     );
     this.count++;
   }
@@ -857,7 +862,7 @@ function drum(
 function roundedMass(
   b: Builder, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number,
   c: number, segs: number, mat: Mat, tint: Tint, style = 0,
-  opts: { collide?: boolean; detail?: boolean; mask?: number } = {},
+  opts: { collide?: boolean; detail?: boolean; mask?: number; seed?: number } = {},
 ): void {
   const mask = opts.mask ?? 0b1111;
   if (c <= 0.05 || !mask || 2 * c > Math.min(x1 - x0, z1 - z0)) {
@@ -1538,6 +1543,114 @@ function pickLayout(r: Rng, dens: number): Layout {
 // ---------------------------------------------------------------------------
 // Cell
 
+/**
+ * Central island down the avenue on this block's west edge. Everything it places stays
+ * within 1.5 m of the line, which is the strip the traffic lanes leave clear, and it stops
+ * well short of the junctions so cars can still turn across it and the crossings stay open.
+ * Avenues carrying an expressway have no room: the piers already stand on the centre line.
+ */
+function median(b: Builder, r: Rng, ci: number, ox: number, oz: number, tint: Tint): void {
+  if (hashInt(ci, 7) % 5 === 0) return;
+  const HALF = 1.2, GAP = 14;
+  const z0 = oz + GAP, z1 = oz + CELL - GAP;
+  const kerb = 0.32;
+  roundedMass(b, ox - HALF, 0, z0, ox + HALF, kerb, z1, HALF, 3, Mat.Deck, tint, 0, { seed: 0.42 });
+  // a rail down the middle, broken where a planter takes its place
+  const planters: [number, number][] = [];
+  for (let z = z0 + 6; z < z1 - 8; z += r.uniform(14, 26)) planters.push([z, z + r.uniform(4, 7)]);
+  const inPlanter = (z: number) => planters.some(([a, c]) => z > a - 1 && z < c + 1);
+  for (let z = z0 + 1.2; z < z1 - 1; z += 2.4) {
+    if (inPlanter(z)) continue;
+    b.box(ox - 0.06, kerb, z - 0.06, ox + 0.06, kerb + 1.02, z + 0.06, Mat.Metal, tint);
+    b.box(ox - 0.05, kerb + 0.92, z, ox + 0.05, kerb + 1.02, Math.min(z + 2.4, z1 - 1), Mat.Metal, tint, 0, { collide: false });
+    b.box(ox - 0.04, kerb + 0.45, z, ox + 0.04, kerb + 0.53, Math.min(z + 2.4, z1 - 1), Mat.Metal, tint, 0, { collide: false });
+  }
+  for (const [a, c] of planters) {
+    b.box(ox - HALF + 0.15, kerb, a, ox + HALF - 0.15, kerb + 0.62, c, Mat.Board, tint, Finish.Cast);
+    b.box(ox - HALF + 0.35, kerb + 0.5, a + 0.2, ox + HALF - 0.35, kerb + 0.68, c - 0.2, Mat.Metal, [0.22, 0.26, 0.2], 0, { collide: false });
+  }
+}
+
+/**
+ * A signal mast on the block's south-west corner: an arm out over the avenue with a head for
+ * the traffic coming up it, and a second head on the mast for the cross street. The two are
+ * half a cycle apart, so one junction's aspects always contradict each other properly.
+ */
+function signals(b: Builder, ox: number, oz: number, tint: Tint): void {
+  const x = ox + STREET / 2 + 1.0, z = oz + STREET / 2 + 1.0;
+  const H = 6.2;
+  b.box(x - 0.14, 0.18, z - 0.14, x + 0.14, H, z + 0.14, Mat.Metal, tint);
+  b.box(ox + 2.6, H - 0.22, z - 0.09, x, H, z + 0.09, Mat.Metal, tint, 0, { collide: false });
+  head(b, ox + 3.4, H - 0.3, z, 0, 0);
+  head(b, x, H - 1.9, z - 0.35, 1, 0.5);
+}
+
+/** Three stacked aspects in a hood, facing -z (`axis` 0) or -x, on a cycle offset by `phase`. */
+function head(b: Builder, x: number, top: number, z: number, axis: 0 | 1, phase: number): void {
+  const w = 0.22, opts = { collide: false, detail: true, seed: phase };
+  const [hx, hz] = axis === 0 ? [0.3, 0.16] : [0.16, 0.3];
+  b.box(x - hx, top - 1.15, z - hz, x + hx, top, z + hz, Mat.Metal, [0.3, 0.32, 0.3], 0, { collide: false });
+  for (let k = 0; k < 3; k++) {
+    const y = top - 0.28 - k * 0.36;
+    if (axis === 0) b.box(x - w, y - w, z - hz - 0.06, x + w, y + w, z - hz, Mat.Signal, WHITE, k, opts);
+    else b.box(x - hx - 0.06, y - w, z - w, x - hx, y + w, z + w, Mat.Signal, WHITE, k, opts);
+  }
+}
+
+/** Things that stand at the kerb: what a street has instead of a bare edge. */
+function kerbside(b: Builder, r: Rng, ox: number, oz: number, tint: Tint, busy: [number, number][][]): void {
+  const bx0 = ox + STREET / 2, bz0 = oz + STREET / 2;
+  const grey: Tint = [0.86, 0.87, 0.88];
+  for (let side = 0; side < 4; side++) {
+    // a/b run along the face, d out from the kerb into the block
+    const put = (a0: number, a1: number, d0: number, d1: number, y0: number, y1: number,
+      mat: Mat, t: Tint, style = 0, opts: { collide?: boolean; detail?: boolean } = {}) => {
+      const [p0, p1] = side < 2 ? [bx0 + CELL - STREET - d1, bx0 + CELL - STREET - d0] : [bx0 + d0, bx0 + d1];
+      const [q0, q1] = side < 2 ? [bz0 + CELL - STREET - d1, bz0 + CELL - STREET - d0] : [bz0 + d0, bz0 + d1];
+      if (side % 2 === 0) b.box(p0, y0, bz0 + a0, p1, y1, bz0 + a1, mat, t, style, opts);
+      else b.box(bx0 + a0, y0, q0, bx0 + a1, y1, q1, mat, t, style, opts);
+    };
+    const free = (a: number, len: number) =>
+      busy[side].every(([c0, c1]) => a > c1 || a + len < c0) &&
+      // the lamp columns stand on this strip too
+      [CELL * 0.3, CELL * 0.7].every((L) => a > L - STREET / 2 + 1.5 || a + len < L - STREET / 2 - 1.5);
+    for (let a = 16; a < CELL - STREET - 12;) {
+      const len = r.uniform(1.6, 3.2);
+      if (!free(a, len)) {
+        a += 2;
+        continue;
+      }
+      const roll = r.next();
+      if (roll < 0.3) {
+        // a run of bollards
+        for (let s = a + 0.4; s < a + len; s += 1.5) put(s - 0.14, s + 0.14, 0.55, 0.83, 0.18, 1.08, Mat.Board, grey, Finish.Cast);
+      } else if (roll < 0.5) {
+        // louvred vent plinth
+        put(a, a + len, 0.5, 2.3, 0.18, 1.35, Mat.Board, tint, Finish.Ribbed);
+        put(a + 0.15, a + len - 0.15, 0.4, 0.5, 0.5, 1.2, Mat.Metal, [0.2, 0.21, 0.22], 0, { collide: false });
+      } else if (roll < 0.66) {
+        // planter with a concrete tub
+        put(a, a + len, 0.5, 2.1, 0.18, 0.82, Mat.Board, tint, Finish.Cast);
+        put(a + 0.2, a + len - 0.2, 0.7, 1.9, 0.72, 0.95, Mat.Metal, [0.22, 0.26, 0.2], 0, { collide: false });
+      } else if (roll < 0.8) {
+        // utility cabinet
+        put(a, a + Math.min(len, 1.3), 0.55, 1.35, 0.18, 1.7, Mat.Panel, grey);
+      } else if (roll < 0.92) {
+        // guard rail at the kerb
+        for (let s = a; s < a + len; s += 1.8) {
+          put(s - 0.05, s + 0.05, 0.5, 0.6, 0.18, 1.1, Mat.Metal, grey);
+          put(s, Math.min(s + 1.8, a + len), 0.5, 0.58, 1.0, 1.1, Mat.Metal, grey, 0, { collide: false });
+        }
+      } else {
+        // litter bin on a post
+        put(a, a + 0.6, 0.6, 1.2, 0.18, 0.95, Mat.Metal, [0.24, 0.25, 0.26]);
+        put(a + 0.05, a + 0.55, 0.65, 1.15, 0.95, 1.12, Mat.Metal, grey, 0, { collide: false });
+      }
+      a += len + r.uniform(3, 14);
+    }
+  }
+}
+
 function streetLevel(b: Builder, ox: number, oz: number): void {
   const s = STREET / 2;
   const bx0 = ox + s, bz0 = oz + s, bx1 = ox + CELL - s, bz1 = oz + CELL - s;
@@ -1632,6 +1745,9 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
   streetLevel(b, ox, oz);
   expressways(b, ci, cj, ox, oz);
   parkedCars(b, r, ox, oz);
+  const street = new Rng(hashInt(ci, cj, 50)); // its own stream: kerbside detail must not reshuffle the towers
+  median(b, street, ci, ox, oz, tint);
+  signals(b, ox, oz, tint);
 
   // --- podium: arcade on the street, office floors, walkable deck on top.
   // Many blocks cut their corners back, on a flat chamfer or on an arc, so the intersections
@@ -1675,6 +1791,19 @@ export function buildCell(ci: number, cj: number, b: Builder): void {
   // --- from the street up to the deck: a stair round one corner, often a lift in another
   cornerStair(b, ...streetCorner(ci, cj, stairAt), E, tint);
   if (liftAt >= 0) streetLift(b, ...streetCorner(ci, cj, liftAt), E, tint);
+
+  // --- kerbside furniture, wherever the stair and lift don't already wrap the corner
+  const busy: [number, number][][] = [[], [], [], []];
+  const face = CELL - STREET;
+  for (const [k, reach] of [[stairAt, streetFlight(E).length + 5], [liftAt, LIFT_SIZE + 5]] as const) {
+    if (k < 0) continue;
+    const east = k % 2 === 1, north = k >= 2;
+    for (const side of [east ? 0 : 2, north ? 1 : 3]) {
+      const atEnd = side % 2 === 0 ? north : east;
+      busy[side].push(atEnd ? [face - reach, face] : [0, reach]);
+    }
+  }
+  kerbside(b, street, ox, oz, tint, busy);
 
   // --- bridges to the east and north neighbours. Both podiums set their own face back, so
   // a bridge is as long as the gap it actually has to cross.
@@ -1768,8 +1897,10 @@ export interface RegionMesh {
   groundCount: number; // indices[0..groundCount] is the street slab
   cells: CellRange[];
   pads: (Pad & { id: string })[];
+  lamps: number[];
   cars: (ParkedCar & { id: string })[];
   lifts: (Lift & { id: string })[];
+  boats: (Pad & { id: string })[];
   maxHeight: number;
   colliders: { ci: number; cj: number; boxes: Float32Array }[];
 }
@@ -1778,37 +1909,71 @@ export interface RegionMesh {
  * Collision boxes (six floats each: min, max) for everything a builder has placed. Turned
  * boxes are broken into axis-aligned slabs, since nothing downstream knows about turns.
  */
+/**
+ * Collide flag of a box that is solid but never drawn: the fill inside a mass whose walls and
+ * roof are other boxes. Nothing can see it, and drawing it was a good share of the triangles.
+ */
+const HIDDEN = 2;
+
 export function collidersOf(b: Builder): Float32Array {
   const list: number[] = [];
   for (let i = 0; i < b.count; i++) {
     const o = i * FLOATS_PER_BOX;
     if (!b.data[o + 12]) continue;
     const y0 = b.data[o + 1], y1 = b.data[o + 4];
-    if (!b.data[o + 14]) {
+    if (!b.data[o + 14] && !b.data[o + 15] && !b.data[o + 16]) {
       list.push(b.data[o], y0, b.data[o + 2], b.data[o + 3], y1, b.data[o + 5]);
       continue;
     }
-    turnedSlabs(b.data, o, (x0, z0, x1, z1) => list.push(x0, y0, z0, x1, y1, z1));
+    // A sheared box goes the same way a turned one does: the slabs are already cut across its
+    // length, so each can simply carry the height of the ramp over its own slice. Outward at
+    // both ends — the highest the top reaches over that slice and the lowest the soffit does —
+    // because collision may never report less solid than there is, and a runner on a road
+    // would rather step up a centimetre than fall through it.
+    turnedSlabs(b.data, o, (x0, z0, x1, z1, top, bottom) =>
+      list.push(x0, y0 + bottom, z0, x1, y1 + top, z1));
   }
   return Float32Array.from(list);
 }
 
 /** Widest slab `turnedSlabs` will cut: the staircase it leaves is about this times the tilt. */
 const SLAB_WIDTH = 0.8;
-const SLAB_LIMIT = 40;
+const SLAB_LIMIT = 400;
 
 /**
  * Collision only speaks AABB, and a turned box seen from above is a tilted rectangle. So it
  * is handed over as a run of axis-aligned slabs across its wider side, each holding the full
  * depth of the rectangle over that slice: a staircase that hugs the true outline to within a
  * slab's width times its tilt, and never reports less solid than there is.
+ *
+ * `out` also gets how far above the box's own y1 that slab's top stands and how far below
+ * its y0 the soffit drops, both nothing unless the box is sheared (see `rise` in mesh.ts).
  */
-function turnedSlabs(d: ArrayLike<number>, o: number, out: (x0: number, z0: number, x1: number, z1: number) => void): void {
+function turnedSlabs(
+  d: ArrayLike<number>, o: number,
+  out: (x0: number, z0: number, x1: number, z1: number, top: number, bottom: number) => void,
+): void {
   const [bx0, bz0, bx1, bz1] = boxBounds(d, o);
   const a = d[o + 14] * YAW_STEP;
   const cs = Math.cos(a), sn = Math.sin(a);
   const hx = (d[o + 3] - d[o]) / 2, hz = (d[o + 5] - d[o + 2]) / 2;
   const cx = d[o] + hx, cz = d[o + 2] + hz;
+  const rise = d[o + 15] ?? 0, riseZ = d[o + 16] ?? 0;
+  /** How far the shear carries the box over an axis-aligned patch of ground: most, then least. */
+  const shearOver = (x0: number, z0: number, x1: number, z1: number): [number, number] => {
+    if (!rise && !riseZ) return [0, 0];
+    let hi = -Infinity, lo = Infinity;
+    for (const [x, z] of [[x0, z0], [x1, z0], [x0, z1], [x1, z1]]) {
+      // where the patch's corner falls across the box's own two axes, as a fraction of each
+      const px = x - cx, pz = z - cz;
+      const u = (px * cs + pz * sn) / Math.max(hx, 1e-6);
+      const w = (pz * cs - px * sn) / Math.max(hz, 1e-6);
+      const d = (rise / 2) * Math.max(-1, Math.min(1, u)) + (riseZ / 2) * Math.max(-1, Math.min(1, w));
+      hi = Math.max(hi, d);
+      lo = Math.min(lo, d);
+    }
+    return [hi, lo];
+  };
   // corners of the tilted rectangle, in order round it
   const px: number[] = [], pz: number[] = [];
   for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
@@ -1819,7 +1984,7 @@ function turnedSlabs(d: ArrayLike<number>, o: number, out: (x0: number, z0: numb
   const flip = bz1 - bz0 > bx1 - bx0;
   const u0 = flip ? bz0 : bx0, u1 = flip ? bz1 : bx1;
   const n = Math.max(1, Math.min(SLAB_LIMIT, Math.ceil((u1 - u0) / SLAB_WIDTH)));
-  if (n === 1) return out(bx0, bz0, bx1, bz1);
+  if (n === 1) return out(bx0, bz0, bx1, bz1, ...shearOver(bx0, bz0, bx1, bz1));
   const U = flip ? pz : px, V = flip ? px : pz;
   const step = (u1 - u0) / n;
   for (let k = 0; k < n; k++) {
@@ -1839,8 +2004,8 @@ function turnedSlabs(d: ArrayLike<number>, o: number, out: (x0: number, z0: numb
       }
     }
     if (lo > hi) continue; // the slice misses the rectangle entirely
-    if (flip) out(lo, ua, hi, ub);
-    else out(ua, lo, ub, hi);
+    if (flip) out(lo, ua, hi, ub, ...shearOver(lo, ua, hi, ub));
+    else out(ua, lo, ub, hi, ...shearOver(ua, lo, ub, hi));
   }
 }
 
@@ -1853,11 +2018,21 @@ function turnedSlabs(d: ArrayLike<number>, o: number, out: (x0: number, z0: numb
  * out with distance, and a face hidden by something already gone would be a hole — which
  * the shadow pass turns into leaked light, since it drops tiers four times sooner.
  */
-function buriedFaces(b: Builder, ci: number, cj: number): Uint8Array {
+function buriedFaces(b: Builder): Uint8Array {
   const EPS = 1e-3, G = 16;
   const n = b.count, d = b.data;
   const masks = new Uint8Array(n);
-  const ox = ci * CELL, oz = cj * CELL, s = G / CELL;
+  // the bucket grid covers whatever this builder actually spans, since a block is no longer
+  // a fixed cell of the world
+  let ox = Infinity, oz = Infinity, hx = -Infinity, hz = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const [w0, v0, w1, v1] = boxBounds(d, i * FLOATS_PER_BOX);
+    if (w0 < ox) ox = w0;
+    if (v0 < oz) oz = v0;
+    if (w1 > hx) hx = w1;
+    if (v1 > hz) hz = v1;
+  }
+  const s = G / Math.max(1, Math.max(hx - ox, hz - oz) + 1e-3);
   const cl = (v: number) => Math.min(G - 1, Math.max(0, v | 0));
 
   // bucket the boxes: counting sort into one flat array, no per-bucket arrays
@@ -1883,8 +2058,8 @@ function buriedFaces(b: Builder, ci: number, cj: number): Uint8Array {
   for (let i = 0; i < n; i++) tiers[i] = boxTier(d, i * FLOATS_PER_BOX);
   for (let i = 0; i < n; i++) {
     const o = i * FLOATS_PER_BOX;
-    // a turned box's faces aren't axis-aligned planes, so it neither hides nor is hidden
-    if (d[o + 14]) continue;
+    // a turned or tilted box's faces aren't axis-aligned planes, so it neither hides nor is hidden
+    if (d[o + 14] || d[o + 15] || d[o + 16]) continue;
     const tierI = tiers[i];
     const cx = (d[o] + d[o + 3]) / 2, cz = (d[o + 2] + d[o + 5]) / 2;
     let mask = 0;
@@ -1899,7 +2074,7 @@ function buriedFaces(b: Builder, ci: number, cj: number): Uint8Array {
       const key = cl((fx - ox) * s) * G + cl((fz - oz) * s);
       for (let k = starts[key]; k < starts[key + 1]; k++) {
         const j = items[k];
-        if (j === i || d[j * FLOATS_PER_BOX + 14]) continue;
+        if (j === i || d[j * FLOATS_PER_BOX + 14] || d[j * FLOATS_PER_BOX + 15] || d[j * FLOATS_PER_BOX + 16]) continue;
         if (lo(j, u) > lu + EPS || hi(j, u) < hu - EPS) continue;
         if (lo(j, w) > lw + EPS || hi(j, w) < hw - EPS) continue;
         if (side ? !(lo(j, axis) <= plane + EPS && hi(j, axis) > plane + EPS)
@@ -1928,15 +2103,31 @@ function boxTier(d: ArrayLike<number>, o: number): number {
 }
 
 export function buildRegion(rx: number, rz: number, faceCull = true): RegionMesh {
-  const cells: { ci: number; cj: number; b: Builder }[] = [];
-  let total = 1;
+  const cells: Part[] = [];
   for (let ci = rx * REGION_CELLS; ci < (rx + 1) * REGION_CELLS; ci++)
     for (let cj = rz * REGION_CELLS; cj < (rz + 1) * REGION_CELLS; cj++) {
       const b = new Builder(new Rng(hashInt(ci, cj, 2)));
       buildCell(ci, cj, b);
       cells.push({ ci, cj, b });
-      total += b.count;
     }
+  return assembleRegion(rx, rz, cells, faceCull);
+}
+
+/** One piece of a region that meshes on its own: a block, with a name for its colliders. */
+export interface Part {
+  ci: number;
+  cj: number;
+  b: Builder;
+}
+
+/**
+ * Turns the builders of a region into one mesh: the ground slab, then each part's boxes in
+ * tier order so any prefix of them is a contiguous draw range, plus its colliders and the
+ * bounds the frustum test uses. Shared by both plans — only what fills the builders differs.
+ */
+export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull = true, street = true): RegionMesh {
+  let total = 1;
+  for (const c of cells) total += c.b.count;
 
   const vertices = new Float32Array(total * 24 * FLOATS_PER_VERTEX);
   const indices = new Uint32Array(total * 36);
@@ -1945,23 +2136,25 @@ export function buildRegion(rx: number, rz: number, faceCull = true): RegionMesh
   let v = 0;
   let maxHeight = 0;
 
-  const emit = (d: ArrayLike<number>, o: number, buried = 0, turn = 0) => {
-    maxHeight = Math.max(maxHeight, d[o + 4]);
+  const emit = (d: ArrayLike<number>, o: number, buried = 0, turn = 0, rise = 0, riseZ = 0) => {
+    maxHeight = Math.max(maxHeight, d[o + 4] + (Math.abs(rise) + Math.abs(riseZ)) / 2);
     // a bottom face resting on the street or a sidewalk can never be seen either
     const mask = buried | (d[o + 1] <= 0.19 ? 1 << 5 : 0);
-    ({ v, idx } = emitBox(d, o, vertices, v, indices, idx, boxIndex * 24, mask, turn));
+    ({ v, idx } = emitBox(d, o, vertices, v, indices, idx, boxIndex * 24, mask, turn, rise, riseZ));
     boxIndex++;
   };
 
-  // street slab for the whole region
+  // Street slab for the whole region: the grid city's streets are the plane y = 0. The network
+  // city has ground of its own, and a slab there floats over every valley and river, drawn
+  // only by its edges — long thin beams hanging in the air at every region seam.
   const x0 = rx * REGION, z0 = rz * REGION;
-  emit([x0, -1, z0, x0 + REGION, 0, z0 + REGION, 1, 1, 1, Mat.Asphalt, 0, 0], 0);
+  if (street) emit([x0, -1, z0, x0 + REGION, 0, z0 + REGION, 1, 1, 1, Mat.Asphalt, 0, 0], 0);
   const groundCount = idx;
 
   const ranges: CellRange[] = [];
-  for (const { ci, cj, b } of cells) {
+  for (const { b } of cells) {
     const d = b.data;
-    const buried = faceCull ? buriedFaces(b, ci, cj) : new Uint8Array(b.count);
+    const buried = faceCull ? buriedFaces(b) : new Uint8Array(b.count);
     // three tiers, emitted in order so that any prefix of them is one contiguous range:
     // bulk (always drawn), the smaller coarse boxes, then detail
     const lo: [number, number, number] = [Infinity, Infinity, Infinity];
@@ -1970,13 +2163,14 @@ export function buildRegion(rx: number, rz: number, faceCull = true): RegionMesh
       const o = i * FLOATS_PER_BOX;
       const [w0, v0, w1, v1] = boxBounds(d, o);
       lo[0] = Math.min(lo[0], w0); hi[0] = Math.max(hi[0], w1);
-      lo[1] = Math.min(lo[1], d[o + 1]); hi[1] = Math.max(hi[1], d[o + 4]);
+      const shear = (Math.abs(d[o + 15]) + Math.abs(d[o + 16])) / 2;
+      lo[1] = Math.min(lo[1], d[o + 1] - shear); hi[1] = Math.max(hi[1], d[o + 4] + shear);
       lo[2] = Math.min(lo[2], v0); hi[2] = Math.max(hi[2], v1);
     }
     const tierPass = (tier: number) => {
       for (let i = 0; i < b.count; i++) {
         const o = i * FLOATS_PER_BOX;
-        if (boxTier(d, o) === tier) emit(d, o, buried[i], d[o + 14]);
+        if (d[o + 12] !== HIDDEN && boxTier(d, o) === tier) emit(d, o, buried[i], d[o + 14], d[o + 15], d[o + 16]);
       }
     };
     const coarseStart = idx;
@@ -1998,9 +2192,11 @@ export function buildRegion(rx: number, rz: number, faceCull = true): RegionMesh
   const pads = cells.flatMap(({ ci, cj, b }) => b.pads.map((pd, k) => ({ ...pd, id: `p${ci},${cj},${k}` })));
   const cars = cells.flatMap(({ ci, cj, b }) => b.cars.map((c, k) => ({ ...c, id: `c${ci},${cj},${k}` })));
   const lifts = cells.flatMap(({ ci, cj, b }) => b.lifts.map((l, k) => ({ ...l, id: `l${ci},${cj},${k}` })));
+  const boats = cells.flatMap(({ ci, cj, b }) => b.boats.map((v, k) => ({ ...v, id: `b${ci},${cj},${k}` })));
   return {
     rx, rz, vertices, positions: positionsOf(vertices, v), indices: indices.slice(0, idx),
-    groundCount, cells: ranges, pads, cars, lifts, maxHeight, colliders,
+    groundCount, cells: ranges, pads, cars, lifts, boats, maxHeight, colliders,
+    lamps: cells.flatMap(({ b }) => b.lamps),
   };
 }
 
@@ -2011,7 +2207,7 @@ export function spawnPoint(): { x: number; y: number; z: number; yaw: number } {
 
 /** Test hook: the collision slabs of a box `w` x `d` centred on the origin, turned by `a`. */
 export function __slabProbe(w: number, d: number, a: number): [number, number, number, number][] {
-  const box = [-w / 2, 0, -d / 2, w / 2, 1, d / 2, 1, 1, 1, 0, 0, 0, 1, 0, yawStep(a)];
+  const box = [-w / 2, 0, -d / 2, w / 2, 1, d / 2, 1, 1, 1, 0, 0, 0, 1, 0, yawStep(a), 0, 0];
   const out: [number, number, number, number][] = [];
   turnedSlabs(box, 0, (x0, z0, x1, z1) => out.push([x0, z0, x1, z1]));
   return out;

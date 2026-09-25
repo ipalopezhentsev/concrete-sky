@@ -1,12 +1,13 @@
 // Concrete Sky: boot, input, main loop and HUD.
 
 import { Audio } from "./audio";
-import { spawnPoint } from "./city/generate";
+import { groundAt, planSpawn } from "./city/plan";
+import { setFloor } from "./player";
 import { Demo } from "./demo";
 import { MAX_HEALTH } from "./hunters";
 import { add, cross, dot, normalize, scale, setWorldSeed, sub, type Vec3 } from "./math";
-import { Player, type Input } from "./player";
-import { Renderer, type Camera } from "./renderer";
+import { openSpot, Player, type Input } from "./player";
+import { Renderer, type Camera, LAMP_SLOTS } from "./renderer";
 import { Rides, type Controls } from "./rides";
 import { TouchControls } from "./touch";
 import { STATES, Weather } from "./weather";
@@ -111,6 +112,9 @@ async function main(): Promise<void> {
   } catch (e) {
     fail(String((e as Error).message));
   }
+  let lampsAt: [number, number] = [Infinity, Infinity], lampsVersion = -1;
+  renderer.groundAt = groundAt;
+  setFloor(-400); // the city has real ground, far below zero
   debug.renderer = renderer.renderer;
   if (renderer.integrated) {
     // A page can only ask for the fast GPU; the browser decides for all its tabs.
@@ -128,7 +132,7 @@ async function main(): Promise<void> {
   resize();
   window.addEventListener("resize", resize);
 
-  const spawn = spawnPoint();
+  const spawn = planSpawn();
   const player = new Player(spawn.x, spawn.y, spawn.z, spawn.yaw);
   const pose = params.get("pose")?.split(",").map(Number);
   if (pose && pose.length >= 5) {
@@ -136,6 +140,7 @@ async function main(): Promise<void> {
     player.yaw = pose[3];
     player.pitch = pose[4];
   }
+  if (Number(params.get("fov")) > 0) player.fov = Number(params.get("fov"));
   const startWeather = params.get("weather") ?? "clear sky";
   const weather = new Weather(STATES[startWeather] ? startWeather : "clear sky");
   if (params.has("shot")) weather.cycle = false;
@@ -145,6 +150,11 @@ async function main(): Promise<void> {
   await world.ready(player.pos[0], player.pos[2], params.has("shot") ? 950 : 450, (f) => {
     statusEl.textContent = `pouring concrete… ${Math.round(f * 100)}%`;
   });
+  // Put the runner down somewhere they can actually stand and walk away from. The spawn is
+  // worked out from the plan before any geometry exists, so it can land inside something — a
+  // pier, a wall, a block — and a runner wedged in geometry cannot move at all, which reads
+  // as the controls being dead. A pose asked for by hand is taken as given.
+  if (!pose) player.pos = openSpot(world.colliders, player.pos[0], player.pos[1], player.pos[2]);
   statusEl.hidden = true;
   beginEl.textContent = `${verb} to run`;
   beginEl.hidden = false;
@@ -271,9 +281,47 @@ async function main(): Promise<void> {
 
   // F4 copies the stats panel (and the URL, which carries any test parameters)
   let statsText = "";
+  /**
+   * F4: the stats, under a link that comes back to exactly this view.
+   *
+   * `location.href` is where the session started, not where it got to, so a screenshot sent
+   * with it could not be reproduced — the seed was right and the camera was anywhere. This
+   * rebuilds the address from what is actually on screen: same city, same plan, same
+   * weather, same eye and same direction.
+   */
   const copyStats = () => {
-    navigator.clipboard.writeText(`${location.href}\n${statsText}`).then(
-      () => caption("stats copied"),
+    // Everything that decides what is on screen, so the link renders the same picture on a
+    // different machine. The generation settings are obvious; the renderer ones matter just
+    // as much and are the easy ones to miss, because most of them are chosen from the GPU —
+    // an integrated part gets half the multisampling, half the shadow map and half the
+    // distance before surfaces drop to the cheap path, so the same address on a discrete
+    // card is a different image. Written out as they ended up, not as they were asked for.
+    const q: Record<string, string | number> = {
+      seed,
+      weather: weather.name,
+      pose: [...player.pos, player.yaw, player.pitch].map((v) => v.toFixed(3)).join(","),
+      fov: player.fov.toFixed(1),
+      msaa: renderer.samples,
+      fxaa: renderer.fxaa ? 1 : 0,
+      prepass: renderer.prepass ? 1 : 0,
+      shadowsize: renderer.shadowSize,
+      detail: renderer.detailDist,
+      aniso: renderer.aniso,
+      cloudsize: renderer.cloudSize,
+      clouddither: renderer.cloudDither,
+      cheap: renderer.cheap,
+      scale: renderer.scale.toFixed(2),
+      dpr: renderer.maxPixelRatio,
+      geolod: world.detailScale,
+      farlod: world.farScale,
+      facecull: world.faceCull ? 1 : 0,
+      w: renderer.width,
+      h: renderer.height,
+    };
+    const link = `${location.origin}${location.pathname}?`
+      + Object.entries(q).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+    navigator.clipboard.writeText(`${link}\n${statsText}`).then(
+      () => caption("view link copied"),
       () => caption("could not copy stats"),
     );
   };
@@ -395,7 +443,7 @@ async function main(): Promise<void> {
       mouseDY: mouseDY + touch.lookDY,
     };
     touch.lookDX = touch.lookDY = 0;
-    if (mode === "demo") demo.update(dt, controls, rides.traffic);
+    if (mode === "demo") demo.update(dt, controls);
     else if (mode === "title" && attract && !played && (idle += dt) > 45) startDemo();
     const running = mode === "play";
     const active = running || mode === "demo" || autorun > 0 || autofly;
@@ -534,6 +582,13 @@ async function main(): Promise<void> {
     fade = Math.min(1, fade + dt * 0.5);
     const blur = Math.max(0, Math.min(1, (speedNorm - 0.6) * 2.5));
     const shade = mode === "demo" ? Math.min(fade, demo.fade) : fade;
+    // the nearest lamps light the street; picked again once the view has moved a little
+    const moved = Math.hypot(cam.eye[0] - lampsAt[0], cam.eye[2] - lampsAt[1]);
+    if (moved > 10 || world.version !== lampsVersion) {
+      renderer.lamps = world.lampsNear(cam.eye[0], cam.eye[2], LAMP_SLOTS);
+      lampsAt = [cam.eye[0], cam.eye[2]];
+      lampsVersion = world.version;
+    }
     renderer.render(cam, weather, world, rides.vehicleLists, rides.particles, time, blur, shade);
     debug.frames++;
 
@@ -585,7 +640,9 @@ async function main(): Promise<void> {
           renderer.renderer,
           `reversed z: ${renderer.reversedZ}   depth pre-pass: ${renderer.prepass}`,
           `regions ${world.stats.regions} (drawn ${world.stats.drawn}, pending ${world.stats.pending}, ${(world.stats.tris / 1000).toFixed(0)}k tris)`,
-          `pos ${player.pos.map((v) => v.toFixed(1)).join(" ")}`,
+          // Where *and* which way, as the string the screenshot tool takes: a position alone
+          // does not say what is in front of you, so a view cannot be reproduced from it.
+          `pose ${player.pos.map((v) => v.toFixed(1)).join(",")},${player.yaw.toFixed(3)},${player.pitch.toFixed(3)}`,
           `weather: ${weather.name}   city seed ${seed}`,
           `vehicles: ${t.cars.count} cars, ${t.vans.count} vans, ${t.flyers.count} flyers (${renderer.vehiclesDrawn} in view)`,
           `hunters: ${hunt ? hunters.list.map((x) => x.mode).join(" ") || "none yet" : "off"} (up to ${hunters.pressure})`,
@@ -601,5 +658,5 @@ async function main(): Promise<void> {
 
 main().catch((e) => {
   console.error(e);
-  debug.error = String(e);
+  debug.error = e instanceof Error && e.stack ? e.stack : String(e);
 });

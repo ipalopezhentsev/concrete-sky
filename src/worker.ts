@@ -1,6 +1,6 @@
 // Background generation of textures and city regions.
 
-import { buildRegion } from "./city/generate";
+import { buildPlanRegion } from "./city/plan";
 import { setWorldSeed } from "./math";
 import { generateTextures } from "./textures";
 
@@ -15,7 +15,7 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     postMessage({ type: "textures", ...t }, { transfer: [t.albedo.buffer, t.normal.buffer, t.noise.buffer] });
   } else {
     setWorldSeed(msg.seed);
-    const m = buildRegion(msg.rx, msg.rz, msg.faceCull);
+    const m = buildPlanRegion(msg.rx, msg.rz, msg.faceCull);
     const transfer: ArrayBuffer[] = [m.vertices.buffer as ArrayBuffer, m.positions.buffer as ArrayBuffer, m.indices.buffer as ArrayBuffer];
     for (const c of m.colliders) transfer.push(c.boxes.buffer as ArrayBuffer);
     postMessage({ type: "region", mesh: m }, { transfer });

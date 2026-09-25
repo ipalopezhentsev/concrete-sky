@@ -21,6 +21,15 @@ const POSES = {
   canyon: "44,24,-10,0,0.05",
 };
 
+// BENCH_POSES="name=x,y,z,yaw,pitch;..." replaces the views (the network city needs its own)
+if (process.env.BENCH_POSES) {
+  for (const k of Object.keys(POSES)) delete POSES[k];
+  for (const e of process.env.BENCH_POSES.split(";")) {
+    const [n, p] = e.split("=");
+    POSES[n] = p;
+  }
+}
+
 const browser = await puppeteer.launch({
   executablePath: browserPath, headless: true, args: launchArgs,
   defaultViewport: { width: w, height: h, deviceScaleFactor: dpr },

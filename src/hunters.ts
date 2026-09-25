@@ -5,6 +5,7 @@
 // come; when they get you, you're back on the last roof you stood on.
 
 import { bridgeOn, CELL, podiumHeight } from "./city/generate";
+import { FLOOR } from "./player";
 import { RunPilot, SIDE_STEP, type Ring } from "./demo";
 import { BOLT_SPEED, segmentBox, type BoltTargets, type Combat } from "./effects/combat";
 import type { Particles } from "./effects/particles";
@@ -313,7 +314,7 @@ export class Hunters implements BoltTargets {
   private standAt(x: number, z: number, y: number): number | null {
     const boxes = this.w.colliders(x, z);
     const R = 0.6;
-    let ground = 0;
+    let ground = FLOOR;
     for (let i = 0; i < boxes.length; i += 6) {
       if (boxes[i] < x + R && boxes[i + 3] > x - R && boxes[i + 2] < z + R && boxes[i + 5] > z - R &&
           boxes[i + 4] <= y + 1) ground = Math.max(ground, boxes[i + 4]);
@@ -483,6 +484,7 @@ export class Hunters implements BoltTargets {
     let bestD = 45;
     for (const p of this.w.parking.all()) {
       if (p.wreck || Math.abs(p.y - y) > 1.2) continue;
+      if (p.kind === "boat") continue; // hunters keep to the land
       if (p.kind === "flyer" ? !wantFlyer && !wantCar : !wantCar) continue;
       const d = Math.hypot(p.x - x, p.z - z) + (p.kind === "flyer" ? 0 : 10);
       if (d < bestD) {
@@ -518,13 +520,13 @@ export class Hunters implements BoltTargets {
       if (h.ride && !this.stillParked(h.ride)) h.ride = null;
       if (!h.ride) h.ride = this.findRide(h, q);
     }
-    if (h.ride) {
+    if (h.ride && h.ride.kind !== "boat") { // hunters keep to the land
       const p = h.ride;
       const f = footprint(p.kind, p.yaw);
       const gap = Math.hypot(Math.max(Math.abs(x - p.x) - f.hx, 0), Math.max(Math.abs(z - p.z) - f.hz, 0));
       if (gap < 1.4) {
         this.w.parking.remove(p);
-        this.board(h, p.kind, [p.x, p.y, p.z], p.yaw, p.color);
+        this.board(h, p.kind as "flyer" | "car" | "van", [p.x, p.y, p.z], p.yaw, p.color);
         return;
       }
     }
@@ -581,7 +583,7 @@ export class Hunters implements BoltTargets {
     if (move && dy > -3) {
       const px = x + Math.sin(heading) * 1.4, pz = z + Math.cos(heading) * 1.4;
       const boxes = this.w.colliders(px, pz);
-      let ground = 0;
+      let ground = FLOOR;
       for (let i = 0; i < boxes.length; i += 6) {
         if (boxes[i] < px + 0.3 && boxes[i + 3] > px - 0.3 && boxes[i + 2] < pz + 0.3 && boxes[i + 5] > pz - 0.3 &&
             boxes[i + 4] <= y + 2.5) ground = Math.max(ground, boxes[i + 4]);

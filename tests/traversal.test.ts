@@ -3,6 +3,7 @@ import {
   Builder, bridgeOn, buildRegion, CELL, collidersOf, cornerPylon, cornerStair, crossing, edgeBridge, facadeStair,
   deckEdge, PODIUM_LEVELS, podiumHeight, podiumInset, pylonSize, spawnPoint, STREET, streetFlight, streetLift,
 } from "../src/city/generate";
+import { ARTERY_HALF, arteryFrame, blockAt, blocksIn, cellOf, SLOT } from "../src/city/network";
 import { liftState, Lifts } from "../src/lifts";
 import { Rng, setWorldSeed } from "../src/math";
 import { Player, type Input } from "../src/player";
@@ -12,7 +13,7 @@ import { Parking } from "../src/vehicles/parking";
 import { Traffic } from "../src/vehicles/traffic";
 import { Combat } from "../src/effects/combat";
 import { Particles } from "../src/effects/particles";
-import { DrivePilot, FlyPilot, RunPilot } from "../src/demo";
+import { RunPilot } from "../src/demo";
 import { Hunters, MAX_HEALTH, type Quarry } from "../src/hunters";
 
 let failures = 0;
@@ -353,7 +354,11 @@ for (const seed of [1971, 42, 777777]) {
           const own: number[] = [];
           for (let i = 0; i < boxes.length; i += 6) {
             const [bx0, by0, bz0, bx1, by1, bz1] = boxes.subarray(i, i + 6);
-            if (bx0 >= x0 - 0.9 && bx1 <= x1 + 0.9 && bz0 >= z0 - 0.9 && bz1 <= z1 + 0.9 && by0 >= E - 0.01) own.push(bx0, by0, bz0, bx1, by1, bz1);
+            // only what stands beside the pylon can flicker against it: something well above
+            // its crown shares no face with it, and a ring of drum panels up there legitimately
+            // shares one top plane (their bounds overlap even where the turned boxes do not)
+            if (bx0 >= x0 - 0.9 && bx1 <= x1 + 0.9 && bz0 >= z0 - 0.9 && bz1 <= z1 + 0.9 &&
+                by0 >= E - 0.01 && by0 < py.level) own.push(bx0, by0, bz0, bx1, by1, bz1);
             if (bx1 <= x0 || bx0 >= x1 || bz1 <= z0 || bz0 >= z1 || by1 <= E + 0.05 || by0 >= py.level - 3.5) continue;
             const inside = bx0 >= x0 - 0.9 && bx1 <= x1 + 0.9 && bz0 >= z0 - 0.9 && bz1 <= z1 + 0.9;
             if (!inside) {
@@ -676,13 +681,11 @@ function cityColliders(): (x: number, z: number) => Float32Array {
 // deterministic "random" choices
 const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
 
-// 12. demo autopilots in real cities: run the decks, fly the corridors, drive the cross streets
+// 12. the demo's runner autopilot in real cities: run the decks
 {
   for (const seed of [1971, 42, 777777]) {
     setWorldSeed(seed);
     const colliders = cityColliders();
-
-    // running
     {
       const pilot = new RunPilot(0, 0, colliders, lcg(seed));
       const s = pilot.start;
@@ -699,51 +702,6 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
       }
       check(`demo runner keeps to the decks (seed ${seed})`, !fell && stuck === 0 && pilot.crossings >= 5,
         `fell=${fell} stuck=${stuck} bridges=${pilot.crossings} pos=${p.pos.map((v) => v.toFixed(1))}`);
-    }
-
-    // flying
-    {
-      const pilot = new FlyPilot(0, 30, "ns", 1, lcg(seed + 1));
-      const f = new Flyer(0, 60, 30, 0, [1, 1, 1]);
-      f.grounded = false;
-      const look = { yaw: 0, pitch: -0.1 };
-      let turns = 0, hits = 0, axis = pilot.axis, low = Infinity, high = 0;
-      for (let t = 0; t < 120 * 60; t++) {
-        const c = pilot.steer(f, look, 1 / 60);
-        const before = Math.hypot(...f.vel);
-        f.update(1 / 60, { moveX: c.moveX, moveZ: c.moveZ, up: c.climb ?? 0, boost: c.sprint }, look.yaw, look.pitch, colliders);
-        if (before > 10 && Math.hypot(...f.vel) < before * 0.7) hits++;
-        if (pilot.axis !== axis) {
-          turns++;
-          axis = pilot.axis;
-        }
-        if (t > 300) {
-          low = Math.min(low, f.pos[1]);
-          high = Math.max(high, f.pos[1]);
-        }
-      }
-      check(`demo flyer follows the corridors (seed ${seed})`, hits === 0 && turns >= 3 && low > 45,
-        `hits=${hits} turns=${turns} height=${low.toFixed(0)}..${high.toFixed(0)} pos=${f.pos.map((v) => v.toFixed(0))}`);
-    }
-
-    // driving, with avenue traffic
-    {
-      const pilot = new DrivePilot(88, 1);
-      const car = new Car(44, 0, pilot.lane, Math.PI / 2, false, [1, 1, 1]);
-      const traffic = new Traffic();
-      let impacts = 0, drift = 0;
-      for (let t = 0; t < 60 * 60; t++) {
-        const time = t / 60;
-        traffic.update(time, [car.pos[0] - 7, 3, car.pos[2]], [1, 0, 0]);
-        const c = pilot.steer(car, traffic);
-        car.update(1 / 60, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, colliders,
-          traffic.carBoxes(car.pos[0], car.pos[2], 30));
-        if (car.impact > 0) impacts++;
-        if (t > 120) drift = Math.max(drift, Math.abs(car.pos[2] - pilot.lane));
-      }
-      const crossed = Math.floor(car.pos[0] / CELL);
-      check(`demo car gives way and keeps its lane (seed ${seed})`, impacts === 0 && drift < 1.5 && crossed >= 8,
-        `impacts=${impacts} drift=${drift.toFixed(2)} avenues=${crossed} x=${car.pos[0].toFixed(0)}`);
     }
   }
   setWorldSeed(1971);
@@ -892,6 +850,175 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
     check("hunter bolts pass through traffic and hit the player", w.combat.carKills === 0 && w.combat.kills === 0 &&
       w.traffic.removed.size === 0 && hunters.health < before, `health=${hunters.health.toFixed(0)}`);
   }
+  setWorldSeed(1971);
+}
+
+// 9. the road network: blocks never overlap, and the ground they leave is road
+{
+  /** Is the point inside this anticlockwise convex polygon? */
+  const inside = (poly: [number, number][], x: number, z: number) => {
+    for (let k = 0; k < poly.length; k++) {
+      const a = poly[k], b = poly[(k + 1) % poly.length];
+      if ((b[0] - a[0]) * (z - a[1]) - (b[1] - a[1]) * (x - a[0]) < -1e-6) return false;
+    }
+    return true;
+  };
+  const polys = blocksIn(-900, -900, 900, 900)
+    .map((s) => cellOf(s))
+    .filter((p): p is [number, number][] => !!p);
+  let overlaps = 0, onRoad = 0, samples = 0, misnamed = 0;
+  for (let x = -800; x <= 800; x += 17)
+    for (let z = -800; z <= 800; z += 17) {
+      samples++;
+      let hits = 0;
+      for (const p of polys) if (inside(p, x, z)) hits++;
+      if (hits > 1) overlaps++;
+      if (hits === 0) onRoad++;
+      // whatever block owns the point must be the one whose polygon holds it
+      const owner = blockAt(x, z);
+      if (hits === 1 && owner) {
+        const poly = cellOf(owner);
+        if (!poly || !inside(poly, x, z)) misnamed++;
+      }
+    }
+  const road = onRoad / samples;
+  check("blocks never overlap", overlaps === 0, `overlapping samples=${overlaps}/${samples}`);
+  check("blockAt names the block the point is in", misnamed === 0, `wrong=${misnamed}`);
+  check("streets take a sane share of the ground", road > 0.08 && road < 0.45, `road=${(road * 100).toFixed(1)}%`);
+  check("blocks come in many shapes", new Set(polys.map((p) => p.length)).size >= 4,
+    `side counts=${[...new Set(polys.map((p) => p.length))].sort((a, b) => a - b).join(",")}`);
+  void SLOT;
+
+  // Nothing may be built in a roadway. The bisector between an arterial's flanking pair is
+  // what is supposed to see to it, and on a straight road it does, because there the bisector
+  // is the road — but on a bend, and wherever two roads cross, it is not, and what stood in
+  // the difference was a block in the middle of the carriageway with the traffic driving into
+  // it. Checked across the full width, kerb to kerb, on the seeds the rest of this file uses.
+  for (const seed of [1971, 42, 777777]) {
+    setWorldSeed(seed);
+    const near = blocksIn(-2600, -2600, 2600, 2600)
+      .map((s) => cellOf(s))
+      .filter((p): p is [number, number][] => !!p);
+    let inRoad = 0, tried = 0, first = "";
+    for (const axis of [0, 1] as const)
+      for (let line = -2; line <= 2; line++)
+        for (let s = -2200; s < 2200; s += 5)
+          for (const off of [-ARTERY_HALF + 0.5, 0, ARTERY_HALF - 0.5]) {
+            const f = arteryFrame(axis, line, s);
+            const x = f.p[0] - f.dir[1] * off, z = f.p[1] + f.dir[0] * off;
+            tried++;
+            if (!near.some((p) => inside(p, x, z))) continue;
+            inRoad++;
+            first ||= `${x.toFixed(0)},${z.toFixed(0)}`;
+          }
+    check(`no block stands in an arterial's roadway (seed ${seed})`, inRoad === 0,
+      `${inRoad}/${tried}${first ? ` first at ${first}` : ""}`);
+  }
+  setWorldSeed(1971);
+}
+
+// 10. the network city, through the same collision lookup the game uses
+{
+  const { buildPlanRegion, planSpawn } = await import("../src/city/plan");
+  const { setFloor } = await import("../src/player");
+  const { REGION_CELLS: RC, REGION } = await import("../src/city/generate");
+  for (const seed of [1971, 42, 777777]) {
+    setWorldSeed(seed);
+    setFloor(-400);
+    // exactly World.add: every region's share of a grid cell is kept, none overwrites another
+    const cells = new Map<string, Float32Array[]>();
+    const loaded = new Set<string>();
+    const load = (rx: number, rz: number) => {
+      loaded.add(`${rx},${rz}`);
+      for (const c of buildPlanRegion(rx, rz).colliders) {
+        const k = `${c.ci},${c.cj}`;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k)!.push(c.boxes);
+      }
+    };
+    // exactly World.colliders: the grid cell under you and its eight neighbours
+    const colliders = (x: number, z: number) => {
+      const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+      const parts: Float32Array[] = [];
+      for (let i = ci - 1; i <= ci + 1; i++)
+        for (let j = cj - 1; j <= cj + 1; j++) {
+          const rx = Math.floor(i / RC), rz = Math.floor(j / RC);
+          if (!loaded.has(`${rx},${rz}`)) load(rx, rz);
+          const c = cells.get(`${i},${j}`);
+          if (!c) throw new Error(`no colliders for grid cell ${i},${j}`);
+          parts.push(...c);
+        }
+      const out = new Float32Array(parts.reduce((a, p) => a + p.length, 0));
+      let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    };
+    const sp = planSpawn();
+    const p = new Player(sp.x, sp.y + 1, sp.z, sp.yaw);
+    const input: Input = { moveX: 0, moveZ: 1, sprint: false, walk: false, jump: false };
+    for (let t = 0; t < 60; t++) p.update(1 / 60, { ...input, moveZ: 0 }, colliders); // settle
+    const start: [number, number] = [p.pos[0], p.pos[2]];
+    for (let t = 0; t < 60 * 5; t++) p.update(1 / 60, input, colliders);
+    const moved = Math.hypot(p.pos[0] - start[0], p.pos[2] - start[1]);
+    // responds to input, and is standing on the city rather than having fallen out of it
+    check(`network city: runner can move from the spawn (seed ${seed})`, moved > 8 && p.pos[1] > -350,
+      `moved=${moved.toFixed(1)}m y=${p.pos[1].toFixed(1)}`);
+
+    // Nowhere in a region is there nothing at all underfoot: not at the seams, where a block
+    // belonging to one region reaches into the next, and not at the edges of blocks, where
+    // the ground stops and the block's plinth takes over.
+    const { groundAt } = await import("../src/city/plan");
+    let holes = 0, samples = 0, where = "";
+    for (let x = 1; x < REGION; x += 6)
+      for (let z = 1; z < REGION; z += 6) {
+        const b = colliders(x, z), y = groundAt(x, z) + 1;
+        let ok = false;
+        for (let k = 0; k < b.length && !ok; k += 6)
+          ok = b[k] <= x && b[k + 3] >= x && b[k + 2] <= z && b[k + 5] >= z && b[k + 1] <= y + 8 && b[k + 4] >= y - 8;
+        samples++;
+        if (!ok) { holes++; where ||= `${x},${z}`; }
+      }
+    check(`network city: no holes in the ground (seed ${seed})`, holes === 0, `${holes}/${samples}, first at ${where}`);
+
+    // From the street to the deck by lift: ride it up and step off over the parapet.
+    const region = buildPlanRegion(0, 0);
+    const lift = region.lifts[0];
+    if (!lift) check(`network city: blocks have lifts (seed ${seed})`, false, "none in region 0,0");
+    else {
+      const lifts = new Lifts();
+      lifts.sync(region.lifts);
+      const lx = (lift.x0 + lift.x1) / 2, lz = (lift.z0 + lift.z1) / 2;
+      const all = (x: number, z: number) => {
+        const a = colliders(x, z), l = lifts.boxes(x, z);
+        const out = new Float32Array(a.length + l.length);
+        out.set(a);
+        out.set(l, a.length);
+        return out;
+      };
+      const idle: Input = { moveX: 0, moveZ: 0, sprint: false, walk: false, jump: false };
+      let time = 0, rode = false;
+      while (liftState(lift, time).moving || liftState(lift, time).y !== lift.y0) time += 0.1;
+      const r = new Player(lx, lift.y0 + 0.05, lz, 0);
+      for (let t = 0; t < 60 * 90; t++) {
+        time += 1 / 60;
+        lifts.update(time);
+        r.update(1 / 60, idle, all);
+        lifts.carry(r);
+        const { y, moving } = liftState(lift, time);
+        if (moving && y > lift.y0 + 5) rode = true;
+        if (rode && !moving && y === lift.y1) break;
+      }
+      // walk in toward the middle of the block, which is where the deck is
+      const site = blockAt(lx, lz)!;
+      const [cx, cz] = cellOf(site)!.reduce((m, v, _, p) => [m[0] + v[0] / p.length, m[1] + v[1] / p.length], [0, 0]);
+      const d = Math.hypot(cx - lx, cz - lz);
+      walk(r, all(lx, lz), [[lx + (cx - lx) / d * 8, lz + (cz - lz) / d * 8]], 10);
+      const deck = lift.y1 - 1.05;
+      check(`network city: a lift takes the runner up to the deck (seed ${seed})`, rode && r.pos[1] > deck - 0.3 && r.pos[1] < deck + 1.5, // on the deck, or a step onto something on it
+        `rode=${rode} y=${r.pos[1].toFixed(2)} deck=${deck.toFixed(2)}`);
+    }
+  }
+  setFloor(0);
   setWorldSeed(1971);
 }
 

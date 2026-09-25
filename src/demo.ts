@@ -1,14 +1,18 @@
 // Demo mode: autopilots that run the decks, fly the air corridors and drive the
 // cross streets, and a director that cuts between them as the weather moves on.
 
-import { bridgeOn, CELL, deckEdge, PODIUM_LEVELS, podiumCut, podiumHeight, STREET } from "./city/generate";
+import { bridgeOn, CELL, deckEdge, PODIUM_LEVELS, podiumCut, podiumHeight } from "./city/generate";
+import {
+  ARTERY, arteryFrame, arteryLines, RIVER_HALF, riverFrame, riverNear, waterLevel, type Vec2,
+} from "./city/network";
+import { roadY } from "./city/plan";
 import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import type { Controls, Rides } from "./rides";
+import type { Boat } from "./vehicles/boat";
 import type { Car } from "./vehicles/car";
 import { FLYER_PALETTE, type Flyer } from "./vehicles/flyer";
 import { PAINT_COLORS } from "./vehicles/models";
-import type { Traffic } from "./vehicles/traffic";
 import type { Weather } from "./weather";
 
 /** What an autopilot presses this frame. */
@@ -247,166 +251,216 @@ export class RunPilot {
 }
 
 // ---------------------------------------------------------------------------
-// Flying: along the street corridors, turning at some crossings, shooting
-// at air traffic that drifts into the sights.
+// Flying and driving. There is no grid to steer by: an arterial is a spline, and nothing at
+// all stands on the straight lines that x = n * CELL and z = n * CELL would aim down — fly or
+// drive one of those and you meet the first tower head on. What carries traffic here is the
+// arterial, so that is what these follow: a station along the spline, kept honest against
+// where the vehicle has actually got to, and a point on the road some way further on to aim
+// at.
 
-// cruise heights between the traffic layers (north-south 48/92 m, east-west 68/118 m)
-const FLY_HEIGHT = { ns: 60, ew: 82 };
-const TURN_MIN_HEIGHT = 70; // east-west corridors are clear from 65 m
-const CRUISE = 24, BOOST = 48, CLIMB = 11;
+const CRUISE = 24, CLIMB = 11;
+/** Over the road: the level the flyer traffic keeps, and proven clear of the towers. */
+const PLAN_FLY = 93;
+/** Out past the streamed traffic's lanes, and well inside the carriageway. */
+const PLAN_LANE = 9;
+const PLAN_DRIVE = 22;
 
-export class FlyPilot {
-  axis: "ns" | "ew";
-  line: number;
-  dir: 1 | -1;
-  private turn: { at: number; dir: 1 | -1 } | null = null;
-  private decided = NaN;
-  private clock = 0;
+/** The arterial of the given run that passes nearest (x, z), and the station along it. */
+function nearestArtery(axis: 0 | 1, x: number, z: number): { line: number; s: number } {
+  const across = axis === 0 ? z : x, s = axis === 0 ? x : z;
+  let line = 0, best = Infinity;
+  for (const l of arteryLines(across, ARTERY)) {
+    const { p } = arteryFrame(axis, l, s);
+    const d = Math.hypot(p[0] - x, p[1] - z);
+    if (d < best) {
+      best = d;
+      line = l;
+    }
+  }
+  return { line, s };
+}
 
-  constructor(x: number, z: number, axis: "ns" | "ew", dir: 1 | -1, private rand = Math.random) {
-    this.axis = axis;
-    this.dir = dir;
-    this.line = Math.round((axis === "ns" ? x : z) / CELL) * CELL;
+/**
+ * A station along an arterial, carried from frame to frame.
+ *
+ * Integrating the distance travelled would drift, and inverting the spline every frame is
+ * more work than it is worth, so each call slides the station to the foot of the
+ * perpendicular from wherever the vehicle is now. That is exact enough over a frame and
+ * self-correcting over a run.
+ */
+class Along {
+  constructor(
+    private frame: (s: number) => { p: Vec2; dir: Vec2 },
+    readonly dir: 1 | -1,
+    public s: number,
+  ) {}
+
+  at(): { p: Vec2; dir: Vec2 } {
+    return this.frame(this.s);
   }
 
-  steer(f: Flyer, look: { yaw: number; pitch: number }, dt: number, traffic?: Traffic): Pilot {
-    const ns = this.axis === "ns";
-    const along = ns ? f.pos[2] : f.pos[0];
-    const across = (ns ? f.pos[0] : f.pos[2]) - this.line;
-    const next = this.dir > 0 ? Math.ceil((along + 1) / CELL) * CELL : Math.floor((along - 1) / CELL) * CELL;
-    const ahead = (next - along) * this.dir;
-    if (next !== this.decided) {
-      this.decided = next;
-      this.turn = ahead > 70 && this.rand() < 0.45 ? { at: next, dir: this.rand() < 0.5 ? 1 : -1 } : null;
-    }
-    if (this.turn && ahead < 14) {
-      // only swing into an east-west corridor high enough to be clear
-      if (ns && f.pos[1] < TURN_MIN_HEIGHT) this.turn = null;
-      else {
-        this.axis = ns ? "ew" : "ns";
-        this.line = this.turn.at;
-        this.dir = this.turn.dir;
-        this.turn = null;
-        this.decided = NaN;
-        return this.steer(f, look, dt, traffic);
-      }
-    }
+  /** The way `by` metres on, after pulling the station into line with (x, z). */
+  ahead(x: number, z: number, by: number): { p: Vec2; dir: Vec2 } {
+    const here = this.at();
+    this.s += (x - here.p[0]) * here.dir[0] + (z - here.p[1]) * here.dir[1];
+    return this.frame(this.s + this.dir * by);
+  }
 
-    // head for a point down the corridor
-    const aimAlong = along + this.dir * 40;
-    const tx = ns ? this.line : aimAlong, tz = ns ? aimAlong : this.line;
-    const heading = Math.atan2(tx - f.pos[0], tz - f.pos[2]);
-    look.yaw = turnToward(look.yaw, heading, 1.4, dt);
-    const boost = !this.turn && ahead > 30 && Math.abs(wrap(heading - look.yaw)) < 0.1;
-
-    // now and then, look for something to shoot a little off the nose
-    this.clock += dt;
-    let pitch = -0.1;
-    let fire = false;
-    if (traffic && this.clock % 14 < 6) {
-      const eye: Vec3 = [f.pos[0], f.pos[1] + 1.7, f.pos[2]];
-      const list = traffic.flyers;
-      let best = 0.15;
-      for (let i = 0; i < list.count; i++) {
-        if (list.keys[i] < 0) continue;
-        const o = i * 10, d = list.data;
-        const vx = d[o] - eye[0], vy = d[o + 1] + 0.8 - eye[1], vz = d[o + 2] - eye[2];
-        const flat = Math.hypot(vx, vz);
-        if (flat < 60 || flat > 320) continue;
-        const off = Math.abs(wrap(Math.atan2(vx, vz) - look.yaw));
-        const elev = Math.atan2(vy, flat);
-        if (off < best && Math.abs(elev) < 0.4) {
-          best = off;
-          pitch = elev;
-          fire = off < 0.05 && Math.abs(elev - look.pitch) < 0.05;
-        }
-      }
-    }
-    look.pitch = turnToward(look.pitch, pitch, 0.8, dt);
-
-    // hold the corridor's height (climb early for an east-west turn; stay up until lined up)
-    let height = FLY_HEIGHT[this.axis];
-    if (this.turn && ns) height = FLY_HEIGHT.ew;
-    if (Math.abs(across) > 4) height = Math.max(height, f.pos[1]);
-    const vy = clamp((height - f.pos[1]) * 0.8, -10, 10);
-    const speed = boost ? BOOST : CRUISE;
-    const climb = clamp((vy - Math.sin(look.pitch) * speed) / CLIMB, -1, 1);
-    return { moveX: 0, moveZ: 1, up: false, down: false, sprint: boost, fire, climb };
+  /** Which way to face to travel along it. */
+  get heading(): number {
+    const d = this.at().dir;
+    return Math.atan2(d[0] * this.dir, d[1] * this.dir);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Driving: down an east-west street (they carry no traffic), giving way to the
-// avenue traffic at each crossing.
+/** Flies an arterial's air corridor. */
+export class PlanFlyPilot {
+  private at: Along;
+  private axis: 0 | 1;
+  private line: number;
 
-const LANE = 3.5; // keeps right: clear of the expressway piers and the parked cars
-const DRIVE_SPEED = 26;
-const CROSSING = STREET / 2 + 2.3; // car centre enters / leaves an avenue this far from its line
+  constructor(x: number, z: number, axis: 0 | 1, dir: 1 | -1) {
+    const { line, s } = nearestArtery(axis, x, z);
+    this.axis = axis;
+    this.line = line;
+    this.at = new Along((t) => arteryFrame(axis, line, t), dir, s);
+  }
 
-export class DrivePilot {
-  readonly line: number;
-  /** Stopped to let avenue traffic pass. */
+  private road(x: number, z: number): number {
+    return roadY(this.axis, this.line, this.at.s, x, z);
+  }
+
+  /** Where to put the flyer, and which way to face it. */
+  get start(): { pos: Vec3; yaw: number } {
+    const f = this.at.at();
+    return { pos: [f.p[0], this.road(f.p[0], f.p[1]) + PLAN_FLY, f.p[1]], yaw: this.at.heading };
+  }
+
+  steer(f: Flyer, look: { yaw: number; pitch: number }, dt: number): Pilot {
+    const aim = this.at.ahead(f.pos[0], f.pos[2], 70);
+    look.yaw = turnToward(look.yaw, Math.atan2(aim.p[0] - f.pos[0], aim.p[1] - f.pos[2]), 1.4, dt);
+    look.pitch = turnToward(look.pitch, -0.05, 0.8, dt);
+    const want = this.road(f.pos[0], f.pos[2]) + PLAN_FLY;
+    const vy = clamp((want - f.pos[1]) * 0.8, -10, 10);
+    const climb = clamp((vy - Math.sin(look.pitch) * CRUISE) / CLIMB, -1, 1);
+    return { moveX: 0, moveZ: 1, up: false, down: false, sprint: false, fire: false, climb };
+  }
+}
+
+/** Drives an arterial, in a lane outside the streamed traffic's. */
+export class PlanDrivePilot {
+  private at: Along;
+  private axis: 0 | 1;
+  private line: number;
+  private stall = 0;
+  private tries = 0;
+  /** How far across the road this attempt is running, after being stopped by something. */
+  private shift = 0;
   waiting = false;
-
-  constructor(z: number, readonly dir: 1 | -1) {
-    this.line = Math.round(z / CELL) * CELL;
+  /** Four shunts without a clear run between them: nothing here works, cut the scene. */
+  get stuck(): boolean {
+    return this.tries >= 4;
   }
 
-  get lane(): number {
-    return this.line + this.dir * LANE;
+  constructor(x: number, z: number, axis: 0 | 1, dir: 1 | -1) {
+    const { line, s } = nearestArtery(axis, x, z);
+    this.axis = axis;
+    this.line = line;
+    this.at = new Along((t) => arteryFrame(axis, line, t), dir, s);
   }
 
-  steer(car: Car, traffic: Traffic): Pilot {
-    const [x, , z] = car.pos;
-    const heading = Math.atan2(this.dir * 18, this.lane - z);
+  private road(x: number, z: number): number {
+    return roadY(this.axis, this.line, this.at.s, x, z);
+  }
+
+  /** The point in this pilot's lane abreast of a frame on the road. */
+  private lane(f: { p: Vec2; dir: Vec2 }): Vec2 {
+    // traffic running with the station keeps the negative side, so this sits beyond it
+    const off = -PLAN_LANE * this.at.dir + this.shift;
+    return [f.p[0] - f.dir[1] * off, f.p[1] + f.dir[0] * off];
+  }
+
+  get start(): { pos: Vec3; yaw: number } {
+    const [x, z] = this.lane(this.at.at());
+    return { pos: [x, this.road(x, z) + 0.4, z], yaw: this.at.heading };
+  }
+
+  steer(car: Car, dt: number): Pilot {
+    const [tx, tz] = this.lane(this.at.ahead(car.pos[0], car.pos[2], 24));
+    const heading = Math.atan2(tx - car.pos[0], tz - car.pos[2]);
     const steer = clamp(-wrap(heading - car.yaw) * 2.5, -1, 1);
 
-    // the next avenue whose far side is still ahead
-    const next = this.dir > 0
-      ? Math.ceil((x - CROSSING) / CELL) * CELL
-      : Math.floor((x + CROSSING) / CELL) * CELL;
-    const d = (next - x) * this.dir;
-    let want = DRIVE_SPEED;
-    this.waiting = d - CROSSING > 0 && d - CROSSING < 70 && this.blocked(traffic, x, next, car.speed);
-    if (this.waiting) want = Math.min(want, Math.sqrt(2 * 9 * Math.max(0, d - CROSSING - 3)));
-    return { moveX: steer, moveZ: clamp((want - car.speed) * 0.4, -1, 1), up: false, down: false, sprint: false, fire: false };
+    // Shunting out of it. A carriageway here is not always something a car can drive the
+    // whole width of — the ground under it is cut into terraces, and a riser taller than a
+    // kerb stops a car dead. Held on the throttle it would sit against that riser for the
+    // rest of the scene, which is what it did. So: back off, take a different line across the
+    // road, and come at it again; and if that keeps failing, say so and let the director cut.
+    if (car.speed > 12) this.tries = 0; // a clear run: whatever stopped it is behind it
+    this.stall = car.speed < 1.5 ? this.stall + dt : 0;
+    if (this.stall > 0.5) {
+      if (this.stall > 2.2) {
+        this.stall = 0;
+        this.tries++;
+        this.shift = this.tries % 2 === 0 ? 0 : (this.tries % 4 < 2 ? -4 : 4);
+      }
+      return { moveX: -steer, moveZ: -1, up: false, down: false, sprint: false, fire: false };
+    }
+    return {
+      moveX: steer,
+      moveZ: clamp((PLAN_DRIVE - car.speed) * 0.4, -1, 1),
+      up: false, down: false, sprint: false, fire: false,
+    };
+  }
+}
+
+/** Runs a river, keeping to one side of the channel. */
+export class SailPilot {
+  private at: Along;
+  private line: number;
+
+  /** The river nearest (x, z), or null where there is none to sail. */
+  static near(x: number, z: number, dir: 1 | -1): SailPilot | null {
+    const hit = riverNear(x, z, 900);
+    return hit ? new SailPilot(hit.line, z, dir) : null;
   }
 
-  /** Would a car on the avenue at `lineX` be in our lane while we pass over its lane? */
-  private blocked(traffic: Traffic, x: number, lineX: number, speed: number): boolean {
-    const v = Math.max(0, speed);
-    const time = (dist: number) => (v > 20 ? dist / v : (-v + Math.sqrt(v * v + 2 * 11 * Math.max(0, dist))) / 11);
-    const lane = this.lane;
-    // half a car (or van) length plus half our width, and a little room
-    for (const [list, reach] of [[traffic.cars, 3.6], [traffic.vans, 4.2]] as const) {
-      for (let i = 0; i < list.count; i++) {
-        const o = i * 10, dat = list.data;
-        if (list.keys[i] < 0 || Math.abs(dat[o] - lineX) > 8 || dat[o + 1] > 3) continue;
-        // our car overlaps that lane while its centre is within 3.4 m of it
-        const d = (dat[o] - x) * this.dir;
-        const t0 = time(d - 3.4) - 0.35, t1 = time(d + 3.4) + 0.35;
-        const cz = dat[o + 2];
-        const vz = traffic.velocityOf(list.keys[i])[2];
-        if (vz === 0) {
-          if (Math.abs(cz - lane) < reach) return true;
-          continue;
-        }
-        const a = (lane - reach - cz) / vz, b = (lane + reach - cz) / vz;
-        if (Math.max(a, b) > t0 && Math.min(a, b) < t1) return true;
-      }
-    }
-    return false;
+  private constructor(line: number, s: number, dir: 1 | -1) {
+    this.line = line;
+    this.at = new Along((t) => riverFrame(line, t), dir, s);
+  }
+
+  /** The point in this boat's lane abreast of a frame on the water. */
+  private lane(f: { p: Vec2; dir: Vec2 }): Vec2 {
+    const off = -RIVER_HALF * 0.3 * this.at.dir;
+    return [f.p[0] - f.dir[1] * off, f.p[1] + f.dir[0] * off];
+  }
+
+  get start(): { pos: Vec3; yaw: number } {
+    const [x, z] = this.lane(this.at.at());
+    return { pos: [x, waterLevel(this.line) + 1.2, z], yaw: this.at.heading };
+  }
+
+  steer(b: Boat): Pilot {
+    const [tx, tz] = this.lane(this.at.ahead(b.pos[0], b.pos[2], 55));
+    const heading = Math.atan2(tx - b.pos[0], tz - b.pos[2]);
+    // the helm bites less the slower she goes, so this leans on it harder than a car's
+    return {
+      moveX: clamp(wrap(heading - b.yaw) * 1.8, -1, 1),
+      moveZ: 1,
+      up: false, down: false, sprint: false, fire: false,
+    };
   }
 }
 
 // ---------------------------------------------------------------------------
 // Director
 
-type Scene = "fly" | "run" | "drive";
+type Scene = "fly" | "run" | "drive" | "sail";
 const SCENES: { kind: Scene; seconds: number }[] = [
   { kind: "fly", seconds: 36 },
   { kind: "run", seconds: 30 },
   { kind: "drive", seconds: 26 },
+  { kind: "sail", seconds: 24 },
 ];
 const FADE_OUT = 0.8;
 const FADE_IN = 1.5;
@@ -420,8 +474,9 @@ export class Demo {
   private time = 0;
   private left = 0;
   private run: RunPilot | null = null;
-  private fly: FlyPilot | null = null;
-  private drive: DrivePilot | null = null;
+  private fly: PlanFlyPilot | null = null;
+  private drive: PlanDrivePilot | null = null;
+  private sail: SailPilot | null = null;
   private check = { time: 0, pos: [0, 0, 0] as Vec3 };
   private saved = { kills: 0, carKills: 0, cycle: true };
 
@@ -453,12 +508,20 @@ export class Demo {
     const { rides, player: pl } = this;
     const [fx, , fz] = rides.focus;
     rides.leave();
-    this.index = (this.index + 1) % SCENES.length;
+    // A river scene needs a river, and not every block has one within reach. Where there is
+    // none, the scene is passed over rather than cut to and abandoned.
+    let sail: SailPilot | null = null;
+    for (let tries = 0; tries < SCENES.length; tries++) {
+      this.index = (this.index + 1) % SCENES.length;
+      if (SCENES[this.index].kind !== "sail") break;
+      sail = SailPilot.near(fx, fz, Math.random() < 0.5 ? 1 : -1);
+      if (sail) break;
+    }
     const scene = SCENES[this.index];
     this.kind = scene.kind;
     this.time = 0;
     this.left = scene.seconds;
-    this.run = this.fly = this.drive = null;
+    this.run = this.fly = this.drive = this.sail = null;
     pl.vel = [0, 0, 0];
     if (scene.kind === "run") {
       this.run = new RunPilot(Math.floor(fx / CELL), Math.floor(fz / CELL), rides.colliders);
@@ -466,22 +529,31 @@ export class Demo {
       pl.yaw = Math.PI / 2;
       pl.pitch = -0.06;
     } else if (scene.kind === "fly") {
-      const axis = Math.random() < 0.6 ? "ns" : "ew";
       const dir = Math.random() < 0.5 ? 1 : -1;
-      const line = Math.round((axis === "ns" ? fx : fz) / CELL) * CELL;
-      pl.pos = axis === "ns" ? [line, FLY_HEIGHT.ns, fz] : [fx, FLY_HEIGHT.ew, line];
-      pl.yaw = axis === "ns" ? (dir > 0 ? 0 : Math.PI) : dir * Math.PI / 2;
-      pl.pitch = -0.1;
-      this.fly = new FlyPilot(pl.pos[0], pl.pos[2], axis, dir);
+      const pilot = new PlanFlyPilot(fx, fz, Math.random() < 0.5 ? 1 : 0, dir);
+      const { pos, yaw } = pilot.start;
+      pl.pos = pos;
+      pl.yaw = yaw;
+      pl.pitch = -0.05;
+      this.fly = pilot;
       const f = rides.spawnFlyer(pick(FLYER_PALETTE));
       f.grounded = false;
-      f.vel = axis === "ns" ? [0, 0, dir * CRUISE] : [dir * CRUISE, 0, 0];
+      f.vel = [Math.sin(pl.yaw) * CRUISE, 0, Math.cos(pl.yaw) * CRUISE];
+    } else if (scene.kind === "sail" && sail) {
+      const { pos, yaw } = sail.start;
+      pl.pos = pos;
+      pl.yaw = yaw;
+      pl.pitch = 0;
+      this.sail = sail;
+      rides.spawnBoat();
     } else {
       const dir = Math.random() < 0.5 ? 1 : -1;
-      this.drive = new DrivePilot(fz, dir);
-      pl.pos = [Math.floor(fx / CELL) * CELL + CELL / 2, 0, this.drive.lane];
-      pl.yaw = dir * Math.PI / 2;
+      const pilot = new PlanDrivePilot(fx, fz, Math.random() < 0.5 ? 1 : 0, dir);
+      const { pos, yaw } = pilot.start;
+      pl.pos = pos;
+      pl.yaw = yaw;
       pl.pitch = 0;
+      this.drive = pilot;
       const car = rides.spawnCar(pick(PAINT_COLORS));
       car.speed = 16;
     }
@@ -490,7 +562,7 @@ export class Demo {
   }
 
   /** Drive this frame's controls (and the look direction) from the autopilot. */
-  update(dt: number, c: Controls, traffic: Traffic): void {
+  update(dt: number, c: Controls): void {
     this.time += dt;
     this.left -= dt;
     if (this.left <= 0) this.cut();
@@ -503,10 +575,13 @@ export class Demo {
       pilot = this.run.steer(pl, dt);
       failed = this.run.fell(pl);
     } else if (this.fly && rides.flyer) {
-      pilot = this.fly.steer(rides.flyer, pl, dt, traffic);
+      pilot = this.fly.steer(rides.flyer, pl, dt);
     } else if (this.drive && rides.car) {
-      pilot = this.drive.steer(rides.car, traffic);
+      pilot = this.drive.steer(rides.car, dt);
+      failed = this.drive.stuck;
       if (this.drive.waiting) this.check.time = 0;
+    } else if (this.sail && rides.boat) {
+      pilot = this.sail.steer(rides.boat);
     }
     Object.assign(c, pilot ?? { moveX: 0, moveZ: 0, up: false, down: false, sprint: false, fire: false });
     c.mouseDX = c.mouseDY = 0;

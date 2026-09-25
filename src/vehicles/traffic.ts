@@ -2,14 +2,14 @@
 // function of its slot index and time, so nothing needs simulating or saving and
 // vehicles in the same lane never overlap.
 //
-// Cars drive on the north-south avenues (x = i * CELL) and on both kinds of elevated
-// expressway. East-west streets only have parked cars, so ground traffic never
-// crosses. Flyers use air corridors above the streets, at altitudes that clear
+// Cars drive the arterials of the road network, following each one's spline rather than a
+// straight line. Flyers use air corridors over the same arterials, at altitudes that clear
 // every bridge; north-south and east-west corridors sit at different heights.
 
-import { CELL } from "../city/generate";
-import { hashInt, worldSeed, type Vec3 } from "../math";
-import { PAINT_COLORS } from "./models";
+import { arteryFrame, arteryLines, RIVER_HALF, riverFrame, riverLines, waterLevel } from "../city/network";
+import { hasRail, railY, roadY } from "../city/plan";
+import { worldSeed, type Vec3 } from "../math";
+import { CARRIAGE, PAINT_COLORS } from "./models";
 
 export const INSTANCE_LAYOUT = [3, 3, 4]; // position, rotation (yaw, pitch, roll), colour (rgb, lights)
 export const INSTANCE_STRIDE = 10;
@@ -73,17 +73,16 @@ interface Lane {
 }
 
 // Cars moving +z keep to the right, which is -x.
+/** Working hulls: rust, lead and dirty white, not the paint the cars come in. */
+const HULLS: [number, number, number][] = [
+  [0.42, 0.44, 0.46], [0.35, 0.33, 0.31], [0.48, 0.30, 0.22], [0.30, 0.36, 0.38], [0.56, 0.55, 0.52],
+];
+
 const AVENUE_LANES: Lane[] = [
   { offset: -2.5, dir: 1, speed: 15, spacing: 34, density: 0.55, y: 0, bob: 0 },
   { offset: -6.0, dir: 1, speed: 10, spacing: 26, density: 0.5, y: 0, bob: 0 },
   { offset: 2.5, dir: -1, speed: 15, spacing: 34, density: 0.55, y: 0, bob: 0 },
   { offset: 6.0, dir: -1, speed: 10, spacing: 26, density: 0.5, y: 0, bob: 0 },
-];
-const EXPRESS_LANES = (y: number): Lane[] => [
-  { offset: -2.0, dir: 1, speed: 30, spacing: 55, density: 0.5, y, bob: 0 },
-  { offset: -4.6, dir: 1, speed: 23, spacing: 40, density: 0.5, y, bob: 0 },
-  { offset: 2.0, dir: -1, speed: 30, spacing: 55, density: 0.5, y, bob: 0 },
-  { offset: 4.6, dir: -1, speed: 23, spacing: 40, density: 0.5, y, bob: 0 },
 ];
 const AIR_LANES = (y: number, speed: number): Lane[] => [
   { offset: -3.5, dir: 1, speed, spacing: 75, density: 0.35, y, bob: 1.6 },
@@ -91,8 +90,6 @@ const AIR_LANES = (y: number, speed: number): Lane[] => [
 ];
 const AIR_NS = [...AIR_LANES(48, 24), ...AIR_LANES(92, 30)];
 const AIR_EW = [...AIR_LANES(68, 26), ...AIR_LANES(118, 34)];
-const EXPRESS_NS = EXPRESS_LANES(8.1);
-const EXPRESS_EW = EXPRESS_LANES(11.4);
 
 const FLYER_COLORS = [
   [0.85, 0.84, 0.8],
@@ -122,55 +119,114 @@ export class Traffic {
   cars = new InstanceList(512);
   vans = new InstanceList(128);
   flyers = new InstanceList(256);
+  boats = new InstanceList(64);
+  trains = new InstanceList(64);
   /** Slots whose vehicle was taken or destroyed; they stay empty. */
   readonly removed = new Set<number>();
   private velocities = new Map<number, Vec3>();
+  // The height each car is actually shown at, eased toward the road under it. Two carriageways
+  // crossing on a slope cannot both be flat and agree, so a junction can still have a step in
+  // it; a car reading the surface straight off jumped that step in one frame. Easing is what
+  // the car the player drives has always done against the same steps.
+  private shown = new Map<number, number>();
+  private lastTime = 0;
+  private easeStep = 1;
   private readonly seed = worldSeed() ^ 77;
-  private expressCache = new Map<string, boolean>();
-
-  private hasExpress(axis: "ns" | "ew", line: number): boolean {
-    const k = `${axis}${line}`;
-    let v = this.expressCache.get(k);
-    if (v === undefined) {
-      v = axis === "ns" ? hashInt(line, 7) % 5 === 0 : hashInt(line, 8) % 5 === 0;
-      this.expressCache.set(k, v);
-    }
-    return v;
-  }
 
   update(time: number, eye: Vec3, fwd: Vec3): void {
+    // how far the shown heights catch up this frame; time can jump when a tab comes back
+    this.easeStep = Math.max(0, Math.min(1, (time - this.lastTime) * 10));
+    this.lastTime = time;
+    if (this.shown.size > 4096) this.shown.clear();
     this.cars.clear();
     this.vans.clear();
     this.flyers.clear();
+    this.boats.clear();
+    this.trains.clear();
     this.velocities.clear();
     const ahead = (x: number, y: number, z: number, margin: number) =>
       (x - eye[0]) * fwd[0] + (y - eye[1]) * fwd[1] + (z - eye[2]) * fwd[2] > -margin;
 
-    // lines of both orientations near the viewer
-    const span = (r: number, c: number) => [Math.floor((c - r) / CELL), Math.ceil((c + r) / CELL)];
-    const [x0, x1] = span(AIR_RADIUS, eye[0]);
-    const [z0, z1] = span(AIR_RADIUS, eye[2]);
-
-    for (let i = x0; i <= x1; i++) {
-      const lineX = i * CELL;
-      const near = Math.abs(lineX - eye[0]) < CAR_RADIUS;
-      if (near) {
-        this.stream(time, "ns", i, lineX, eye[2], AVENUE_LANES, CAR_RADIUS, ahead, 0);
-        if (this.hasExpress("ns", i)) this.stream(time, "ns", i, lineX, eye[2], EXPRESS_NS, CAR_RADIUS, ahead, 1);
-      }
-      this.stream(time, "ns", i, lineX, eye[2], AIR_NS, AIR_RADIUS, ahead, 2);
+    // On the road network there are no straight lines to drive down: the roads that carry
+    // traffic are the arterials, and a car's place on one is a point along its spline.
+    for (const line of arteryLines(eye[0], AIR_RADIUS)) {
+      this.stream(time, "ns", line, 0, eye[2], AVENUE_LANES, CAR_RADIUS, ahead, 0, 1);
+      this.stream(time, "ns", line, 0, eye[2], AIR_NS, AIR_RADIUS, ahead, 2, 1);
     }
-    for (let j = z0; j <= z1; j++) {
-      const lineZ = j * CELL;
-      if (Math.abs(lineZ - eye[2]) < CAR_RADIUS && this.hasExpress("ew", j))
-        this.stream(time, "ew", j, lineZ, eye[0], EXPRESS_EW, CAR_RADIUS, ahead, 3);
-      this.stream(time, "ew", j, lineZ, eye[0], AIR_EW, AIR_RADIUS, ahead, 4);
+    for (const line of arteryLines(eye[2], AIR_RADIUS)) {
+      this.stream(time, "ew", line, 0, eye[0], AVENUE_LANES, CAR_RADIUS, ahead, 3, 0);
+      this.stream(time, "ew", line, 0, eye[0], AIR_EW, AIR_RADIUS, ahead, 4, 0);
+    }
+    this.railways(time, eye, ahead);
+    this.rivers(time, eye, ahead);
+  }
+
+  /**
+   * Trains on the elevated railways: a few carriages each, one track each way, running along
+   * the arterial the viaduct follows at the height of its deck.
+   */
+  private railways(time: number, eye: Vec3, ahead: (x: number, y: number, z: number, m: number) => boolean): void {
+    const SPACING = 1300, SPEED = 26, CARS = 5, R = 900;
+    for (const axis of [0, 1] as const) {
+      const across = axis === 0 ? eye[2] : eye[0], centre = axis === 0 ? eye[0] : eye[2];
+      for (const line of arteryLines(across, R)) {
+        if (!hasRail(axis, line)) continue;
+        for (const dir of [1, -1] as const) {
+          const shift = dir * SPEED * time;
+          for (let k = Math.floor((centre - R - shift) / SPACING) - 1; k <= Math.ceil((centre + R - shift) / SPACING); k++) {
+            const h = h32(line, 90 + axis * 2 + (dir > 0 ? 0 : 1), k, this.seed);
+            if ((h & 0xff) / 256 > 0.75) continue;
+            const head = k * SPACING + ((h >>> 8) & 0xff) / 255 * SPACING * 0.4 + shift;
+            const color = PAINT_COLORS[(h >>> 16) % PAINT_COLORS.length];
+            for (let c = 0; c < CARS; c++) {
+              const s = head - dir * c * CARRIAGE;
+              if (Math.abs(s - centre) > R) continue;
+              const { p, dir: d } = arteryFrame(axis, line, s);
+              // keep right: each direction has its own pair of rails
+              const off = dir > 0 ? 1.85 : -1.85;
+              const x = p[0] - d[1] * off, z = p[1] + d[0] * off;
+              const y = railY(axis, line, s) + 0.16;
+              if (!ahead(x, y, z, 60)) continue;
+              this.trains.push(x, y, z, Math.atan2(d[0] * dir, d[1] * dir), 0, 0, color);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Craft working the rivers: one lane each way, each keeping to its own side of the channel.
+   *
+   * Laid out like the trains rather than like the road traffic, because a river has no lanes
+   * of its own to stream along — just a centreline and two banks. They are slow enough that
+   * the wake would be the only thing moving on the water otherwise.
+   */
+  private rivers(time: number, eye: Vec3, ahead: (x: number, y: number, z: number, m: number) => boolean): void {
+    const SPACING = 540, SPEED = 6.5, R = 820, LANE = RIVER_HALF * 0.3;
+    for (const line of riverLines(eye[0], R)) {
+      const y = waterLevel(line) + 1.2;
+      for (const dir of [1, -1] as const) {
+        const shift = dir * SPEED * time;
+        for (let k = Math.floor((eye[2] - R - shift) / SPACING) - 1; k <= Math.ceil((eye[2] + R - shift) / SPACING); k++) {
+          const h = h32(line, 140 + (dir > 0 ? 0 : 1), k, this.seed);
+          if ((h & 0xff) / 256 > 0.6) continue;
+          const s = k * SPACING + ((h >>> 8) & 0xff) / 255 * SPACING * 0.6 + shift;
+          if (Math.abs(s - eye[2]) > R) continue;
+          const { p, dir: d } = riverFrame(line, s);
+          // keep to the right going down, to the left coming back
+          const off = dir > 0 ? -LANE : LANE;
+          const x = p[0] - d[1] * off, z = p[1] + d[0] * off;
+          if (!ahead(x, y, z, 60)) continue;
+          this.boats.push(x, y, z, Math.atan2(d[0] * dir, d[1] * dir), 0, 0, HULLS[(h >>> 16) % HULLS.length]);
+        }
+      }
     }
   }
 
   private stream(
     time: number, axis: "ns" | "ew", line: number, lineCoord: number, center: number, lanes: Lane[], radius: number,
-    ahead: (x: number, y: number, z: number, m: number) => boolean, kind: number,
+    ahead: (x: number, y: number, z: number, m: number) => boolean, kind: number, curve?: 0 | 1,
   ): void {
     const air = kind === 2 || kind === 4;
     lanes.forEach((lane, li) => {
@@ -185,17 +241,51 @@ export class Traffic {
         const jitter = ((h >>> 16) & 0xff) / 255 * lane.spacing * 0.35;
         const s = k * lane.spacing + jitter + shift;
         if (Math.abs(s - center) > radius) continue;
-        // offsets are written for north-south lines; keeping right flips on east-west ones
-        const across = lineCoord + (axis === "ns" ? lane.offset : -lane.offset);
-        const x = axis === "ns" ? across : s;
-        const z = axis === "ns" ? s : across;
+        let x: number, z: number, yaw: number, vx: number, vz: number;
+        if (curve !== undefined) {
+          // the station runs along the road's own spline, and the lane sits off to one side of it
+          const { p, dir } = arteryFrame(curve, line, s);
+          const back = lane.dir > 0 ? 1 : -1;
+          x = p[0] - dir[1] * lane.offset;
+          z = p[1] + dir[0] * lane.offset;
+          yaw = Math.atan2(dir[0] * back, dir[1] * back);
+          vx = dir[0] * lane.dir * lane.speed;
+          vz = dir[1] * lane.dir * lane.speed;
+        } else {
+          // offsets are written for north-south lines; keeping right flips on east-west ones
+          const across = lineCoord + (axis === "ns" ? lane.offset : -lane.offset);
+          x = axis === "ns" ? across : s;
+          z = axis === "ns" ? s : across;
+          yaw = axis === "ns" ? (lane.dir > 0 ? 0 : Math.PI) : lane.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+          vx = axis === "ns" ? 0 : lane.dir * lane.speed;
+          vz = axis === "ns" ? lane.dir * lane.speed : 0;
+        }
         const bob = lane.bob ? Math.sin(time * 0.6 + k * 1.7) * lane.bob : 0;
-        const y = lane.y + bob;
-        if (!ahead(x, y, z, 40)) continue;
-        // yaw faces the direction of travel: +z is 0, +x is +pi/2
-        const yaw = axis === "ns" ? (lane.dir > 0 ? 0 : Math.PI) : lane.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
-        const v = lane.dir * lane.speed;
-        this.velocities.set(key, axis === "ns" ? [0, 0, v] : [v, 0, 0]);
+        // on the road network the ground is not a plane, and where the road is on a bridge the
+        // surface is the deck rather than the riverbed forty metres beneath it
+        // the ground is within a few tens of metres of zero, so the cull can go first and only
+        // the cars actually in view pay for working out the road under them
+        if (!ahead(x, lane.y + bob, z, 80)) continue;
+        let ground = 0;
+        if (curve !== undefined) {
+          // Worked out afresh every frame. It used to be kept until the car had gone a whole
+          // metre, which cost nothing while the answer was the flat tread the car stood on —
+          // it did not change within a metre anyway. It is a continuous line down the slope
+          // now, so holding it for a metre and then catching up is a hop several times a
+          // second: the car ran straight and jumped, straight and jumped. The lookup is a
+          // microsecond and it is only ever asked for cars already in view.
+          const road = roadY(curve, line, s, x, z);
+          const was = this.shown.get(key);
+          // caught up over about a tenth of a second, and taken as read the first time a car
+          // is seen so it does not arrive climbing out of the ground
+          const y = was === undefined ? road : was + (road - was) * this.easeStep;
+          this.shown.set(key, y);
+          // the decks stand up to sixty metres over the street, and flyers at the grid city's
+          // heights were flying through them
+          ground = air ? y + 45 : y;
+        }
+        const y = lane.y + bob + ground;
+        this.velocities.set(key, [vx, 0, vz]);
         if (air) {
           const color = FLYER_COLORS[h % FLYER_COLORS.length];
           this.flyers.push(x, y, z, yaw, 0.06, Math.sin(time * 0.4 + k) * 0.04, color, 1, key);

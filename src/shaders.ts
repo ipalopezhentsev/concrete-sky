@@ -1,10 +1,11 @@
 // GLSL ES 3.00 sources.
 
-import { CELL, LAMP_HEIGHT, STREET, lampHeadsLocal } from "./city/generate";
-import { YAW_STEP } from "./city/mesh";
+import { CELL } from "./city/generate";
+import { PITCH_GLSL, YAW_STEP } from "./city/mesh";
 import { Layer, NOISE_SIZE } from "./textures";
 
 const YAW_STEP_GLSL = YAW_STEP.toFixed(9);
+const PITCH_BASE_GLSL = PITCH_GLSL.base.toFixed(1);
 
 const HEADER = `#version 300 es
 precision highp float;
@@ -31,6 +32,7 @@ uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uFogTint;
 uniform float uMist;
+uniform float uGroundRef; // street level near the camera (0 on the grid city)
 uniform float uNight;
 uniform float uCloudDither; // amplitude of the cloud-shadow dither (0 disables it)
 uniform float uWet;
@@ -168,10 +170,10 @@ float cloudShadow(vec3 p) {
 
 // Exponential fog plus a dense, low-lying mist that pools in the street canyons.
 vec3 applyFog(vec3 color, vec3 p, float dist, vec3 viewDir) {
-  float hAvg = max(0.5 * (uCamPos.y + p.y), 0.0);
+  float hAvg = max(0.5 * (uCamPos.y + p.y) - uGroundRef, 0.0);
   float fog = 1.0 - exp(-dist * uFogDensity * exp(-hAvg / 260.0));
   const float H = 9.0;
-  float y0 = max(uCamPos.y, 0.0), y1 = max(p.y, 0.0);
+  float y0 = max(uCamPos.y - uGroundRef, 0.0), y1 = max(p.y - uGroundRef, 0.0);
   float dy = y1 - y0;
   float integral = abs(dy) < 0.05 ? exp(-y0 / H) : H * (exp(-y0 / H) - exp(-y1 / H)) / dy;
   float mist = 1.0 - exp(-dist * uMist * integral);
@@ -211,12 +213,21 @@ const vec3 FACE_NORMALS[6] = vec3[6](
   vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0),
   vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0), vec3(0.0, -1.0, 0.0));
 
-// aFace holds the face index plus the box's turn about its own vertical axis (see
-// YAW_STEPS in mesh.ts) times eight. The corners were already turned on the CPU by
-// exactly this angle, so rebuilding it here keeps the normal on the face it belongs to.
+// aFace holds the face index, plus the box's turn about its own vertical axis (see
+// YAW_STEPS in mesh.ts) times eight, plus — on the top face of a tilted box, and nowhere
+// else — the pitch of that tilt times PITCH_BASE. The corners were already turned on the
+// CPU by exactly this angle, so rebuilding it here keeps the normal on the face it belongs
+// to; the pitch runs the other way, leaning the normal back off a rising ramp.
 vec3 faceNormal(float packed) {
-  float turn = floor(packed * 0.125);
-  vec3 n = FACE_NORMALS[int(packed - turn * 8.0)];
+  float pitch = floor(packed / ${PITCH_BASE_GLSL});
+  float rest = packed - pitch * ${PITCH_BASE_GLSL};
+  float turn = floor(rest * 0.125);
+  vec3 n = FACE_NORMALS[int(rest - turn * 8.0)];
+  if (pitch > 0.5) {
+    float a = (pitch - ${(PITCH_GLSL.max + 1).toFixed(1)}) * ${PITCH_GLSL.step.toFixed(6)};
+    float c = cos(a), s = sin(a);
+    n = vec3(c * n.x - s * n.y, s * n.x + c * n.y, n.z);
+  }
   if (turn == 0.0) return n;
   float a = turn * ${YAW_STEP_GLSL};
   float c = cos(a), s = sin(a);
@@ -314,13 +325,8 @@ export const SHADOW_FS = HEADER + /* glsl */ `
 void main() {}
 `;
 
-const lamps = lampHeadsLocal().map(([x, z]) => `vec2(${x.toFixed(3)}, ${z.toFixed(3)})`).join(", ");
-
 export const CITY_FS = HEADER + /* glsl */ `
 const float CELL = ${CELL.toFixed(1)};
-const float STREET = ${STREET.toFixed(1)};
-const float LAMP_H = ${LAMP_HEIGHT.toFixed(2)};
-const vec2 LAMPS[8] = vec2[8](${lamps});
 ` + ATMOSPHERE + /* glsl */ `
 in vec3 vPos;
 in vec3 vNrm;
@@ -334,6 +340,7 @@ uniform sampler2DArray uNormal;
 uniform sampler2DShadow uShadow;
 uniform mat4 uLightVP;
 uniform float uShadowTexel;
+uniform float uShadowPixel; // shadow-map UV one screen pixel covers, per metre of distance
 uniform sampler2D uCloudTex;
 uniform vec2 uCloudCenter;
 uniform float uCloudExtent;
@@ -360,22 +367,28 @@ const vec3 LAMP_COL = vec3(1.0, 0.72, 0.42);
 const vec3 GLOW_COL = vec3(0.72, 0.84, 1.0);
 const float FLOOR_H = 3.4;
 
-// Four taps soften the shadow edge up close; further out one tap covers more
-// than a pixel anyway, so the extra three are spent on nothing.
-float shadowAt(vec3 p, vec3 n, bool cheap) {
+/**
+ * Sun shadow at a point, filtered to about a pixel and a half across.
+ *
+ * A shadow texel is nine centimetres and a pixel of road a hundred metres out is a third of
+ * a metre, so four taps spread by a fixed count of texels leave an edge that is hard to
+ * within a pixel — the staircase down the side of every shadow on the road, which no amount
+ * of multisampling touches because it is not a geometry edge. Widening the kernel with the
+ * pixel's own footprint keeps the penumbra a constant width on screen instead.
+ *
+ * The taps stay at least a texel apart, so nothing close up gets softer than it was, and
+ * stop at eight, past which the sun would stop reading as a point source at all.
+ */
+float shadowAt(vec3 p, vec3 n, float dist) {
+  float r = clamp(dist * uShadowPixel * 0.6, uShadowTexel, uShadowTexel * 8.0);
   vec4 lp = uLightVP * vec4(p + n * 0.12, 1.0);
   vec3 s = lp.xyz / lp.w * 0.5 + 0.5;
   if (s.x <= 0.0 || s.x >= 1.0 || s.y <= 0.0 || s.y >= 1.0 || s.z >= 1.0) return 1.0;
-  float sum;
-  if (cheap) {
-    sum = texture(uShadow, vec3(s.xy, s.z - 0.00015));
-  } else {
-    sum = 0.0;
-    const vec2 taps[4] = vec2[4](vec2(-0.4, -1.2), vec2(1.2, -0.4), vec2(0.4, 1.2), vec2(-1.2, 0.4));
-    for (int i = 0; i < 4; i++)
-      sum += texture(uShadow, vec3(s.xy + taps[i] * uShadowTexel, s.z - 0.00015));
-    sum *= 0.25;
-  }
+  float sum = 0.0;
+  const vec2 taps[4] = vec2[4](vec2(-0.4, -1.2), vec2(1.2, -0.4), vec2(0.4, 1.2), vec2(-1.2, 0.4));
+  for (int i = 0; i < 4; i++)
+    sum += texture(uShadow, vec3(s.xy + taps[i] * r, s.z - 0.00015));
+  sum *= 0.25;
   float edge = max(abs(s.x - 0.5), abs(s.y - 0.5));
   return mix(sum, 1.0, smoothstep(0.42, 0.5, edge));
 }
@@ -416,16 +429,16 @@ vec3 bitangentFor(vec3 n) {
   return vec3(0.0, 1.0, 0.0);
 }
 
+uniform vec3 uLampPos[24]; // the nearest street lamp heads
+
 vec3 lampLight(vec3 p, vec3 n) {
-  if (uNight < 0.01 || p.y > 14.0) return vec3(0.0);
-  vec2 local = p.xz - CELL * floor(p.xz / CELL);
+  if (uNight < 0.01) return vec3(0.0);
   vec3 acc = vec3(0.0);
-  for (int i = 0; i < 8; i++) {
-    vec2 d = LAMPS[i] - local;
-    d -= CELL * floor(d / CELL + 0.5);
-    vec3 toL = vec3(d.x, LAMP_H - p.y, d.y);
+  for (int i = 0; i < 24; i++) {
+    vec3 toL = uLampPos[i] - p;
     float dist2 = dot(toL, toL);
-    vec3 l = toL / sqrt(dist2);
+    if (dist2 > 900.0) continue;
+    vec3 l = toL * inversesqrt(dist2);
     float cone = smoothstep(0.35, 0.8, l.y);
     acc += max(dot(n, l), 0.0) * cone * 60.0 / (dist2 + 4.0);
   }
@@ -440,36 +453,6 @@ float padPaint(vec2 uv, vec2 size, vec2 fw) {
   float bars = step(abs(q.y), 0.95) * (1.0 - smoothstep(0.1 - w, 0.1 + w, abs(abs(q.x) - 0.65)));
   float cross_ = step(abs(q.x), 0.65) * (1.0 - smoothstep(0.08 - w, 0.08 + w, abs(q.y)));
   return clamp(ring + border + bars + cross_, 0.0, 1.0);
-}
-
-float roadPaint(vec3 p, vec2 fw) {
-  vec2 g = p.xz - CELL * floor(p.xz / CELL + 0.5);
-  vec2 a = abs(g);
-  float half_ = STREET * 0.5;
-  float inX = 1.0 - step(half_, a.x);
-  float inZ = 1.0 - step(half_, a.y);
-  float paint = 0.0;
-  float dashZ = smoothstep(0.5 - fw.y / 6.0, 0.5 + fw.y / 6.0, 1.0 - fract(p.z / 6.0));
-  float dashX = smoothstep(0.5 - fw.x / 6.0, 0.5 + fw.x / 6.0, 1.0 - fract(p.x / 6.0));
-  float lineW = 0.09;
-  if (inX > 0.5 && inZ < 0.5) {
-    paint += (1.0 - smoothstep(lineW - fw.x, lineW + fw.x, a.x)) * dashZ;
-    paint += 1.0 - smoothstep(0.07 - fw.x, 0.07 + fw.x, abs(a.x - (half_ - 1.0)));
-    if (a.y > half_ + 0.6 && a.y < half_ + 3.6 && a.x < half_ - 1.4) {
-      float s = fract(g.x / 1.1);
-      paint = smoothstep(0.5 + fw.x, 0.5 - fw.x, s) * smoothstep(0.0, fw.x + 0.01, s);
-    }
-  }
-  if (inZ > 0.5 && inX < 0.5) {
-    paint += (1.0 - smoothstep(lineW - fw.y, lineW + fw.y, a.y)) * dashX;
-    paint += 1.0 - smoothstep(0.07 - fw.y, 0.07 + fw.y, abs(a.y - (half_ - 1.0)));
-    if (a.x > half_ + 0.6 && a.x < half_ + 3.6 && a.y < half_ - 1.4) {
-      float s = fract(g.y / 1.1);
-      paint = smoothstep(0.5 + fw.y, 0.5 - fw.y, s) * smoothstep(0.0, fw.y + 0.01, s);
-    }
-  }
-  float wear = smoothstep(0.35, 0.6, texture(uNoise, p.xz * 0.05).r * 0.6 + texture(uNoise, p.xz * 0.4).b * 0.4);
-  return clamp(paint, 0.0, 1.0) * wear;
 }
 
 void main() {
@@ -507,7 +490,10 @@ void main() {
     ? vec2(0.0)
     : floor(vec2(hash12(vec2(seed * 91.7, 3.1)), hash12(vec2(seed * 17.3, 7.9))) * 4.0) * 0.25;
   // decks use world-anchored UVs so adjacent slabs line up
-  vec2 uvM = (mat == 8 && horizontal) ? vPos.xz * vec2(1.0, -1.0) : vUV;
+  // Ground and decks take their texture from where they are in the world, not from the box.
+  // The terrain is thousands of small tiles and per-box coordinates restart on every one of
+  // them, which tiles the ground with a visible grid of seams.
+  vec2 uvM = ((mat == 8 || mat == 0 || mat == 1) && horizontal) ? vPos.xz * vec2(1.0, -1.0) : vUV;
   vec2 tuv = uvM / tile + offs;
 
   // Walls that carry windows read a facade panel instead: one tile per window cell, with
@@ -575,7 +561,35 @@ void main() {
   float specAmt = 0.02;
 
   if (mat == 0) {
-    albedo = mix(albedo, vec3(0.62, 0.61, 0.56), roadPaint(vPos, fwXZ) * 0.85);
+    // Trench repairs, each a shade off the road round it and ringed by a tar seam. They are
+    // found on a grid, but sized and placed anywhere within their cell — on the grid itself
+    // they would read as a chequerboard from any height.
+    vec2 pc = floor(vPos.xz / 9.0);
+    float patched = step(0.62, hash12(pc * 1.7));
+    vec2 ext = 0.14 + 0.22 * vec2(hash12(pc + 8.3), hash12(pc + 11.7));
+    vec2 mid = ext + (1.0 - 2.0 * ext) * vec2(hash12(pc + 2.9), hash12(pc + 5.1));
+    vec2 q = abs(fract(vPos.xz / 9.0) - mid) / ext;
+    float far = max(q.x, q.y);
+    // far counts out from the middle of the patch in units of its own half-width, and this
+    // is how much of that a pixel covers. Stepped on instead, the patch edge and the tar seam
+    // round it are hard lines a few centimetres wide: fine underfoot, but from the air they
+    // are far under a pixel, and every one of them crawls as the camera moves. Widening the
+    // transition to the pixel lets them average out into the road instead.
+    float fwFar = max(fwXZ.x / ext.x, fwXZ.y / ext.y) / 9.0 + 1e-4;
+    float inPatch = patched * (1.0 - smoothstep(1.0 - fwFar, 1.0 + fwFar, far));
+    albedo *= mix(1.0, 0.87, inPatch);
+    albedo *= mix(1.0, 0.68, inPatch * smoothstep(0.88 - fwFar, 0.88 + fwFar, far));
+    // ironwork: covers and gully gratings, darker and smoother than the road round them
+    vec2 mc = floor(vPos.xz / 13.0);
+    vec2 mp = (mc + vec2(hash12(mc), hash12(mc + 7.3))) * 13.0;
+    float fwR = max(fwXZ.x, fwXZ.y);
+    float cover = (1.0 - smoothstep(0.56 - fwR, 0.56 + fwR, length(vPos.xz - mp)))
+                * step(0.45, hash12(mc + 3.1));
+    albedo = mix(albedo, vec3(0.135, 0.13, 0.125), cover);
+    specAmt = mix(specAmt, 0.14, cover);
+    // grime gathers in the gutters, where the camber takes the water
+    vec2 gg = abs(vPos.xz - CELL * floor(vPos.xz / CELL + 0.5));
+    albedo *= mix(1.0, 0.84, max(smoothstep(6.0, 8.9, gg.x), smoothstep(6.0, 8.9, gg.y)));
   } else if (mat == 5) {
     emissive = LAMP_COL * (0.6 + 30.0 * uNight);
     albedo = vec3(0.4);
@@ -601,6 +615,35 @@ void main() {
   } else if (mat == 12) {
     emissive = vec3(1.0, 0.05, 0.03) * (0.6 + 5.0 * uNight);
     albedo = vec3(0.2, 0.02, 0.02);
+  } else if (mat == 15) {
+    // River water: dark, glossy, and running. A bay of the surface is turned to the
+    // channel, so its own u axis runs downstream and its v across it, and the seed says how
+    // far down the river the bay begins — between them one coordinate that follows the
+    // river however it bends. Scrolled in world space instead, as it was, every river in the
+    // city drifted the same way across the ground whichever way it actually ran.
+    //
+    // The station wraps every 4096 m, so the scales along it are whole numbers of cycles in
+    // that distance and the pattern meets itself where it wraps.
+    vec2 flow = vec2(seed + vUV.x, vUV.y);
+    vec2 slick = vec2(flow.x * (90.0 / 4096.0) - uTime * 0.075, flow.y * 0.075);
+    vec2 chop = vec2(flow.x * (287.0 / 4096.0) - uTime * 0.16, flow.y * 0.11 + uTime * 0.01);
+    float w1 = texture(uNoise, slick).r;
+    float w2 = texture(uNoise, chop).g;
+    float w3 = texture(uNoise, chop * 2.0 - vec2(uTime * 0.26, 0.0)).b;
+    // drawn out along the current: the slow layer is stretched four to one down the channel
+    albedo = mix(vec3(0.035, 0.055, 0.062), vec3(0.06, 0.10, 0.11), w1 * 0.65 + w2 * 0.35);
+    Nd = normalize(N + vec3((w2 - 0.5) * 0.2 + (w3 - 0.5) * 0.1, 0.0, (w1 - 0.5) * 0.18));
+    specAmt = 0.55;
+  } else if (mat == 14) {
+    // one box per aspect; the seed offsets the cycle, so the two axes of a junction disagree
+    float ph = fract(uTime / 16.0 + seed);
+    float on = style < 0.5 ? step(0.52, ph)
+             : style < 1.5 ? step(0.44, ph) * step(ph, 0.52)
+             : step(ph, 0.44);
+    vec3 col = style < 0.5 ? vec3(1.0, 0.09, 0.05)
+             : style < 1.5 ? vec3(1.0, 0.55, 0.05) : vec3(0.22, 1.0, 0.35);
+    emissive = col * on * (1.4 + 14.0 * uNight);
+    albedo = col * 0.1;
   } else if (mat == 13 && horizontal) {
     float paint = padPaint(vUV, vSize, fwUV);
     albedo = mix(albedo * 0.7, vec3(0.78, 0.6, 0.16), paint * 0.9);
@@ -612,7 +655,7 @@ void main() {
   float puddle = 0.0;
   if (uWet > 0.01) puddle = up * smoothstep(0.45, 0.62, texture(uNoise, vPos.xz * 0.02).r * 0.7 + (1.0 - cavity) * 0.6);
   float wet = uWet * mix(0.35, 1.0, up);
-  bool emissiveMat = mat == 5 || mat == 7 || mat == 9 || mat == 12;
+  bool emissiveMat = mat == 5 || mat == 7 || mat == 9 || mat == 12 || mat == 14;
   if (!emissiveMat) {
     albedo *= mix(1.0, 0.65, wet);
     Nd = normalize(mix(Nd, N, uWet * puddle));
@@ -621,7 +664,7 @@ void main() {
   // uCheap is a diagnostic ladder for finding what the pass actually costs:
   // 1 drops the fog, 2 also drops the shadows, 3 shows the raw material.
   if (uCheap > 2.5) { fragColor = vec4(albedo, 1.0); return; }
-  float sh = uCheap > 1.5 ? 1.0 : shadowAt(vPos, N, dist > 140.0);
+  float sh = uCheap > 1.5 ? 1.0 : shadowAt(vPos, N, dist);
   float NdL = max(dot(Nd, L), 0.0) * smoothstep(-0.02, 0.1, dot(N, L));
   vec3 skyTone = mix(uHorizon, uZenith, 0.55);
   skyTone = mix(vec3(dot(skyTone, vec3(0.3, 0.5, 0.2))), skyTone, 0.5);
@@ -638,7 +681,7 @@ void main() {
   float ao = vehicle ? 1.0 : mix(0.65, 1.0, cavity);
   // darken where tall walls meet the ground, not whole steps and railings
   if (!horizontal && !vehicle) ao *= mix(1.0, mix(0.6, 1.0, smoothstep(0.0, 2.2, vUV.y)), smoothstep(2.5, 5.0, vSize.y));
-  ao *= mix(0.8, 1.0, smoothstep(0.0, 30.0, vPos.y));
+  ao *= mix(0.8, 1.0, smoothstep(0.0, 30.0, vPos.y - uGroundRef));
   if (N.y < -0.5) ao *= 0.8;
 
   vec3 H = normalize(L + V);
