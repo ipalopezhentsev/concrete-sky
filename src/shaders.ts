@@ -627,13 +627,29 @@ void main() {
     vec2 flow = vec2(seed + vUV.x, vUV.y);
     vec2 slick = vec2(flow.x * (90.0 / 4096.0) - uTime * 0.075, flow.y * 0.075);
     vec2 chop = vec2(flow.x * (287.0 / 4096.0) - uTime * 0.16, flow.y * 0.11 + uTime * 0.01);
-    float w1 = texture(uNoise, slick).r;
-    float w2 = texture(uNoise, chop).g;
-    float w3 = texture(uNoise, chop * 2.0 - vec2(uTime * 0.26, 0.0)).b;
+    // Value noise is a lattice, and on open water it is the only pattern there is: sampled
+    // straight, its cells came out as a grid of squares under a metre across, square to the
+    // channel and holding still while the river ran over them — the floor of a swimming
+    // pool. Each lookup is bent by a slow field of its own, which takes the lattice off its
+    // own axes; the warp is built from the same wrapping coordinate, so the pattern still
+    // meets itself where the station wraps.
+    vec2 warp = (texture(uNoise, vec2(flow.x * (23.0 / 4096.0) + 0.21, flow.y * 0.019)).rg - 0.5) * 0.09;
+    float w1 = texture(uNoise, slick + warp).r;
+    float w2 = texture(uNoise, chop + warp * 1.6).g;
+    float w3 = texture(uNoise, chop * 2.0 - vec2(uTime * 0.26, 0.0) + warp * 0.7).b;
     // drawn out along the current: the slow layer is stretched four to one down the channel
     albedo = mix(vec3(0.035, 0.055, 0.062), vec3(0.06, 0.10, 0.11), w1 * 0.65 + w2 * 0.35);
     Nd = normalize(N + vec3((w2 - 0.5) * 0.2 + (w3 - 0.5) * 0.1, 0.0, (w1 - 0.5) * 0.18));
     specAmt = 0.55;
+    // Water wears none of the surface maps. The albedo and the normal are replaced here, but
+    // cavity and roughness were read further up from whatever layer the material defaulted
+    // to — precast panels, on a six-metre tile — and left at that the river carried the
+    // joints of that panel as occlusion and as a change in the sheen: square tiles on the
+    // floor of a swimming pool. Worst in shade, where the ambient that cavity scales is all
+    // the light there is, and only within uDetailDist, which is why it came and went.
+    cavity = 1.0;
+    rough = mix(0.02, 0.09, w2);
+    tn = vec3(0.0, 0.0, 1.0);
   } else if (mat == 14) {
     // one box per aspect; the seed offsets the cycle, so the two axes of a junction disagree
     float ph = fract(uTime / 16.0 + seed);

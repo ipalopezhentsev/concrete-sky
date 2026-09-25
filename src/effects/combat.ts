@@ -219,9 +219,13 @@ export class Combat {
       } else if (targets?.hunterAlong(a, e)) continue;
       else if (this.hitVehicle(a, e, traffic, parking)) continue;
 
-      // buildings and ground
+      // Buildings and ground, both of them the same thing: boxes. There used to be a plane
+      // at y = 0 here as well, which was the ground back when the ground was one. It is not
+      // one now — the city stands on terrain, and a river valley runs twenty metres under
+      // that plane — so all it did was end a bolt in mid-air, well above whatever it had
+      // been fired at. Nothing on the low ground could be shot at all.
       const boxes = colliders(e[0], e[2]);
-      let tHit = e[1] < 0 ? Math.max(0, a[1] / (a[1] - e[1])) : 2;
+      let tHit = 2;
       for (let i = 0; i < boxes.length; i += 6) {
         const t = segmentBox(a, e, boxes, i);
         if (t >= 0 && t < tHit) tHit = t;

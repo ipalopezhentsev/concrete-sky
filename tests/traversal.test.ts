@@ -608,28 +608,38 @@ for (const seed of [1971, 42, 777777]) {
     `wreck=${wreck ? [wreck.x, wreck.y, wreck.z].map((v) => v.toFixed(1)) : "none"}`);
   check("the wreck is still solid", parking.boxes(20, 30).length === 6);
 
-  // a car driving along the avenue at x = -2.5
-  traffic.update(5, [-2.5, 30, 0], [0, 0, 1]);
+  // A car in traffic, wherever the road network happens to put one. This used to look in a
+  // box just off the origin — the avenue the grid city ran up x = 0 — and to aim at y = 0.7,
+  // the street level that city could assume. The plan city has no road there, and its roads
+  // are at whatever height the ground is: for this seed the nearest traffic is a hundred and
+  // eighty metres up the river valley, seven metres below the origin. So the target is the
+  // nearest car ahead, wherever it is, and the bolt is aimed at the height that car is at.
+  const eye: [number, number, number] = [-2.5, 30, 0];
+  traffic.update(5, eye, [0, 0, 1]);
   const cars = traffic.cars;
-  let target = -1;
+  const rangeTo = (o: number) => Math.hypot(cars.data[o] - eye[0], cars.data[o + 1] - eye[1], cars.data[o + 2] - eye[2]);
+  const aimAt = (o: number, lead: number, v: readonly number[]): [number, number, number] =>
+    [cars.data[o] + v[0] * lead, cars.data[o + 1] + 0.8, cars.data[o + 2] + v[2] * lead];
+  let target = -1, nearest = Infinity;
   for (let i = 0; i < cars.count; i++) {
     const o = i * 10;
-    if (Math.abs(cars.data[o]) < 7 && cars.data[o + 2] > 10 && cars.data[o + 2] < 120 && cars.data[o + 1] < 1) { target = i; break; }
+    // ahead of the eye, which looks down +z
+    if (cars.keys[i] < 0 || cars.data[o + 2] < 10) continue;
+    const d = rangeTo(o);
+    if (d < nearest) { nearest = d; target = i; }
   }
-  check("a moving car to shoot at", target >= 0, `cars=${cars.count}`);
+  check("a moving car to shoot at", target >= 0 && nearest < 300, `cars=${cars.count} nearest=${nearest.toFixed(0)}m`);
   if (target >= 0) {
     const key = cars.keys[target];
     let t = 5;
     const before = combat.carKills;
-    for (let f = 0; f < 120 && !traffic.removed.has(key); f++) {
-      traffic.update(t, [-2.5, 30, 0], [0, 0, 1]);
+    // long enough for the bolt to cross that range at 260 m/s and still have frames to spare
+    for (let f = 0; f < 300 && !traffic.removed.has(key); f++) {
+      traffic.update(t, eye, [0, 0, 1]);
       const idx = cars.keys.indexOf(key);
       if (idx < 0 || idx >= cars.count) break;
       const o = idx * 10;
-      const v = traffic.velocityOf(key);
-      const dist = Math.hypot(cars.data[o] + 2.5, cars.data[o + 1] - 30, cars.data[o + 2]);
-      const lead = dist / 260;
-      combat.trigger([-2.5, 29.1, -2], 0, [cars.data[o] + v[0] * lead, 0.7, cars.data[o + 2] + v[2] * lead], [0, 0, 0]);
+      combat.trigger([eye[0], eye[1] - 0.9, eye[2] - 2], 0, aimAt(o, rangeTo(o) / 260, traffic.velocityOf(key)), [0, 0, 0]);
       combat.update(1 / 60, traffic, parking, noBoxes);
       t += 1 / 60;
     }
