@@ -714,7 +714,7 @@ export const RIVER_HALF = 62;
 export const QUAY = 30;
 /** Height of the quay over the water, which is the face of the embankment wall. */
 export const QUAY_RISE = 5;
-const RIVER_STEP = 950;
+export const RIVER_STEP = 950;
 /** Bank seed pairs along one river span; they must be close enough to hold the channel. */
 const RIVER_STATIONS = 12;
 /** How far a bank seed stands back from the water, which is where the quays end up. */

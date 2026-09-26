@@ -24,11 +24,13 @@
       <p class="keys mouse-only">
         mouse look · WASD run · shift sprint · ctrl walk · space jump / climb<br />
         E get in / out of cars and flyers · click shoot · V cockpit view<br />
-        H hunters on / off · R back to last roof · N next weather · L hold weather · F3 stats · F4 copy stats · esc pause
+        M map (+ / − to zoom) · H hunters on / off · R back to last roof<br />
+        N next weather · L hold weather · F3 stats · F4 copy stats · esc pause
       </p>
       <p class="keys touch-only">
         left thumb run (push further to sprint) · right thumb look<br />
         tap the prompt to get in or out · jump climbs ledges · hunt turns the hunters on / off<br />
+        map shows the streets, railways and rivers around you<br />
         best held sideways
       </p>
     </div>
@@ -50,6 +52,7 @@
         <button type="button" data-tap="view" class="riding">view</button>
         <button type="button" data-tap="roof" class="foot">roof</button>
         <button type="button" data-tap="hunt" class="hunt">hunt</button>
+        <button type="button" data-tap="map">map</button>
         <button type="button" data-tap="weather">sky</button>
         <button type="button" data-tap="pause" aria-label="pause">❚❚</button>
       </div>
@@ -57,6 +60,16 @@
         <button type="button" data-hold="fire" class="fire flyer">fire</button>
         <button type="button" data-hold="down" class="flyer">down</button>
         <button type="button" data-hold="jump" class="jump">jump</button>
+      </div>
+    </div>
+    <div id="map" hidden>
+      <canvas id="mapview"></canvas>
+      <div class="legend">
+        <span class="road">road</span><span class="rail">rail</span><span class="water">river</span><span class="you">you</span>
+      </div>
+      <div class="zoom">
+        <button id="mapout" type="button" aria-label="zoom out">−</button>
+        <button id="mapin" type="button" aria-label="zoom in">+</button>
       </div>
     </div>
     <div id="stats" hidden></div>

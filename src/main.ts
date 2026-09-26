@@ -5,6 +5,7 @@ import { groundAt, planSpawn } from "./city/plan";
 import { setFloor } from "./player";
 import { Demo } from "./demo";
 import { MAX_HEALTH } from "./hunters";
+import { MapView } from "./mapview";
 import { add, cross, dot, normalize, scale, setWorldSeed, sub, type Vec3 } from "./math";
 import { openSpot, Player, type Input } from "./player";
 import { Renderer, type Camera, LAMP_SLOTS } from "./renderer";
@@ -14,6 +15,8 @@ import { STATES, Weather } from "./weather";
 import { World } from "./world";
 
 const params = new URLSearchParams(location.search);
+const ZOOM_IN = new Set(["Equal", "NumpadAdd", "BracketRight"]);
+const ZOOM_OUT = new Set(["Minus", "NumpadSubtract", "BracketLeft"]);
 const canvas = document.getElementById("view") as HTMLCanvasElement;
 const startEl = document.getElementById("start")!;
 const statusEl = document.getElementById("status")!;
@@ -226,12 +229,28 @@ async function main(): Promise<void> {
       noticeTime = 2;
     }
   };
+  // The map. It reads the same plan the city is built from, through the same worker pool, so
+  // it fills in a tile at a time behind whatever the city is streaming.
+  const map = new MapView(document.getElementById("mapview") as HTMLCanvasElement, world);
+  document.getElementById("mapin")!.addEventListener("click", (e) => {
+    e.stopPropagation();
+    map.zoomBy(-1);
+  });
+  document.getElementById("mapout")!.addEventListener("click", (e) => {
+    e.stopPropagation();
+    map.zoomBy(1);
+  });
+  window.addEventListener("wheel", (e) => {
+    if (map.open) map.zoomBy(Math.sign(e.deltaY));
+  }, { passive: true });
+
   const touch = new TouchControls(touchEl, (action) => {
     if (action === "pause") setMode("title");
     else if (action === "view" && rides.riding) rides.cockpit = !rides.cockpit;
     else if (action === "roof" && !rides.riding) player.respawn();
     else if (action === "weather") weather.next(6);
     else if (action === "hunt") setHunt(!hunt);
+    else if (action === "map") map.toggle();
   });
 
   /** Switch mode; `title` false keeps the title screen hidden (a pointer lock is on its way). */
@@ -243,6 +262,9 @@ async function main(): Promise<void> {
       firing = false;
     }
     if (title) startEl.classList.toggle("hidden", m !== "title");
+    // The map sits over the title screen, and a click on it is not a click on "continue" —
+    // pause with the map up and the way back into the city is behind a panel. So it folds.
+    if (title && m === "title") map.setOpen(false);
     demoEl.hidden = m !== "demo";
     touch.show(m === "play" && touchPlay);
     document.body.classList.toggle("touchplay", m === "play" && touchPlay);
@@ -337,7 +359,13 @@ async function main(): Promise<void> {
       e.preventDefault();
       if (!e.repeat) copyStats();
     }
-    if (mode === "demo" && !e.repeat && e.code !== "F3" && e.code !== "F4") {
+    // The map is a look at the place, not a move in it: like the stats panel it opens from
+    // anywhere, and neither it nor its zoom counts as taking over the demo.
+    if (e.code === "KeyM" && !e.repeat) map.toggle();
+    const zooming = map.open && ZOOM_IN.has(e.code) !== ZOOM_OUT.has(e.code);
+    if (zooming && !e.repeat) map.zoomBy(ZOOM_IN.has(e.code) ? -1 : 1);
+    const looking = e.code === "F3" || e.code === "F4" || e.code === "KeyM" || zooming;
+    if (mode === "demo" && !e.repeat && !looking) {
       if (e.code === "Escape") setMode("title");
       else takeOver(false);
     }
@@ -591,6 +619,9 @@ async function main(): Promise<void> {
     }
     renderer.render(cam, weather, world, rides.vehicleLists, rides.particles, time, blur, shade);
     debug.frames++;
+    // where the runner is, and which way they are pointed — the camera's heading, so it is
+    // the car's or the flyer's when they are in one
+    map.draw(focus[0], focus[2], Math.atan2(fwd[0], fwd[2]));
 
     // Adaptive resolution, aimed at the display's frame budget: drop the internal
     // scale while frames run long and give it back once there is room to spare.
@@ -633,6 +664,7 @@ async function main(): Promise<void> {
         particles: rides.particles.glow.count + rides.particles.smoke.count,
         hunters: hunters.list.map((x) => x.mode).join(","), health: hunters.health, hunterKills: hunters.kills, caught: hunters.caught,
         mode, demo: demo.kind, touch: touchPlay,
+        map: map.open ? map.across : 0, mapPending: map.pending,
       };
       {
         statsText = [

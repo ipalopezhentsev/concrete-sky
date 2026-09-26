@@ -40,6 +40,13 @@ export class World {
   private workers: Worker[] = [];
   private busy: number[] = [];
   private collideCache = new Map<string, Float32Array>(); // 3x3 cell neighbourhoods, most recent last
+  // Block outlines for the map, tile by tile. They outlive the regions they overlap — a map
+  // is worth having for ground the runner has left — so they are kept on their own count.
+  private mapCache = new Map<string, Float32Array>();
+  private mapBusy = new Set<string>();
+  private mapQueue: string[] = [];
+  /** Bumped whenever a map tile arrives, so the map knows to draw itself again. */
+  mapVersion = 0;
   stats = { regions: 0, drawn: 0, pending: 0, tris: 0 };
   /** Scales the distance at which small detail boxes stop being drawn (diagnostic knob). */
   detailScale = 1;
@@ -107,7 +114,41 @@ export class World {
     });
   }
 
-  private onMessage(worker: number, data: { type: string; mesh?: RegionMesh }): void {
+  /**
+   * Block outlines for the tiles asked for, those that are ready, with the rest queued.
+   *
+   * The whole list is given every time and replaces the last one, nearest first, so the map
+   * always works outward from wherever it is centred now rather than finishing an errand it
+   * was sent on two zoom levels ago.
+   */
+  mapTiles(want: [number, number][]): Float32Array[] {
+    const out: Float32Array[] = [];
+    this.mapQueue.length = 0;
+    for (const [tx, tz] of want) {
+      const k = key(tx, tz);
+      const hit = this.mapCache.get(k);
+      if (hit) out.push(hit);
+      else if (!this.mapBusy.has(k)) this.mapQueue.push(k);
+    }
+    return out;
+  }
+
+  /** True while any tile the map last asked for is still being worked out. */
+  get mapBusyCount(): number {
+    return this.mapQueue.length + this.mapBusy.size;
+  }
+
+  private onMessage(worker: number, data: { type: string; mesh?: RegionMesh; tx?: number; tz?: number; blocks?: Float32Array }): void {
+    if (data.type === "map" && data.blocks) {
+      this.busy[worker]--;
+      const k = key(data.tx!, data.tz!);
+      this.mapBusy.delete(k);
+      // a few hundred tiles is a city twenty kilometres across; older ones can go
+      if (this.mapCache.size > 400) this.mapCache.clear();
+      this.mapCache.set(k, data.blocks);
+      this.mapVersion++;
+      return;
+    }
     if (data.type !== "region" || !data.mesh) return;
     this.busy[worker]--;
     const m = data.mesh;
@@ -182,6 +223,18 @@ export class World {
       this.busy[w]++;
       this.pending.add(key(i, j));
       this.workers[w].postMessage({ type: "region", rx: i, rz: j, seed: this.seed, faceCull: this.faceCull } satisfies WorkerRequest);
+    }
+    // Map tiles share the pool, but only ever go to a worker with nothing else to do. A tile
+    // is a couple of square kilometres of Voronoi and takes a good fraction of a second; the
+    // city streaming in around the runner cannot be made to queue behind one.
+    while (this.mapQueue.length) {
+      const w = this.busy.indexOf(0);
+      if (w < 0) break;
+      const k = this.mapQueue.shift()!;
+      const [tx, tz] = k.split(",").map(Number);
+      this.mapBusy.add(k);
+      this.busy[w]++;
+      this.workers[w].postMessage({ type: "map", tx, tz, seed: this.seed } satisfies WorkerRequest);
     }
     for (const [k, r] of this.regions) {
       const [i, j] = k.split(",").map(Number);

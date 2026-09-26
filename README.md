@@ -12,7 +12,8 @@ Cars stream along the avenues and flyers cross the air above the streets.
 Take a parked flyer from a landing pad, fly to another roof and step out,
 shoot other flyers out of the sky, or take a car and drive. Hunters come after
 you on foot, in cars and in flyers, and there's nothing to do but stay ahead
-of them (or turn them off with H).
+of them (or turn them off with H). M opens a map of the streets, railways and
+rivers around you.
 
 Everything is generated in code, with no image or sound files:
 - the city
@@ -169,6 +170,7 @@ reversed-Z depth.
 | `src/hunters.ts` | Hunters: spawning as the pressure builds, the chase on foot (the demo's deck autopilot pointed at you over the bridges, direct pursuit otherwise), taking parked or passing vehicles, driving the street grid, flying the canyons and circling at a spot with a clear shot, shooting in bursts, your health. |
 | `src/demo.ts` | Demo mode: autopilots for running (along lines probed clear on each deck, over the bridges), flying (street corridors between the traffic layers) and driving (timing avenue crossings against the traffic), and the director that cuts between them. |
 | `src/touch.ts` | On-screen touch controls: floating stick, drag to look, hold and tap buttons. |
+| `src/city/mapdata.ts`, `src/mapview.ts` | The map (M, or the `map` button): a plan of the city around you, drawn from the same network it is built on rather than from a second, simpler city — so the streets on it are the ground the blocks leave between them, exactly as they are underfoot. Block outlines are cut into 800 m tiles and worked out in the same worker pool that builds the city, always behind whatever it is streaming; the arterials, the railways over them and the rivers are the same splines the traffic, the trains and the boats run down, walked again on each redraw. The plan goes onto an off-screen canvas larger than the panel and is only redrawn when the zoom changes, a tile arrives, or you reach its margin, so keeping the map open costs nothing measurable. |
 | `src/effects/combat.ts`, `src/effects/particles.ts` | Bolts (yours and the hunters'), hit tests, falling wrecks, and fire / smoke / spark particles. |
 | `src/vehicles/flyer.ts` | The piloted flyer (hover physics, swept box collision, landing, finding a spot to step out) and the hangar of flyers waiting on landing pads. |
 | `src/vehicles/models.ts` | Box models of cars, vans, flyers and the hunters on foot (three stride poses). |
@@ -184,6 +186,7 @@ node scripts/bench.mjs [--discrete] [--vsync] [--dpr=2]   # uncapped fps and per
 node scripts/board-test.mjs out/board.png                 # boards, flies and lands with real key presses
 node scripts/vehicles-test.mjs out                        # drives a car, then flies and shoots, in a real browser
 node scripts/hunters-test.mjs out                         # hunters close up, shooting one, then waiting to be caught
+node scripts/map-test.mjs out                             # opens the map, waits for its tiles, zooms through the levels
 ```
 
 `python/` holds the first prototype (pygame + PyOpenGL), kept for reference.
