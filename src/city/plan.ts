@@ -1610,6 +1610,8 @@ interface Bay {
   chord: number;
   /** Length of the box laid along it, which overruns both ends by the mitre. */
   len: number;
+  /** How far this bay is set down from its neighbours; see `SHINGLE`. */
+  drop: number;
   /** A climb across the chord, as the shear the box needs to carry that gradient. */
   riseOf: (climb: number) => number;
 }
@@ -1622,6 +1624,21 @@ interface Bay {
  * closes it, and costs nothing: the boxes are opaque and the seam is inside the concrete.
  */
 const MITRE = 0.02;
+
+/**
+ * How far every other bay is set down, so that the mitre is an overlap and not a tie.
+ *
+ * The overlap puts two boxes over the same strip of road at every joint, and along the level
+ * part of a crossing both of them are flat at the deck's own height: two surfaces in exactly
+ * the same plane, each with its own texture origin, and nothing in the depth buffer to choose
+ * between them. Which one a pixel shows is then decided by the last bit of the interpolated
+ * depth, so it changes with the smallest movement of the head — the strips that cross the
+ * road at every bay and come and go as you look around, reading as smears of shadow because
+ * the two boxes carry the paving at different offsets. Setting alternate bays down a few
+ * millimetres makes one of the pair definitively the upper one: the joint is still closed,
+ * the step is far below anything the eye or a car can find, and the surface stops flickering.
+ */
+const SHINGLE = 0.004;
 
 /**
  * A bay of deck between two stations of an arterial.
@@ -1637,12 +1654,17 @@ function bayOf(axis: 0 | 1, line: number, s0: number, s1: number, halfW: number)
   const a = arteryFrame(axis, line, s0).p, c = arteryFrame(axis, line, s1).p;
   const dx = c[0] - a[0], dz = c[1] - a[1];
   const chord = Math.hypot(dx, dz) || 1;
+  // Which of the pair this one is, counted off the line's own stations so that every region
+  // building the same bay sets it down by the same amount and the two halves of a bay either
+  // side of a seam still meet.
+  const k = Math.round(s0 / (s1 - s0));
   return {
     p: [(a[0] + c[0]) / 2, (a[1] + c[1]) / 2],
     dir: [dx / chord, dz / chord],
     turn: Math.atan2(dz, dx),
     chord,
     len: chord + 2 * (halfW * MITRE + 0.15),
+    drop: (((k % 2) + 2) % 2) * SHINGLE,
     // The box runs a little past both of its own ends, so a climb given for the chord has to
     // be stretched over the box to keep the same gradient — or every bay would be a shade
     // flatter than the one it has to meet, and the joints would step again.
@@ -1658,7 +1680,7 @@ function span(
   const HALF = ARTERY_HALF + 2;
   const STEP = 9;
   for (let s = c.a0; s < c.a1; s += STEP) {
-    const { p, dir, turn, len, riseOf } = bayOf(axis, line, s, s + STEP, HALF);
+    const { p, dir, turn, len, drop, riseOf } = bayOf(axis, line, s, s + STEP, HALF);
     // Only the part of the bridge this region owns, on a half-open square with no slack in
     // it. The test used to allow eight metres either side, which is not a boundary but an
     // overlap: every bay within eight metres of a seam was built by the region on each side
@@ -1674,7 +1696,7 @@ function span(
     const mid = (ya + yb) / 2, rise = riseOf(yb - ya);
     const put = (halfW: number, y0: number, y1: number, off: number, mat: Mat, style = 0, opts = {}) => {
       const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
-      b.box(cx - len / 2, y0, cz - halfW, cx + len / 2, y1, cz + halfW, mat, t, style, { turn, rise, ...opts });
+      b.box(cx - len / 2, y0 - drop, cz - halfW, cx + len / 2, y1 - drop, cz + halfW, mat, t, style, { turn, rise, ...opts });
     };
     put(HALF, mid - 2.2, mid, 0, Mat.Board, Finish.Cast, { detail: false });
     put(0.4, mid, mid + 1.15, HALF - 0.4, Mat.Panel);
@@ -1807,7 +1829,7 @@ function rails(b: Builder, x0: number, z0: number): void {
       const from = (axis === 0 ? x0 : z0) - pad, to = (axis === 0 ? x0 + REGION : z0 + REGION) + pad;
       const HALF = 5.2, DEEP = 1.9;
       for (let k = railBayAt(from); k <= railBayAt(to); k++) {
-        const { p, dir, turn, len, riseOf } = bayOf(axis, line, k * RAIL_BAY, (k + 1) * RAIL_BAY, HALF);
+        const { p, dir, turn, len, drop, riseOf } = bayOf(axis, line, k * RAIL_BAY, (k + 1) * RAIL_BAY, HALF);
         if (p[0] < x0 || p[0] >= x0 + REGION || p[1] < z0 || p[1] >= z0 + REGION) continue;
         // A bay is the plane between its two joints. Levelling it and dropping its underside to
         // meet whichever neighbour sat lowest closed the gaps, but left the line a row of
@@ -1818,7 +1840,7 @@ function rails(b: Builder, x0: number, z0: number): void {
         const y = (ya + yb) / 2, rise = riseOf(yb - ya);
         const put = (halfW: number, y0: number, y1: number, off: number, mat: Mat, tn: Tint, style = 0) => {
           const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
-          b.box(cx - len / 2, y0, cz - halfW, cx + len / 2, y1, cz + halfW, mat, tn, style,
+          b.box(cx - len / 2, y0 - drop, cz - halfW, cx + len / 2, y1 - drop, cz + halfW, mat, tn, style,
             { turn, rise, detail: false });
         };
         put(HALF, y - DEEP, y, 0, Mat.Board, t, Finish.Cast); // deck
@@ -2053,11 +2075,14 @@ function river(b: Builder, x0: number, z0: number): void {
       if (px < x0 || px >= x0 + REGION || pz < z0 || pz >= z0 + REGION) continue;
       const dx = c[0] - a[0], dz = c[1] - a[1];
       const len = (Math.hypot(dx, dz) || STEP) + RIVER_HALF * 0.08;
+      // and every other bay a shade under the one before it, so the two metres of water they
+      // both cover is not two surfaces at one height (see `SHINGLE`)
+      const drop = (((Math.round(s / STEP) % 2) + 2) % 2) * SHINGLE;
       // The seed carries how far down the river this bay begins. A bay is turned to the
       // channel, so its own u axis runs downstream and its v across, and the two together
       // give the shader a coordinate that is continuous from bay to bay however the river
       // bends — which is what lets the water run down it rather than drift north-east.
-      b.box(px - len / 2, w - 0.5, pz - RIVER_HALF, px + len / 2, w, pz + RIVER_HALF,
+      b.box(px - len / 2, w - 0.5 - drop, pz - RIVER_HALF, px + len / 2, w - drop, pz + RIVER_HALF,
         Mat.Water, [1, 1, 1], 0,
         { seed: ((s % 4096) + 4096) % 4096, detail: false, collide: false, turn: Math.atan2(dz, dx) });
     }
@@ -2085,13 +2110,18 @@ function waterfront(b: Builder, x0: number, z0: number): void {
       // joint open on the inside of the bend otherwise, and the wider the thing laid the wider
       // that opening. The boxes are opaque, so the seam is buried inside the stone.
       const halfL = chord / 2 + 1.6;
+      // and, as on a deck, every other bay is set down out of the plane of its neighbours, or
+      // the three metres of quay the two of them both cover is two surfaces at one height
+      // (see `SHINGLE`)
+      const k = Math.round(s / BAY);
+      const drop = (((k % 2) + 2) % 2) * SHINGLE;
       for (const side of [1, -1] as const) {
         const ex = px - dir[1] * RIVER_HALF * side, ez = pz + dir[0] * RIVER_HALF * side;
         if (ex < x0 - 4 || ex >= x0 + REGION + 4 || ez < z0 - 4 || ez >= z0 + REGION + 4) continue;
         const w = waterLevel(line), top = w + QUAY_RISE;
         const put = (halfW: number, y0: number, y1: number, off: number, mat: Mat, tn: Tint, style = 0, opts = {}) => {
           const cx = ex - dir[1] * off * side, cz = ez + dir[0] * off * side;
-          b.box(cx - halfL, y0, cz - halfW, cx + halfL, y1, cz + halfW, mat, tn, style, { turn, detail: false, ...opts });
+          b.box(cx - halfL, y0 - drop, cz - halfW, cx + halfL, y1 - drop, cz + halfW, mat, tn, style, { turn, detail: false, ...opts });
         };
         // The quay: the wall out of the water and the strip of deck behind it. The ground
         // under all of it is cut away (see `channelCap`), because a five-metre grid cannot
@@ -2102,13 +2132,14 @@ function waterfront(b: Builder, x0: number, z0: number): void {
         // the whole length of the bank and, seen down the quay, reads as a wire over the
         // water rather than as anything anyone would build.
         put(1.1, top, top + 0.42, 1.0, Mat.Board, stone, Finish.Cast);
-        const k = Math.round(s / BAY);
         put(0.42, top + 0.42, top + 1.15, 1.7, Mat.Board, stone, Finish.Cast);
         // a bollard now and then, and steps down to the water every so often
         if (k % 5 === 0) put(0.3, top + 0.42, top + 1.1, 1.0, Mat.Board, stone, Finish.Ribbed);
         if (k % 23 === 0) {
           for (let n = 1; n <= 12; n++) {
-            const y = top - n * (top - w + 1) / 12;
+            // Half a shingle low, so that the tread which lands at the waterline — and with
+            // this rise one of them always does — is not in the plane of the river itself.
+            const y = top - n * (top - w + 1) / 12 - SHINGLE / 2;
             put(1.6, y - 0.6, y, -0.6 - n * 0.42, Mat.Board, stone, Finish.Boards);
           }
         }
@@ -2260,7 +2291,7 @@ function arterialFill(b: Builder, x0: number, z0: number): void {
     for (const line of arteryLines(across, REGION / 2 + pad)) {
       const from = (axis === 0 ? x0 : z0) - pad, to = (axis === 0 ? x0 + REGION : z0 + REGION) + pad;
       for (let s = Math.floor(from / STEP) * STEP; s < to; s += STEP) {
-        const { p, dir, turn, len, riseOf } = bayOf(axis, line, s, s + STEP, HALF);
+        const { p, dir, turn, len, drop, riseOf } = bayOf(axis, line, s, s + STEP, HALF);
         if (p[0] < x0 || p[0] >= x0 + REGION || p[1] < z0 || p[1] >= z0 + REGION) continue;
         // a bay the blocks already built over, or one a bridge is carrying, is not ours
         if (roadTopAt(p[0], p[1]) !== null) continue;
@@ -2270,7 +2301,7 @@ function arterialFill(b: Builder, x0: number, z0: number): void {
         const a = arteryFrame(axis, line, s).p, c = arteryFrame(axis, line, s + STEP).p;
         const ya = terrainAt(a[0], a[1]), yb = terrainAt(c[0], c[1]);
         const y = (ya + yb) / 2;
-        b.box(p[0] - len / 2, y - 6, p[1] - HALF, p[0] + len / 2, y, p[1] + HALF, Mat.Asphalt, t, 0,
+        b.box(p[0] - len / 2, y - 6 - drop, p[1] - HALF, p[0] + len / 2, y - drop, p[1] + HALF, Mat.Asphalt, t, 0,
           { seed: 0, detail: false, turn, rise: riseOf(yb - ya) });
         void dir;
       }
