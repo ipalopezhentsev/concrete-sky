@@ -7,10 +7,30 @@ export interface ModelBox {
   b: [number, number, number, number, number, number];
   mat: Mat;
   paint?: boolean;
+  /** Flat colour for an unpainted box; the default is the material's own texture, untinted. */
+  tint?: Tint;
 }
 
-const box = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: Mat, paint = false): ModelBox =>
-  ({ b: [x0, y0, z0, x1, y1, z1], mat, paint });
+const box = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: Mat, paint = false, tint?: Tint): ModelBox =>
+  ({ b: [x0, y0, z0, x1, y1, z1], mat, paint, tint });
+
+/**
+ * Trim: a flat colour of its own, neither the body paint nor a material off the city.
+ *
+ * The city's textures are cut for walls a street away, and a dashboard is thirty
+ * centimetres from the eye — close enough that one bolt head of the metal is the width
+ * of a hand. Vehicle paint is the one surface with no texture on it at all, so anything
+ * this near the camera is paint that takes its colour from the box rather than the car.
+ */
+const trim = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, tint: Tint): ModelBox =>
+  box(x0, y0, z0, x1, y1, z1, Mat.Paint, false, tint);
+
+const DASH: Tint = [0.1, 0.105, 0.11];
+const COAMING: Tint = [0.26, 0.26, 0.27];
+
+/** Drop the box of a model that spans a given height band: the shell an interior replaces. */
+const without = (model: ModelBox[], y0: number, y1: number): ModelBox[] =>
+  model.filter((b) => !(b.b[1] === y0 && b.b[4] === y1));
 
 /** Mirror a box across x = 0 (models are symmetric). */
 const pair = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: Mat, paint = false) =>
@@ -100,6 +120,92 @@ export function flyerBoxes(): ModelBox[] {
 }
 
 /**
+ * Instruments on a console: two lit dials with a red readout between them, centred on x.
+ *
+ * They are kept small on purpose. Anything on a console is a third of a metre from the
+ * eye, so a lit panel the width of the dash is a white sheet across the bottom of the
+ * screen; a few centimetres of it is a cockpit at night and a glint by day.
+ */
+function dials(x: number, y: number, z: number, size: number): ModelBox[] {
+  const h = size / 2;
+  return [
+    box(x - size * 1.6, y, z, x - size * 0.6, y + 0.015, z + size, Mat.Strip),
+    box(x + size * 0.6, y, z, x + size * 1.6, y + 0.015, z + size, Mat.Strip),
+    box(x - h, y, z + size * 0.2, x + h, y + 0.012, z + size * 0.8, Mat.Tail),
+  ];
+}
+
+/**
+ * A car from the driver's seat, for cockpit view.
+ *
+ * The outside of a car is no use to sit in. Its glass is a dark mirror, which is what a
+ * parked car should look like from the pavement and what would leave a driver staring at
+ * their own reflection; and its cabin is 45cm from sill to roof, which is a car-shaped
+ * silhouette rather than a room with a person in it. So the ridden car is built again from
+ * the inside: the glass comes out and leaves an opening with pillars round it, and the roof
+ * goes up to where a head has room under it. Nobody sees this shell and the outside one at
+ * once — it is drawn only for the seat the camera is in — so the two need not agree.
+ *
+ * Everything below the waist is the outer model: the same floor, bonnet and boot, which is
+ * what a driver sees over anyway, plus the wheels and lights at the corners of the eye.
+ */
+export function carInsideBoxes(van: boolean): ModelBox[] {
+  // wheels, lights and the painted lower body; the glass and the shallow roof are replaced
+  const shell = carBoxes(van).filter((b) => b.mat !== Mat.VGlass);
+  if (van) {
+    // A van's cab is up at the front and its nose is half a metre long, so the dash sits
+    // right under the screen and the sides are cut for the door windows.
+    return [
+      ...without(shell, 0.35, 2.1), // the sealed body, replaced by a cab with openings in it
+      box(-1.0, 0.35, -2.8, 1.0, 1.05, 2.3, Mat.Paint, true),
+      box(-1.0, 1.05, -0.3, 1.0, 2.1, -0.2, Mat.Paint, true),
+      box(-1.0, 2.0, -0.3, 1.0, 2.1, 2.3, Mat.Paint, true),
+      ...pair(0.9, 1.05, -0.3, 1.0, 1.32, 2.3, Mat.Paint, true),
+      ...pair(0.9, 1.78, -0.3, 1.0, 2.0, 2.3, Mat.Paint, true),
+      ...pair(0.9, 1.05, 2.2, 1.0, 2.0, 2.3, Mat.Paint, true),
+      trim(-0.9, 1.05, 0.2, 0.9, 1.07, 2.28, DASH),
+      trim(-0.95, 1.05, 1.9, 0.95, 1.36, 2.28, DASH),
+      trim(-0.95, 1.36, 2.2, 0.95, 1.4, 2.28, COAMING),
+      ...dials(0.38, 1.36, 2.0, 0.07),
+    ];
+  }
+  return [
+    ...without(shell, 1.4, 1.48), // the shallow roof, replaced by one with headroom under it
+    // the floor of the cabin, sills along the doors, and the console across the front
+    ...pair(0.78, 0.95, -1.3, 0.95, 1.06, 0.92, Mat.Paint, true),
+    trim(-0.8, 0.95, -1.2, 0.8, 0.97, 0.92, DASH),
+    trim(-0.82, 0.95, 0.42, 0.82, 1.02, 0.92, DASH),
+    trim(-0.82, 1.02, 0.86, 0.82, 1.05, 0.92, COAMING),
+    ...dials(0.38, 1.02, 0.58, 0.06),
+    // screen pillars, the bulkhead behind the seats, and a roof with headroom under it
+    ...pair(0.84, 1.0, 0.82, 0.94, 1.72, 0.94, Mat.Paint, true),
+    box(-0.94, 0.95, -1.32, 0.94, 1.72, -1.2, Mat.Paint, true),
+    box(-0.94, 1.72, -1.32, 0.94, 1.82, 0.94, Mat.Paint, true),
+  ];
+}
+
+/**
+ * The flyer from the pilot's seat, for cockpit view. Built from the inside for the same
+ * reasons a car is (see `carInsideBoxes`), with one difference: there is no canopy top.
+ * A pilot's head sits a hand's breadth under that glass, and a roof that close is a slab
+ * of paint across the upper third of the screen — so the frame is left open to the sky.
+ */
+export function flyerInsideBoxes(): ModelBox[] {
+  return [
+    ...flyerBoxes().filter((b) => b.mat !== Mat.VGlass),
+    // the coaming round the opening, and the screen pillars at its front corners
+    ...pair(0.6, 1.05, -0.74, 0.72, 1.22, 0.96, Mat.Paint, true),
+    box(-0.72, 1.05, -0.82, 0.72, 1.5, -0.74, Mat.Paint, true),
+    ...pair(0.58, 1.05, 0.88, 0.72, 1.5, 0.96, Mat.Paint, true),
+    // the floor of the well, then the console under the sightline with its instruments
+    trim(-0.6, 1.05, -0.72, 0.6, 1.07, 0.94, DASH),
+    trim(-0.56, 1.05, 0.58, 0.56, 1.14, 0.94, DASH),
+    trim(-0.56, 1.14, 0.88, 0.56, 1.16, 0.94, COAMING),
+    ...dials(0, 1.14, 0.68, 0.06),
+  ];
+}
+
+/**
  * A hunter on foot: long dark coat, helmet with a red visor, gun held forward.
  * stride -1..1 swings the legs and the free arm (0 is standing).
  */
@@ -137,10 +243,10 @@ export function liftBoxes(size: number, thick: number): ModelBox[] {
   ];
 }
 
-/** Flatten a model to 12-float boxes with a white tint (for instanced meshes). */
+/** Flatten a model to 12-float boxes (for instanced meshes); a box with no tint is left white. */
 export function modelData(model: ModelBox[]): number[] {
   const out: number[] = [];
-  for (const m of model) out.push(...m.b, 1, 1, 1, m.mat, m.paint ? 1 : 0, 0);
+  for (const m of model) out.push(...m.b, ...(m.tint ?? [1, 1, 1]), m.mat, m.paint ? 1 : 0, 0);
   return out;
 }
 

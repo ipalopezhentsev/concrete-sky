@@ -1,7 +1,7 @@
 // Personal flyers: the one the player pilots, and the ones waiting on landing pads.
 
 import type { Vec3 } from "../math";
-import type { Colliders } from "../player";
+import { FLOOR, type Colliders } from "../player";
 import { exitSpot } from "./exit";
 import { FLYER_HEIGHT } from "./models";
 
@@ -75,8 +75,13 @@ export class Flyer {
       this.moveAxis(2, (this.vel[2] * dt) / steps, boxes);
       this.moveAxis(1, (this.vel[1] * dt) / steps, boxes);
     }
-    if (this.pos[1] <= 0) {
-      this.pos[1] = 0;
+    // The floor of the world, for the grid city that has no collision under its streets.
+    // This is FLOOR and not zero: the network city's ground is real and lies below zero
+    // almost everywhere, so a flyer stopped at zero hangs in the air ten metres over the
+    // street, calls itself landed, and the pilot cannot get out because the ground the
+    // exit looks for is a drop away.
+    if (this.pos[1] <= FLOOR) {
+      this.pos[1] = FLOOR;
       if (this.vel[1] < 0) this.vel[1] = 0;
       this.grounded = true;
     }

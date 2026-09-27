@@ -75,6 +75,9 @@ export class Rides {
   private combined = new WeakMap<Float32Array, { b: Float32Array; out: Float32Array }>();
   readonly lifts = new Lifts();
   private liftList = new InstanceList(64);
+  /** The one vehicle drawn from the inside, when the camera is sitting in it. */
+  private insideList = new InstanceList(1);
+  private insideKind: "car" | "van" | "flyer" | null = null;
   private withLifts = new WeakMap<Float32Array, WeakMap<Float32Array, Float32Array>>();
 
   constructor(private world: World, private player: Player) {
@@ -267,9 +270,9 @@ export class Rides {
   }
 
   /** Start in a car where the player stands (test hook, demo). */
-  spawnCar(color: Vec3 = [0.55, 0.16, 0.12]): Car {
+  spawnCar(color: Vec3 = [0.55, 0.16, 0.12], van = false): Car {
     const p = this.player.pos;
-    this.car = new Car(p[0], p[1], p[2], this.player.yaw, false, color);
+    this.car = new Car(p[0], p[1], p[2], this.player.yaw, van, color);
     return this.car;
   }
 
@@ -334,7 +337,12 @@ export class Rides {
       this.carLookPitch = Math.max(-0.6, Math.min(0.5, this.carLookPitch - c.mouseDY * 0.0022));
       pl.yaw = boat.yaw + this.carLookYaw;
       pl.pitch = this.carLookPitch;
-      pl.pos = [boat.pos[0], boat.pos[1] + 1.4, boat.pos[2]];
+      // The helm is up on the wheelhouse rather than down on the deck: from the deck
+      // the wheelhouse is the whole view ahead, and from the height of its roof the
+      // funnel stands in the middle of that view. This clears the top of the funnel and
+      // stands to starboard of it, so the way ahead is open.
+      const rx = Math.cos(boat.yaw), rz = -Math.sin(boat.yaw);
+      pl.pos = [boat.pos[0] + rx * 0.5, boat.pos[1] + 2.35, boat.pos[2] + rz * 0.5];
     }
   }
 
@@ -428,7 +436,7 @@ export class Rides {
       const f = this.flyer;
       if (this.cockpit) {
         const c = Math.cos(f.yaw), s = Math.sin(f.yaw);
-        return { eye: [f.pos[0] + s * 0.35, f.pos[1] + 1.32, f.pos[2] + c * 0.35], fwd, roll: f.roll * 0.6, fov: 76 + f.speedNorm * 14 };
+        return { eye: [f.pos[0] + s * 0.32, f.pos[1] + 1.4, f.pos[2] + c * 0.32], fwd, roll: f.roll * 0.6, fov: 72 + f.speedNorm * 14 };
       }
       const eye = chase([f.pos[0], f.pos[1] + 1.7, f.pos[2]], [-fwd[0], -fwd[1], -fwd[2]], 9, 1.6, this.colliders);
       return { eye, fwd, roll: f.roll * 0.25, fov: 74 + f.speedNorm * 16 };
@@ -437,9 +445,11 @@ export class Rides {
       const car = this.car;
       const c = Math.cos(car.yaw), s = Math.sin(car.yaw);
       if (this.cockpit) {
-        // driver's seat, slightly left of centre
-        const eye: Vec3 = [car.pos[0] + s * 0.1 + c * 0.38, car.pos[1] + (car.van ? 1.75 : 1.18), car.pos[2] + c * 0.1 - s * 0.38];
-        return { eye, fwd, roll: car.roll, fov: 74 + car.speedNorm * 14 };
+        // The driver's seat: behind the wheel of a car, and well forward in the cab of a
+        // van, where the screen is in front of the driver rather than a load bay away.
+        const ahead = car.van ? 1.5 : 0.1;
+        const eye: Vec3 = [car.pos[0] + s * ahead + c * 0.38, car.pos[1] + (car.van ? 1.65 : 1.26), car.pos[2] + c * ahead - s * 0.38];
+        return { eye, fwd, roll: car.roll, fov: 70 + car.speedNorm * 14 };
       }
       const flat = Math.hypot(fwd[0], fwd[2]) || 1;
       const back: Vec3 = [-fwd[0] / flat, -Math.max(-0.2, fwd[1]) * 0.5 - 0.1, -fwd[2] / flat];
@@ -457,13 +467,22 @@ export class Rides {
       const v = this.boat;
       t.boats.push(v.pos[0], v.pos[1], v.pos[2], v.yaw, 0, 0, [0.42, 0.44, 0.46]);
     }
+    // In cockpit view the vehicle the camera is in is drawn from the inside instead.
+    // The outside of one is a sealed shell with mirrored glass, so from the seat it was
+    // a slab of paint across the bottom of the screen and nothing else.
+    this.insideList.clear();
+    this.insideKind = null;
     if (this.flyer) {
       const f = this.flyer;
-      t.flyers.push(f.pos[0], f.pos[1], f.pos[2], f.yaw, f.pitch, f.roll, f.color);
+      if (this.cockpit) this.insideKind = "flyer";
+      const list = this.cockpit ? this.insideList : t.flyers;
+      list.push(f.pos[0], f.pos[1], f.pos[2], f.yaw, f.pitch, f.roll, f.color);
     }
     if (this.car) {
       const c = this.car;
-      (c.van ? t.vans : t.cars).push(c.pos[0], c.pos[1], c.pos[2], c.yaw, c.pitch, c.roll, c.color);
+      if (this.cockpit) this.insideKind = c.van ? "van" : "car";
+      const list = this.cockpit ? this.insideList : c.van ? t.vans : t.cars;
+      list.push(c.pos[0], c.pos[1], c.pos[2], c.yaw, c.pitch, c.roll, c.color);
     }
     this.combat.drawWrecks(t.flyers, t.cars, t.vans);
     this.hunters.draw(t.flyers, t.cars, t.vans);
@@ -476,6 +495,7 @@ export class Rides {
     return {
       cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, cabins: t.cabins,
       figures: this.hunters.figures, lifts: this.liftList,
+      inside: this.insideKind ? { kind: this.insideKind, list: this.insideList } : undefined,
     };
   }
 }

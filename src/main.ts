@@ -237,7 +237,10 @@ async function main(): Promise<void> {
     return true;
   };
   if (params.get("vehicle") === "car") rides.spawnCar();
+  else if (params.get("vehicle") === "van") rides.spawnCar(undefined, true);
+  else if (params.get("vehicle") === "boat") rides.spawnBoat();
   else if (params.has("vehicle")) rides.spawnFlyer();
+  if (params.get("cockpit") === "1") rides.cockpit = true;
 
   // --- modes: the title screen, playing (mouse or touch), and the demo
   type Mode = "title" | "play" | "demo";

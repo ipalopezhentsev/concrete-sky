@@ -2,7 +2,7 @@
 // burning wrecks that fall and explode.
 
 import type { Vec3 } from "../math";
-import type { Colliders } from "../player";
+import { FLOOR, type Colliders } from "../player";
 import type { Parking } from "../vehicles/parking";
 import type { InstanceList, Traffic } from "../vehicles/traffic";
 import type { Particles } from "./particles";
@@ -258,13 +258,13 @@ export class Combat {
         this.particles.burn([w.pos[0], w.pos[1] + 0.8, w.pos[2]], w.vel);
       }
       const boxes = colliders(w.pos[0], w.pos[2]);
-      let crashed = w.pos[1] <= 0 || w.age > 15;
+      let crashed = w.pos[1] <= FLOOR || w.age > 15;
       for (let i = 0; i < boxes.length && !crashed; i += 6) {
         if (boxes[i] < w.pos[0] + 1 && boxes[i + 3] > w.pos[0] - 1 && boxes[i + 2] < w.pos[2] + 1 &&
             boxes[i + 5] > w.pos[2] - 1 && boxes[i + 1] < w.pos[1] + 1 && boxes[i + 4] > w.pos[1]) crashed = true;
       }
       if (crashed) {
-        const p: Vec3 = [w.pos[0], Math.max(w.pos[1], 0) + 1, w.pos[2]];
+        const p: Vec3 = [w.pos[0], Math.max(w.pos[1], FLOOR) + 1, w.pos[2]];
         this.particles.explosion(p, [0, 0, 0], 1);
         this.events.explosions.push(p);
       } else alive.push(w);
