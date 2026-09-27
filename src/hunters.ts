@@ -11,7 +11,7 @@ import { BOLT_SPEED, segmentBox, type BoltTargets, type Combat } from "./effects
 import type { Particles } from "./effects/particles";
 import type { Vec3 } from "./math";
 import { Player, type Colliders } from "./player";
-import { Car } from "./vehicles/car";
+import { Car, type RoadSurface } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { footprint, type Parked, type Parking } from "./vehicles/parking";
 import { InstanceList, type Traffic } from "./vehicles/traffic";
@@ -49,6 +49,8 @@ export interface Quarry {
 
 export interface HuntWorld {
   colliders: Colliders;
+  /** The road under a point, for the hunters who drive; see `RoadSurface` in vehicles/car.ts. */
+  road: RoadSurface;
   traffic: Traffic;
   parking: Parking;
   combat: Combat;
@@ -713,7 +715,7 @@ export class Hunters implements BoltTargets {
       obstacles.push(...this.scratch);
     }
     const boost = flat > 90 && Math.abs(wrap(heading - car.yaw)) < 0.3;
-    car.update(dt, { throttle, steer, handbrake: false, boost }, this.w.colliders, Float32Array.from(obstacles));
+    car.update(dt, { throttle, steer, handbrake: false, boost }, this.w.colliders, Float32Array.from(obstacles), this.w.road);
 
     // traffic gets shoved off the road
     const f = footprint(car.kind, car.yaw);

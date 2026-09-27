@@ -9,7 +9,7 @@ import {
 import { Finish, Mat, Win, type Tint } from "./materials";
 import { PAINT_COLORS } from "../vehicles/models";
 import {
-  ARTERY, ARTERY_HALF, arteryFrame, arteryLines, arteryScale, blocksIn, cellOf, checkSeed, grain, RIVER_HALF,
+  ARTERY, ARTERY_HALF, arteriesNear, arteryFrame, arteryLines, arteryScale, blocksIn, cellOf, checkSeed, grain, RIVER_HALF,
   neighbours, QUAY, QUAY_RISE, rememberBySeed, riverFrame, riverLines, riverNear, ROAD, streetsOf, TERRACE, terrainAt, TILE,
   waterLevel,
   type Site, type Street, type Vec2,
@@ -226,11 +226,19 @@ function ring(
       runs = runs.flatMap(([s0, s1]) =>
         [[s0, Math.min(s1, t - w)], [Math.max(s0, t + w), s1]] as [number, number][]);
     }
+    // Never deeper than the polygon is from this edge. A band reaches inward by a fixed amount,
+    // and a block narrower than two of them — the slivers left between streets are a few metres
+    // across — had its paving run clean out of the far side into the road beyond: five metres of
+    // pavement over somebody's carriageway, flat at the sliver's own level, standing a couple of
+    // metres over the asphalt it covered wherever the street was on a flank.
+    let reach = 0;
+    for (const v of poly) reach = Math.max(reach, -(nx * (v[0] - a[0]) + nz * (v[1] - a[1])));
+    const d = Math.max(0.05, Math.min(depth, reach));
     for (const [s0, s1] of runs) {
       if (s1 - s0 < 0.3) continue;
-      const mx = a[0] + (vx / l) * ((s0 + s1) / 2) - nx * depth / 2;
-      const mz = a[1] + (vz / l) * ((s0 + s1) / 2) - nz * depth / 2;
-      b.box(mx - (s1 - s0) / 2, y0, mz - depth / 2, mx + (s1 - s0) / 2, top, mz + depth / 2,
+      const mx = a[0] + (vx / l) * ((s0 + s1) / 2) - nx * d / 2;
+      const mz = a[1] + (vz / l) * ((s0 + s1) / 2) - nz * d / 2;
+      b.box(mx - (s1 - s0) / 2, y0, mz - d / 2, mx + (s1 - s0) / 2, top, mz + d / 2,
         mat, tint, style, { turn, detail: opts.detail });
     }
   }
@@ -604,6 +612,63 @@ function arterialBlend(x: number, z: number, margin: number, feather: number): {
   return wsum > 0 ? { y: sum / wsum, w: most } : null;
 }
 
+/**
+ * How far past a main road's kerb its carriageway still owns the ground: the widest its own
+ * structure ever gets, which is the bridge deck at ARTERY_HALF + 2.
+ */
+const ARTERY_MARGIN = 2.5;
+
+/**
+ * Whether a point lies in a main road's carriageway, measured against the road's own straight
+ * pieces rather than against the stretches laid along it.
+ *
+ * `arterialAt` can only answer where the arterial has stretches, and there are three places it
+ * has none: where the blocks either side run out and the carriageway is laid as fill instead,
+ * over a river, and on the approach ramps up to a bridge. A side street asking only that ran
+ * into all three — laid at its own level across a main road that was there after all, so a car
+ * on the side street drove through the fill, and under a ramp it came up through the deck.
+ *
+ * `segs` are the pieces gathered once for the whole street; see `cutPieces`. They are the ones
+ * the network already keeps for clipping blocks off these roads, so this costs a few dot
+ * products and nothing else — which matters, because it is asked for every metre of every
+ * street in the city.
+ */
+function onArtery(segs: [Vec2, Vec2][], x: number, z: number): boolean {
+  const reach = ARTERY_HALF + ARTERY_MARGIN;
+  for (const [a, b] of segs) {
+    const dx = b[0] - a[0], dz = b[1] - a[1];
+    const l2 = dx * dx + dz * dz;
+    const t = l2 < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / l2));
+    if (Math.hypot(x - (a[0] + t * dx), z - (a[1] + t * dz)) <= reach) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a point is inside any block, kept by a coarse cell.
+ *
+ * Only the Voronoi cells and the width of the streets round them go into this, so it asks
+ * nothing that is worked out from a street's own stretches and can be asked from inside the
+ * cutting of them.
+ */
+const blockCells = rememberBySeed<string, Vec2[][]>();
+
+function inBlock(x: number, z: number): boolean {
+  const ci = Math.floor(x / PIECE_CELL), cj = Math.floor(z / PIECE_CELL);
+  const key = `${ci},${cj}`;
+  checkSeed();
+  let near = blockCells.get(key);
+  if (!near) {
+    near = blocksIn(ci * PIECE_CELL - 260, cj * PIECE_CELL - 260,
+      (ci + 1) * PIECE_CELL + 260, (cj + 1) * PIECE_CELL + 260)
+      .map((s) => cellOf(s))
+      .filter((p): p is Vec2[] => !!p && p.length >= 3);
+    if (blockCells.size > 2048) blockCells.clear();
+    blockCells.set(key, near);
+  }
+  return near.some((p) => inPoly(p, x, z));
+}
+
 function arterialAt(x: number, z: number, margin: number): number | null {
   let top: number | null = null;
   for (const p of arterialPiecesNear(x, z)) {
@@ -630,6 +695,10 @@ function cutPieces(st: Street): Piece[] {
   const arterial = st.half >= ARTERY_HALF - 0.5;
   const ext = arterial ? 0 : Math.min(st.half * 1.8, 30);
   const hw = st.half + 0.4;
+  // Every main road that comes near this street, gathered once for the whole of it rather than
+  // per sample: see `onArtery`.
+  const mains = arterial ? []
+    : arteriesNear((ax + bx) / 2, (az + bz) / 2, L / 2 + ext + ARTERY_HALF + ARTERY_MARGIN + 1);
   // The height of the ground on the centreline, the same number the traffic drives on — except
   // near either end, where it holds the height of the corner instead.
   //
@@ -694,7 +763,16 @@ function cutPieces(st: Street): Piece[] {
   // does, and its approach is already at the main road's level to meet it.
   const wet = (s: number) => {
     const x = ax + ux * s, z = az + uz * s;
-    if (corners && arterialAt(x, z, 0) !== null) return true;
+    // The main road's carriageway is the junction, wherever it is: laid as its own stretches,
+    // filled in where the blocks beside it ran out, or carried over a valley on a bridge whose
+    // ramps come down through here. A side street stops at the kerb in all three.
+    if (corners && (arterialAt(x, z, 0) !== null || onArtery(mains, x, z))) return true;
+    // Past its own ends a street is only there to fill the junction, and a junction is as wide
+    // as the roads that meet in it — not as wide as `ext`, which carries the slab up to thirty
+    // metres on. Where the overhang has left the junction and run into a block it is asphalt
+    // under somebody's pavement: a carriageway the city never draws, which a car is told it may
+    // drive on and sinks two metres into.
+    if (corners && (s < 0 || s > L) && inBlock(x, z)) return true;
     const r = riverNear(x, z, RIVER_HALF + QUAY + st.half);
     return !!r && r.dist < RIVER_HALF + QUAY + 2;
   };
@@ -865,18 +943,6 @@ function topPieceAt(x: number, z: number): [Piece, number] | null {
  */
 export function roadRideAt(x: number, z: number): number | null {
   return topPieceAt(x, z)?.[1] ?? null;
-}
-
-/** The street surface under a point, if there is one: the lowest stretch covering it. */
-function pieceAt(pieces: Piece[], x: number, z: number): number | null {
-  let y: number | null = null;
-  for (const p of pieces) {
-    const dx = x - p.cx, dz = z - p.cz;
-    if (Math.abs(dx * p.ux + dz * p.uz) > p.hl || Math.abs(dz * p.ux - dx * p.uz) > p.hw) continue;
-    const at = pieceYOn(p, x, z);
-    if (y === null || at < y) y = at;
-  }
-  return y;
 }
 
 /**
@@ -1136,10 +1202,10 @@ function terrain(
     for (let j = 0; j <= W; j++) {
       const x = x0 + (i - P) * TILE, z = z0 + (j - P) * TILE;
       let h = terrainAt(x, z), seed = -Infinity;
-      const under = pieceAt(lanes, x, z);
       const over = pieceTopAt(lanes, x, z);
       const on = covered(x, z);
-      if (under !== null) h = Math.min(h, under - 0.05);
+      // under the carriageway over it, and coming down to meet one it stands beside
+      h = Math.min(h, roadCut(lanes, x, z));
       if (on) h = Math.min(h, on.base - 0.05);
       // Inside the channel the ground is riverbed, and the bed is under the water, not level
       // with it: left at the height the land happens to be, it stands up through the surface
@@ -1224,13 +1290,53 @@ function terrain(
   }
 }
 
+/**
+ * How far a cutting reaches out from a road the ground stands above.
+ *
+ * The same eight tiles the embankment spreads over, for the same reason: the two are one rule
+ * seen from either side, and what the ground may do beside a road is come to meet it.
+ */
+const CUT_TILES = APRON_TILES;
+
+/**
+ * The highest the ground may stand for the roads near a point: level with the lowest
+ * carriageway over it, and rising away from one it is beside at the slope an embankment comes
+ * down at.
+ *
+ * Only holding the corners a road actually covered was not enough, because the grid of corners
+ * is five metres square and a kerb is a line drawn across it at any angle. The tile *across* a
+ * kerb had one corner pinned under the asphalt and the other still up at the hill's own height,
+ * and the plane between them stands through the carriageway: a good two metres of hillside
+ * inside the road on the steepest ground the city can grow. To a car that is a wall across the
+ * street; from the pavement it is a cliff at the kerb.
+ *
+ * So a road cut into a flank gets a cutting, at the slope the runner can walk and the car can
+ * drive. It costs nothing past the ground's own steepest grade — which is this same slope, so a
+ * hillside that merely rises away from a road it is level with is not touched at all.
+ */
+function roadCut(pieces: Piece[], x: number, z: number): number {
+  let cap = Infinity;
+  const far = CUT_TILES * TILE;
+  for (const p of pieces) {
+    const dx = x - p.cx, dz = z - p.cz;
+    // distance out to the carriageway's own rectangle, which is zero anywhere over it
+    const along = Math.max(0, Math.abs(dx * p.ux + dz * p.uz) - p.hl);
+    const across = Math.max(0, Math.abs(dz * p.ux - dx * p.uz) - p.hw);
+    if (along > far || across > far) continue;
+    const out = Math.hypot(along, across);
+    if (out > far) continue;
+    // the surface at the nearest point of the carriageway; a stretch is a plane across its
+    // width, so `pieceYOn` already answers for a point beside it
+    cap = Math.min(cap, pieceYOn(p, x, z) - 0.05 + out * APRON_GRADE);
+  }
+  return cap;
+}
+
 /** The lowest thing laid over a point that the ground there has to stay under. */
 function capOf(
   x: number, z: number, lanes: Piece[], covered: (x: number, z: number) => Cover | null,
 ): number {
-  let cap = Infinity;
-  const under = pieceAt(lanes, x, z);
-  if (under !== null) cap = Math.min(cap, under - 0.05);
+  let cap = roadCut(lanes, x, z);
   const on = covered(x, z);
   if (on) cap = Math.min(cap, on.base - 0.05);
   // The channel is a cap like any other. Cutting the bed when the corner heights are first
@@ -1280,8 +1386,10 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
     return null;
   };
   const ground = new Builder(new Rng(hashInt(rx, rz, 5)));
-  // as far out as the embankments reach, or a road just past the seam raises no ground here
-  const reach = APRON_TILES * TILE;
+  // As far out as the embankments reach and the cuttings are read, or a road just past the seam
+  // raises no ground here — and, worse, two regions sharing a corner would not see the same
+  // roads from it and so would not agree on its height, which is a seam in the ground.
+  const reach = (APRON_TILES + CUT_TILES) * TILE;
   const lanes = streetPieces(x0 - reach, z0 - reach, x0 + REGION + reach, z0 + REGION + reach);
   terrain(ground, x0, z0, covered, lanes);
   streets(ground, x0, z0);
@@ -1884,10 +1992,32 @@ function rails(b: Builder, x0: number, z0: number): void {
         put(0.3, y, y + 0.9, 4.9, Mat.Panel, t); // upstands
         put(0.3, y, y + 0.9, -4.9, Mat.Panel, t);
         for (const off of [-2.6, -1.1, 1.1, 2.6]) put(0.09, y, y + 0.16, off, Mat.Metal, steel); // rails
-        // a pier every third bay, down to whatever the ground is doing underneath
+        // A portal every third bay: a column either side of the road, clear of the kerb, and a
+        // crossbeam under the deck between them. This used to be a single pier on the arterial's
+        // own centreline — a three-metre block of concrete standing in the middle of a
+        // thirty-five-metre carriageway. The traffic keeps to its lanes and never met one;
+        // anybody driving the road themselves met one every thirty metres at speed, which is
+        // most of what made a road with a railway over it undriveable.
         if (((k % 3) + 3) % 3 === 0) {
-          const foot = groundAt(p[0], p[1]);
-          b.box(p[0] - 1.5, foot - 3, p[1] - 1.5, p[0] + 1.5, y - DEEP, p[1] + 1.5, Mat.Board, t, Finish.Ribbed, { detail: false });
+          const off = ARTERY_HALF + 2.2; // beyond the widest carriageway that can run under it
+          const beam = y - DEEP - 1.1;
+          const feet = ([1, -1] as const).map(
+            (side) => [p[0] - dir[1] * off * side, p[1] + dir[0] * off * side] as const,
+          );
+          // Not where a street crosses. Clear of the arterial is not clear of everything: a side
+          // street's slab runs on past its own end to fill the junction, so at a corner both feet
+          // of the portal can land in a carriageway — and a column in a side road is the pier in
+          // the middle of the arterial again, moved twenty metres sideways. The bays either side
+          // carry the deck over the gap.
+          if (feet.every(([cx, cz]) => roadTopAt(cx, cz) === null)) {
+            for (const [cx, cz] of feet) {
+              b.box(cx - 1.5, groundAt(cx, cz) - 3, cz - 1.5, cx + 1.5, beam, cz + 1.5,
+                Mat.Board, t, Finish.Ribbed, { detail: false });
+            }
+            // square across the road, so it reads as one frame with the two columns
+            b.box(p[0] - off - 1.5, beam, p[1] - 1.2, p[0] + off + 1.5, y - DEEP, p[1] + 1.2,
+              Mat.Board, t, Finish.Ribbed, { turn: turn + Math.PI / 2, detail: false });
+          }
         }
       }
     }

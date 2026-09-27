@@ -10,12 +10,12 @@ import type { Colliders, Player } from "./player";
 import { Lifts } from "./lifts";
 import { Boat } from "./vehicles/boat";
 import { Metro, metroCycle, onTrack, trackOff, trainAt, TRAIN } from "./vehicles/metro";
-import { Car } from "./vehicles/car";
+import { Car, type RoadSurface } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { Parking } from "./vehicles/parking";
 import { InstanceList, Traffic } from "./vehicles/traffic";
 import type { VehicleLists } from "./renderer";
-import { PLAT_RISE, type Station } from "./city/plan";
+import { PLAT_RISE, roadRideAt, type Station } from "./city/plan";
 import type { World } from "./world";
 
 const REACH = 1.6; // how close (to the body) you must be to get in
@@ -96,6 +96,14 @@ export class Rides {
     }
     return out;
   };
+
+  /**
+   * The road surface under a point, for whatever rides along it rather than standing on it.
+   *
+   * The same plane the carriageway is drawn from and the traffic drives on; see `RoadSurface`
+   * in vehicles/car.ts for why a car cannot take this off collision instead.
+   */
+  readonly road: RoadSurface = roadRideAt;
 
   private staticColliders: Colliders = (x, z) => {
     const a = this.world.colliders(x, z), b = this.parking.boxes(x, z);
@@ -305,7 +313,7 @@ export class Rides {
       const obstacles = new Float32Array(traffic.length + hunters.length);
       obstacles.set(traffic);
       obstacles.set(hunters, traffic.length);
-      car.update(dt, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, this.colliders, obstacles);
+      car.update(dt, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, this.colliders, obstacles, this.road);
       // mouse looks around; the view drifts back behind the car when left alone
       this.carLookYaw -= c.mouseDX * 0.0022;
       this.carLookPitch = Math.max(-0.6, Math.min(0.5, this.carLookPitch - c.mouseDY * 0.0022));

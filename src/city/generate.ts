@@ -1943,6 +1943,26 @@ const SLAB_WIDTH = 0.8;
 const SLAB_LIMIT = 400;
 
 /**
+ * How far a patch of collision may stand above the surface it stands for, and the most pieces
+ * one slab will be cut into to hold it there.
+ *
+ * A slab carries the whole depth of the box across its own slice of one world axis, which is
+ * all the *outline* of a turned box needs. But a sheared box's top is a plane, and a patch of it
+ * has to be given the highest corner that plane reaches anywhere inside, since collision may
+ * never report less solid than there is. So the deeper the slab, the further its top can stand
+ * proud of the surface it is meant to be — and a five-metre ground tile at the kerb of a street
+ * that runs across the axes down a flank puts a slab inside the carriageway carrying the height
+ * of its far corner, metres up the hill. That is the ramp of nothing a car drove into.
+ *
+ * Half a metre, not a centimetre: whatever rides a surface reads its height from the surface
+ * itself (see `RoadSurface` in vehicles/car.ts), so this only has to keep the error down to
+ * something a kerb's worth of tolerance can absorb. Cutting to a centimetre would multiply the
+ * collision in the city several times over to buy nothing anybody can feel.
+ */
+const SHEAR_TOL = 0.5;
+const SHEAR_CUTS = 16;
+
+/**
  * Collision only speaks AABB, and a turned box seen from above is a tilted rectangle. So it
  * is handed over as a run of axis-aligned slabs across its wider side, each holding the full
  * depth of the rectangle over that slice: a staircase that hugs the true outline to within a
@@ -1985,8 +2005,24 @@ function turnedSlabs(
   // cut across whichever world axis the rectangle is longer on, so the slabs stay shallow
   const flip = bz1 - bz0 > bx1 - bx0;
   const u0 = flip ? bz0 : bx0, u1 = flip ? bz1 : bx1;
+  /**
+   * One patch, cut again across the depth the slab spans while the shear carries more than
+   * SHEAR_TOL over it. That depth is the long way of a slab, and so the whole of the error.
+   */
+  const patch = (x0: number, z0: number, x1: number, z1: number): void => {
+    const [hi, lo] = shearOver(x0, z0, x1, z1);
+    const cuts = Math.min(SHEAR_CUTS, Math.ceil((hi - lo) / SHEAR_TOL));
+    if (cuts <= 1) return out(x0, z0, x1, z1, hi, lo);
+    const [v0, v1] = flip ? [x0, x1] : [z0, z1];
+    const step = (v1 - v0) / cuts;
+    for (let k = 0; k < cuts; k++) {
+      const va = v0 + k * step, vb = va + step;
+      if (flip) out(va, z0, vb, z1, ...shearOver(va, z0, vb, z1));
+      else out(x0, va, x1, vb, ...shearOver(x0, va, x1, vb));
+    }
+  };
   const n = Math.max(1, Math.min(SLAB_LIMIT, Math.ceil((u1 - u0) / SLAB_WIDTH)));
-  if (n === 1) return out(bx0, bz0, bx1, bz1, ...shearOver(bx0, bz0, bx1, bz1));
+  if (n === 1) return patch(bx0, bz0, bx1, bz1);
   const U = flip ? pz : px, V = flip ? px : pz;
   const step = (u1 - u0) / n;
   for (let k = 0; k < n; k++) {
@@ -2006,8 +2042,8 @@ function turnedSlabs(
       }
     }
     if (lo > hi) continue; // the slice misses the rectangle entirely
-    if (flip) out(lo, ua, hi, ub, ...shearOver(lo, ua, hi, ub));
-    else out(ua, lo, ub, hi, ...shearOver(ua, lo, ub, hi));
+    if (flip) patch(lo, ua, hi, ub);
+    else patch(ua, lo, ub, hi);
   }
 }
 

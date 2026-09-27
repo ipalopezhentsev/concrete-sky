@@ -9,7 +9,7 @@ import { hashInt, Rng, setWorldSeed } from "../src/math";
 import { Player, type Input } from "../src/player";
 import { Flyer, type FlyInput } from "../src/vehicles/flyer";
 import { Car } from "../src/vehicles/car";
-import { Parking } from "../src/vehicles/parking";
+import { footprint, Parking } from "../src/vehicles/parking";
 import { Traffic } from "../src/vehicles/traffic";
 import { Combat } from "../src/effects/combat";
 import { Particles } from "../src/effects/particles";
@@ -579,6 +579,31 @@ for (const seed of [1971, 42, 777777]) {
   const spot = car2.exitSpot(cols);
   check("car can stop and be left", car2.canExit && spot !== null, `speed=${car2.speed.toFixed(2)} spot=${spot}`);
   void z0;
+
+  // On a road a car takes its height from the asphalt and reads collision only for what stands
+  // on the road (see `RoadSurface` in vehicles/car.ts). The treads and kerbstones that only
+  // describe the road have to stop counting; everything that is really standing on it must not.
+  const asphalt = () => 0;
+  const drive = (obstacle: number[]): number => {
+    const boxes = Float32Array.from([-30, -6, -200, 30, 0, 200, ...obstacle]); // carriageway, then the thing
+    const c = new Car(0, 0, 0, 0, false, [1, 0, 0]);
+    for (let t = 0; t < 8 * 60; t++)
+      c.update(1 / 60, { throttle: 1, steer: 0, handbrake: false, boost: false }, () => boxes, undefined, asphalt);
+    return c.pos[2];
+  };
+  const stopped = 38 - footprint("car", 0).hz + 0.1; // just short of a thing spanning z = 38..42
+  for (const [what, box] of [
+    ["a parked car", [-1, 0, 38, 1, 1.5, 42]],
+    ["a van", [-1, 0, 38, 1, 2.1, 42]],
+    ["a wall", [-10, 0, 38, 10, 12, 42]],
+    ["a lamp post", [-0.2, 0, 39.8, 0.2, 8.5, 40.2]],
+  ] as const) {
+    const at = drive([...box]);
+    check(`${what} on a road still stops a car`, at < stopped + 2, `reached z=${at.toFixed(2)}`);
+  }
+  // ... while the half-metre kerb a pavement on a flank puts at the roadside is ridden over
+  check("a car rides over a half-metre kerb on a road", drive([-30, -0.2, 38, 30, 0.55, 42]) > 60,
+    `reached z=${drive([-30, -0.2, 38, 30, 0.55, 42]).toFixed(0)}`);
 }
 
 // 9. shooting down a flyer from the traffic streams
@@ -964,6 +989,59 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
       `${inRoad}/${tried}${first ? ` first at ${first}` : ""}`);
   }
   setWorldSeed(1971);
+
+  // Nor may anything the city builds *over* a road come down inside it. The elevated railway
+  // stood a pier on the arterial's own centreline every third bay — three metres square,
+  // twenty-five up, in the middle of a thirty-five-metre carriageway. The traffic keeps to its
+  // lanes and never met one; anybody driving the road met one every thirty metres. It is a
+  // portal now, with its feet outside the kerb, so nothing solid stands in the roadway.
+  {
+    const { buildPlanRegion, hasRail, roadRideAt, piecesAtDebug } = await import("../src/city/plan");
+    const { REGION } = await import("../src/city/generate");
+    const { setFloor } = await import("../src/player");
+    for (const seed of [1971, 42, 777777]) {
+      setWorldSeed(seed);
+      setFloor(-400);
+      let rails = 0, standing = 0, first = "";
+      // collision from the regions round the origin, and every arterial that runs through them
+      const boxes: Float32Array[] = [];
+      for (let rx = -1; rx <= 1; rx++)
+        for (let rz = -1; rz <= 1; rz++)
+          for (const c of buildPlanRegion(rx, rz).colliders) boxes.push(c.boxes);
+      for (const axis of [0, 1] as const)
+        for (let line = -1; line <= 1; line++) {
+          if (!hasRail(axis, line)) continue;
+          rails++;
+          for (let s = -REGION; s < 2 * REGION; s += 3)
+            for (const off of [-ARTERY_HALF + 1, -8, 0, 8, ARTERY_HALF - 1]) {
+              const f = arteryFrame(axis, line, s);
+              const x = f.p[0] - f.dir[1] * off, z = f.p[1] + f.dir[0] * off;
+              if (Math.abs(x) > REGION || Math.abs(z) > REGION) continue;
+              // On the main road's own carriageway, not on a side street crossing it and not
+              // under the bridges that carry other roads over those — this is about what the
+              // railway puts down, and it puts it down along the arterial.
+              const y = roadRideAt(x, z);
+              if (y === null) continue;
+              if (!piecesAtDebug(x, z).some((p) => p.half >= ARTERY_HALF - 0.5)) continue;
+              // A column: something narrow standing well clear of the road, as against the lip
+              // of a carriageway lapping over this one at a junction, which is its own problem.
+              for (const b of boxes)
+                for (let i = 0; i < b.length; i += 6)
+                  if (b[i] < x && b[i + 3] > x && b[i + 2] < z && b[i + 5] > z &&
+                      b[i + 1] < y + 1.4 && b[i + 4] > y + 3 &&
+                      b[i + 3] - b[i] < 6 && b[i + 5] - b[i + 2] < 6) {
+                    standing++;
+                    first ||= `${x.toFixed(0)},${z.toFixed(0)}`;
+                    i = b.length;
+                  }
+            }
+        }
+      check(`nothing stands in an arterial carrying a railway (seed ${seed})`, rails > 0 && standing === 0,
+        `${rails} railed arterials, ${standing} obstructed samples${first ? ` first at ${first}` : ""}`);
+    }
+    setFloor(0);
+    setWorldSeed(1971);
+  }
 }
 
 // 10. the network city, through the same collision lookup the game uses
@@ -1066,6 +1144,95 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
       check(`network city: a lift takes the runner up to the deck (seed ${seed})`, rode && r.pos[1] > deck - 0.3 && r.pos[1] < deck + 1.5, // on the deck, or a step onto something on it
         `rode=${rode} y=${r.pos[1].toFixed(2)} deck=${deck.toFixed(2)}`);
     }
+
+    // Driving the streets. A car takes its height from the road itself rather than from the
+    // staircase of treads collision describes the road with (see `RoadSurface` in
+    // vehicles/car.ts) — so down the middle of a carriageway it should hold a steady height
+    // over the asphalt and reach the far end of the stretch it started on. Reading collision
+    // instead, it climbed onto the treads and stopped dead against the joints between them,
+    // and a fifth of the streets in the city could not be driven at all.
+    const { roadRideAt, piecesAtDebug } = await import("../src/city/plan");
+    const stretches = new Map<string, { a: [number, number]; b: [number, number]; s0: number; s1: number; half: number }>();
+    for (let x = 12; x < REGION; x += 9)
+      for (let z = 12; z < REGION; z += 9)
+        for (const q of piecesAtDebug(x, z)) {
+          const k = `${q.a[0].toFixed(0)},${q.a[1].toFixed(0)},${q.b[0].toFixed(0)},${q.b[1].toFixed(0)},${q.s0.toFixed(0)}`;
+          if (!stretches.has(k)) stretches.set(k, { a: q.a as [number, number], b: q.b as [number, number], s0: q.s0, s1: q.s1, half: q.half });
+        }
+    let drives = 0, short = 0, over = 0, frames = 0, worstOver = 0;
+    for (const q of stretches.values()) {
+      const len = Math.hypot(q.b[0] - q.a[0], q.b[1] - q.a[1]);
+      const ux = (q.b[0] - q.a[0]) / len, uz = (q.b[1] - q.a[1]) / len;
+      const clear = Math.min(q.s1, len) - Math.max(q.s0, 0);
+      if (clear < 30) continue;
+      // in a lane, not on the centreline: that is the painted line, and on an arterial
+      // carrying the elevated railway it is where the piers stand
+      const s = Math.max(q.s0, 0) + 5, off = Math.min(q.half - 2.6, 4.5);
+      const cx = q.a[0] + ux * s - uz * off, cz = q.a[1] + uz * s + ux * off;
+      const y = roadRideAt(cx, cz);
+      if (y === null) continue;
+      drives++;
+      const car = new Car(cx, y + 0.05, cz, Math.atan2(ux, uz), false, [1, 0, 0]);
+      car.speed = 22;
+      const reach = Math.min(clear - 6, 22 * 6);
+      for (let t = 0; t < 6 * 60; t++) {
+        car.update(1 / 60, { throttle: 0.55, steer: 0, handbrake: false, boost: false }, colliders, undefined, roadRideAt);
+        const road = roadRideAt(car.pos[0], car.pos[2]);
+        if (t > 6 && road !== null) {
+          over += Math.abs(car.pos[1] - road);
+          worstOver = Math.max(worstOver, Math.abs(car.pos[1] - road));
+          frames++;
+        }
+        if (Math.hypot(car.pos[0] - cx, car.pos[2] - cz) > reach) break;
+      }
+      if (Math.hypot(car.pos[0] - cx, car.pos[2] - cz) < reach * 0.9) short++;
+    }
+    // Not all of them: where a street runs across the axes down the steepest ground the city
+    // can grow, the ground tiles at its kerb are cut to the road only at their corners, and a
+    // tile between one corner under the road and one up the hill still reaches into the outer
+    // lane. That is the ground's cut to mend, not the car's.
+    check(`network city: streets can be driven (seed ${seed})`, drives >= 3 && short <= drives * 0.4,
+      `${drives - short}/${drives} stretches driven to the end`);
+    // And sitting on the asphalt rather than on the treads that stand for it. Reading collision
+    // for its height, a car rode a third of a metre over its own road on average and a metre and
+    // a half over it on the steepest streets, which is where it stopped being a road at all.
+    check(`network city: a car sits on the asphalt (seed ${seed})`, frames > 0 && over / frames < 0.15,
+      `${(over / frames * 100).toFixed(1)} cm over the road on average, worst ${(worstOver * 100).toFixed(0)} cm`);
+
+    // And a carriageway a vehicle is told it may drive on has to be one the city actually draws.
+    // Three things used to bury one: the overhang a stretch carries past its own end running on
+    // under a block's pavement, the paving band of a block too narrow to hold it crossing out
+    // into the road beyond, and a side street laid straight across a main road wherever that
+    // road happened to be fill or a bridge ramp rather than stretches of its own. A car on any
+    // of them was told to ride asphalt two metres under the ground it could see.
+    let inRoad = 0, solid = 0, tallest = 0, worstSpot = "";
+    for (let x = 12; x < REGION; x += 2)
+      for (let z = 12; z < REGION; z += 2) {
+        const y = roadRideAt(x, z);
+        if (y === null) continue;
+        // well inside a carriageway of its own, so the kerb and its pavement are not the answer
+        let inside = -Infinity;
+        for (const q of piecesAtDebug(x, z)) {
+          const len = Math.hypot(q.b[0] - q.a[0], q.b[1] - q.a[1]);
+          const ux = (q.b[0] - q.a[0]) / len, uz = (q.b[1] - q.a[1]) / len;
+          const s = (x - q.a[0]) * ux + (z - q.a[1]) * uz;
+          if (s < 0 || s > len) continue;
+          inside = Math.max(inside, q.hw - Math.abs((z - q.a[1]) * ux - (x - q.a[0]) * uz));
+        }
+        if (inside < 1.5) continue;
+        inRoad++;
+        const b = colliders(x, z);
+        for (let i = 0; i < b.length; i += 6)
+          if (b[i] < x && b[i + 3] > x && b[i + 2] < z && b[i + 5] > z &&
+              b[i + 1] < y + 1.2 && b[i + 4] > y + 0.45) {
+            solid++;
+            if (b[i + 4] - y > tallest) { tallest = b[i + 4] - y; worstSpot = `${x},${z}`; }
+            break;
+          }
+      }
+    check(`network city: nothing solid stands in a carriageway (seed ${seed})`,
+      inRoad > 500 && solid < inRoad * 0.015,
+      `${solid}/${inRoad} samples (${(solid / inRoad * 100).toFixed(2)}%), tallest road+${tallest.toFixed(2)} m${worstSpot ? ` at ${worstSpot}` : ""}`);
   }
   setFloor(0);
   setWorldSeed(1971);
