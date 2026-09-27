@@ -996,10 +996,14 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
   // lanes and never met one; anybody driving the road met one every thirty metres. It is a
   // portal now, with its feet outside the kerb, so nothing solid stands in the roadway.
   {
-    const { buildPlanRegion, hasRail, roadRideAt, piecesAtDebug } = await import("../src/city/plan");
+    const { buildPlanRegion, hasRail, rideAt } = await import("../src/city/plan");
     const { REGION } = await import("../src/city/generate");
     const { setFloor } = await import("../src/player");
-    for (const seed of [1971, 42, 777777]) {
+    // 206498 is the seed this was reported on: there the road under the railway is one of the
+    // stretches of arterial that have no blocks beside them and so no carriageway of their own —
+    // it is laid as fill, which is exactly what the first cut of this test and of the rule it
+    // checks both missed, because both asked `roadRideAt` and fill has no stretches to find.
+    for (const seed of [1971, 42, 777777, 206498]) {
       setWorldSeed(seed);
       setFloor(-400);
       let rails = 0, standing = 0, first = "";
@@ -1010,19 +1014,19 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
           for (const c of buildPlanRegion(rx, rz).colliders) boxes.push(c.boxes);
       for (const axis of [0, 1] as const)
         for (let line = -1; line <= 1; line++) {
-          if (!hasRail(axis, line)) continue;
-          rails++;
+          // Every main road, not only the ones carrying a railway. What the railway stands in the
+          // road is not always its *own* road: a portal foot set beyond one arterial's kerb lands
+          // in the middle of the second arterial wherever two of them cross.
+          if (hasRail(axis, line)) rails++;
           for (let s = -REGION; s < 2 * REGION; s += 3)
             for (const off of [-ARTERY_HALF + 1, -8, 0, 8, ARTERY_HALF - 1]) {
               const f = arteryFrame(axis, line, s);
               const x = f.p[0] - f.dir[1] * off, z = f.p[1] + f.dir[0] * off;
               if (Math.abs(x) > REGION || Math.abs(z) > REGION) continue;
-              // On the main road's own carriageway, not on a side street crossing it and not
-              // under the bridges that carry other roads over those — this is about what the
-              // railway puts down, and it puts it down along the arterial.
-              const y = roadRideAt(x, z);
+              // The surface a vehicle would ride here, which on a main road is its stretches,
+              // its fill or its bridge — never just the first of the three.
+              const y = rideAt(x, z, 1e6);
               if (y === null) continue;
-              if (!piecesAtDebug(x, z).some((p) => p.half >= ARTERY_HALF - 0.5)) continue;
               // A column: something narrow standing well clear of the road, as against the lip
               // of a carriageway lapping over this one at a junction, which is its own problem.
               for (const b of boxes)
@@ -1036,8 +1040,8 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
                   }
             }
         }
-      check(`nothing stands in an arterial carrying a railway (seed ${seed})`, rails > 0 && standing === 0,
-        `${rails} railed arterials, ${standing} obstructed samples${first ? ` first at ${first}` : ""}`);
+      check(`nothing stands in a main road’s carriageway (seed ${seed})`, rails > 0 && standing === 0,
+        `${rails} railed arterials in range, ${standing} obstructed samples${first ? ` first at ${first}` : ""}`);
     }
     setFloor(0);
     setWorldSeed(1971);
@@ -1151,7 +1155,7 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
     // over the asphalt and reach the far end of the stretch it started on. Reading collision
     // instead, it climbed onto the treads and stopped dead against the joints between them,
     // and a fifth of the streets in the city could not be driven at all.
-    const { roadRideAt, piecesAtDebug } = await import("../src/city/plan");
+    const { roadRideAt, rideAt, piecesAtDebug } = await import("../src/city/plan");
     const stretches = new Map<string, { a: [number, number]; b: [number, number]; s0: number; s1: number; half: number }>();
     for (let x = 12; x < REGION; x += 9)
       for (let z = 12; z < REGION; z += 9)
@@ -1176,7 +1180,7 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
       car.speed = 22;
       const reach = Math.min(clear - 6, 22 * 6);
       for (let t = 0; t < 6 * 60; t++) {
-        car.update(1 / 60, { throttle: 0.55, steer: 0, handbrake: false, boost: false }, colliders, undefined, roadRideAt);
+        car.update(1 / 60, { throttle: 0.55, steer: 0, handbrake: false, boost: false }, colliders, undefined, rideAt);
         const road = roadRideAt(car.pos[0], car.pos[2]);
         if (t > 6 && road !== null) {
           over += Math.abs(car.pos[1] - road);

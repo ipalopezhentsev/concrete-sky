@@ -15,7 +15,7 @@ import { Flyer } from "./vehicles/flyer";
 import { Parking } from "./vehicles/parking";
 import { InstanceList, Traffic } from "./vehicles/traffic";
 import type { VehicleLists } from "./renderer";
-import { PLAT_RISE, roadRideAt, type Station } from "./city/plan";
+import { PLAT_RISE, rideAt, type Station } from "./city/plan";
 import type { World } from "./world";
 
 const REACH = 1.6; // how close (to the body) you must be to get in
@@ -103,7 +103,7 @@ export class Rides {
    * The same plane the carriageway is drawn from and the traffic drives on; see `RoadSurface`
    * in vehicles/car.ts for why a car cannot take this off collision instead.
    */
-  readonly road: RoadSurface = roadRideAt;
+  readonly road: RoadSurface = rideAt;
 
   private staticColliders: Colliders = (x, z) => {
     const a = this.world.colliders(x, z), b = this.parking.boxes(x, z);

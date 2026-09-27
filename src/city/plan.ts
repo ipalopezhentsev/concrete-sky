@@ -1707,6 +1707,73 @@ export function roadY(axis: 0 | 1, line: number, s: number, x: number, z: number
 }
 
 /**
+ * The stations of every main road whose centreline passes within `reach` of a point.
+ *
+ * The traffic is handed its road and its station and never has to ask this. Anything driving
+ * itself has only where it is, and the roads are splines — so the station is found by walking
+ * onto the foot of the perpendicular, which on a road curved this gently lands in a step or two.
+ */
+function arteryStations(x: number, z: number, reach: number): { axis: 0 | 1; line: number; s: number; p: Vec2 }[] {
+  const out: { axis: 0 | 1; line: number; s: number; p: Vec2 }[] = [];
+  for (const axis of [0, 1] as const) {
+    for (const line of arteryLines(axis === 0 ? z : x, reach + 300)) {
+      let s = axis === 0 ? x : z;
+      for (let k = 0; k < 8; k++) {
+        const f = arteryFrame(axis, line, s);
+        const step = (x - f.p[0]) * f.dir[0] + (z - f.p[1]) * f.dir[1];
+        s += step;
+        if (Math.abs(step) < 0.02) break;
+      }
+      const { p } = arteryFrame(axis, line, s);
+      if (Math.hypot(p[0] - x, p[1] - z) <= reach) out.push({ axis, line, s, p });
+    }
+  }
+  return out;
+}
+
+/**
+ * The surface a vehicle rides at a point, or null where the city lays no carriageway over it.
+ *
+ * Everything the city calls a road, and `roadRideAt` alone is only the middle of the three:
+ *
+ * - a bridge and the ramps that climb to it, whose deck is the road wherever it runs;
+ * - the stretches of street, which is what `roadRideAt` answers;
+ * - and the fill laid straight along a main road wherever the blocks either side ran out, which
+ *   is a fifth of the arterial length on some seeds and has no stretches at all.
+ *
+ * Missing the last two is why a car on a main road with no blocks along it was told it was off
+ * the road entirely: it went back to reading its height off collision, and met the first bay of
+ * its own bridge ramp — two metres of cast concrete, thirty-eight across — as a block standing in
+ * the carriageway. The traffic drove through it, because the traffic reads `roadY` and knew all
+ * along that it was the road.
+ *
+ * `below` is the highest surface worth having: the road under the vehicle, never the flyover
+ * above it.
+ */
+export function rideAt(x: number, z: number, below: number): number | null {
+  let best: number | null = null;
+  const take = (y: number | null) => {
+    if (y !== null && y <= below && (best === null || y > best)) best = y;
+  };
+  take(roadRideAt(x, z));
+  const laid = roadTopAt(x, z) !== null;
+  for (const { axis, line, s, p } of arteryStations(x, z, ARTERY_HALF + ARTERY_MARGIN)) {
+    let onSpan = false;
+    for (const c of crossings(axis, line, Math.floor(s / ARTERY))) {
+      if (s <= c.a0 || s >= c.a1) continue;
+      take(spanY(axis, line, c, s));
+      onSpan = true;
+    }
+    // The fill, at the ground's own height along the centreline — which is the number
+    // `arterialFill` lays its bays from, so the surface and the line a car rides it on are the
+    // same. Only where no stretch was laid over the spot and no bridge is carrying it, which is
+    // exactly when the fill is what got built.
+    if (!onSpan && !laid) take(terrainAt(p[0], p[1]));
+  }
+  return best;
+}
+
+/**
  * Height of a bridge's surface at a station: the deck over the crossing itself, and the climb
  * up to it from the road on the bank over either ramp.
  *
@@ -1817,6 +1884,20 @@ function bayOf(axis: 0 | 1, line: number, s0: number, s1: number, halfW: number)
   };
 }
 
+/**
+ * Whether a carriageway other than this road runs over a point: a street, or a second main road.
+ *
+ * What a bridge may not do is wall another road off. Over the water this is false everywhere and
+ * the deck gets its parapets as before; it is only the approach ramps, which come down to the
+ * bank at grade and can cross anything on the way, that ever answer true.
+ */
+function crossedHere(axis: 0 | 1, line: number, x: number, z: number): boolean {
+  if (roadTopAt(x, z) !== null) return true;
+  for (const st of arteryStations(x, z, ARTERY_HALF + ARTERY_MARGIN))
+    if (st.axis !== axis || st.line !== line) return true;
+  return false;
+}
+
 /** One bridge: deck, parapets and piers, from station `s0` to `s1` along the road. */
 function span(
   b: Builder, axis: 0 | 1, line: number, c: Crossing, t: Tint, x0: number, z0: number,
@@ -1844,8 +1925,18 @@ function span(
       b.box(cx - len / 2, y0 - drop, cz - halfW, cx + len / 2, y1 - drop, cz + halfW, mat, t, style, { turn, rise, ...opts });
     };
     put(HALF, mid - 2.2, mid, 0, Mat.Board, Finish.Cast, { detail: false });
-    put(0.4, mid, mid + 1.15, HALF - 0.4, Mat.Panel);
-    put(0.4, mid, mid + 1.15, -(HALF - 0.4), Mat.Panel);
+    // Parapets, except where another road crosses the deck. A bridge's approach ramp comes down
+    // to the bank at grade, and on the way it can run straight across a second main road — and
+    // then its parapet is a metre of panel standing right across that road's carriageway. The
+    // traffic drove through it, because the traffic does not collide with the city; anybody
+    // driving it themselves met a concrete block across the road with no way round. The deck is
+    // left where it is and the two roads simply cross on it.
+    for (const side of [1, -1] as const) {
+      const off = side * (HALF - 0.4);
+      const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
+      if (crossedHere(axis, line, cx, cz)) continue;
+      put(0.4, mid, mid + 1.15, off, Mat.Panel);
+    }
   }
   // piers, standing on the bed clear of the water
   const piers = Math.max(1, Math.round((s1 - s0) / 46));
@@ -2004,12 +2095,14 @@ function rails(b: Builder, x0: number, z0: number): void {
           const feet = ([1, -1] as const).map(
             (side) => [p[0] - dir[1] * off * side, p[1] + dir[0] * off * side] as const,
           );
-          // Not where a street crosses. Clear of the arterial is not clear of everything: a side
-          // street's slab runs on past its own end to fill the junction, so at a corner both feet
-          // of the portal can land in a carriageway — and a column in a side road is the pier in
-          // the middle of the arterial again, moved twenty metres sideways. The bays either side
-          // carry the deck over the gap.
-          if (feet.every(([cx, cz]) => roadTopAt(cx, cz) === null)) {
+          // Not where another road crosses. Clear of this arterial is not clear of everything: a
+          // side street's slab runs past its own end to fill the junction, and where two main
+          // roads cross, a foot set beyond the kerb of one stands in the middle of the other — and
+          // a column in a road is the pier in the middle of the arterial again, moved twenty
+          // metres sideways. Asked of the roads' own lines, because a main road with no blocks
+          // along it is laid as fill and has no stretches for `roadTopAt` to find. The bays either
+          // side carry the deck over the gap.
+          if (feet.every(([cx, cz]) => !crossedHere(axis, line, cx, cz))) {
             for (const [cx, cz] of feet) {
               b.box(cx - 1.5, groundAt(cx, cz) - 3, cz - 1.5, cx + 1.5, beam, cz + 1.5,
                 Mat.Board, t, Finish.Ribbed, { detail: false });

@@ -13,7 +13,7 @@ export interface DriveInput {
 }
 
 /**
- * The surface a road lays over a point, or null where no road covers it.
+ * The carriageway laid over a point at or below `below`, or null where there is none.
  *
  * Collision cannot answer this, and that is the whole reason it is asked separately. A stretch
  * of street is one tilted slab, but collision only speaks in axis-aligned boxes — so the slab is
@@ -25,10 +25,11 @@ export interface DriveInput {
  * wherever the next stretch's treads stood lower — which is a road that cannot be driven.
  *
  * So the car rides the plane the asphalt is drawn from, which is the same one the traffic has
- * always driven on (see `roadY` in city/plan.ts), and reads collision for the things standing
- * on the road rather than for the road itself.
+ * always driven on (see `rideAt` in city/plan.ts), and reads collision for the things standing
+ * on the road rather than for the road itself. `below` keeps the answer to the road *under* the
+ * car: a flyover twenty metres up is something to drive beneath, not a surface to be lifted onto.
  */
-export type RoadSurface = (x: number, z: number) => number | null;
+export type RoadSurface = (x: number, z: number, below: number) => number | null;
 
 /**
  * What still counts as the road rather than as something standing on it: a box whose top is
@@ -143,11 +144,9 @@ export class Car {
 
     // The asphalt under the car, if it is on a road. Taken once, at the car's own middle, and
     // held for the whole step: a stretch of road is a plane, so over one frame's travel it
-    // cannot be out by more than the gradient times a car's length. A road *above* the car —
-    // the overpass it is driving under — is not the road it is on, so a surface out of reach
-    // upward is no surface at all.
-    const under = surface?.(this.pos[0], this.pos[2]) ?? null;
-    const road: Road | null = under === null || under > this.pos[1] + STEP ? null
+    // cannot be out by more than the gradient times a car's length.
+    const under = surface?.(this.pos[0], this.pos[2], this.pos[1] + STEP) ?? null;
+    const road: Road | null = under === null ? null
       : { y: under, reach: under + ROAD_STEP, ceiling: under + ROAD_SLACK, floor: under - ROAD_DEEP };
     /** The highest thing the car will climb onto from where it is: anything over this is a wall. */
     const reach = road ? road.reach : this.pos[1] + STEP;
