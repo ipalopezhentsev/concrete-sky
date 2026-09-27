@@ -5,7 +5,7 @@ import {
 } from "../src/city/generate";
 import { ARTERY_HALF, arteryFrame, blockAt, blocksIn, cellOf, SLOT } from "../src/city/network";
 import { liftState, Lifts } from "../src/lifts";
-import { Rng, setWorldSeed } from "../src/math";
+import { hashInt, Rng, setWorldSeed } from "../src/math";
 import { Player, type Input } from "../src/player";
 import { Flyer, type FlyInput } from "../src/vehicles/flyer";
 import { Car } from "../src/vehicles/car";
@@ -23,6 +23,45 @@ const check = (name: string, ok: boolean, detail = "") => {
 };
 
 const boxesOf = (b: Builder): Float32Array => collidersOf(b);
+
+/**
+ * `hashInt` against the four lines of BigInt it used to be. Everything in the city comes
+ * out of that function, so the 32-bit arithmetic that replaced them has to give the same
+ * answer for every seed and every argument, down to the last bit, or a saved link no
+ * longer brings back the city it was saved from.
+ */
+{
+  const M64 = (1n << 64n) - 1n;
+  const plain = (seedBig: bigint, values: number[]): number => {
+    let h = (0x9e3779b97f4a7c15n ^ seedBig) & M64;
+    for (const v of values) {
+      h ^= BigInt.asUintN(64, BigInt(Math.trunc(v)));
+      h = (h * 0xbf58476d1ce4e5b9n) & M64;
+      h ^= h >> 31n;
+      h = (h * 0x94d049bb133111ebn) & M64;
+      h ^= h >> 29n;
+    }
+    return Number(h >> 11n);
+  };
+  const edges = [0, 1, -1, 41, 65535, 65536, 2147483647, -2147483648, 4294967295, -4294967296, 2 ** 52, -(2 ** 52)];
+  const rng = new Rng(4242);
+  let mismatch = "";
+  let cases = 0;
+  for (const s of [1971, 0, 696531, 4294967295]) {
+    setWorldSeed(s);
+    for (let arity = 0; arity <= 4 && !mismatch; arity++)
+      for (let i = 0; i < 4000 && !mismatch; i++) {
+        const args: number[] = [];
+        for (let k = 0; k < arity; k++) {
+          args.push(i < edges.length ? edges[(i + k) % edges.length] : Math.floor((rng.next() - 0.5) * 2 ** 34));
+        }
+        cases++;
+        if (hashInt(...args) !== plain(BigInt(s >>> 0), args)) mismatch = `seed ${s} args ${args.join(",")}`;
+      }
+  }
+  check("hashInt matches the 64-bit arithmetic it stands in for", !mismatch, mismatch || `${cases} cases`);
+  setWorldSeed(1971); // back to the default the tests below start from
+}
 
 /**
  * Pairs of boxes with a face in the same plane, pointing the same way and overlapping: the two
@@ -1026,6 +1065,127 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
       const deck = lift.y1 - 1.05;
       check(`network city: a lift takes the runner up to the deck (seed ${seed})`, rode && r.pos[1] > deck - 0.3 && r.pos[1] < deck + 1.5, // on the deck, or a step onto something on it
         `rode=${rode} y=${r.pos[1].toFixed(2)} deck=${deck.toFixed(2)}`);
+    }
+  }
+  setFloor(0);
+  setWorldSeed(1971);
+}
+
+// 11. the subway: down the entrance, onto the platform, and a train that comes and goes
+{
+  const { buildPlanRegion, stationsNear, planSpawn, PLAT_RISE } = await import("../src/city/plan");
+  const { Metro, metroCycle, trainAt, PERIOD, DWELL, TRAIN } = await import("../src/vehicles/metro");
+  const { setFloor } = await import("../src/player");
+  const { REGION_CELLS: RC } = await import("../src/city/generate");
+  for (const seed of [1971, 696531]) {
+    setWorldSeed(seed);
+    setFloor(-400);
+    const sp = planSpawn();
+    const near = stationsNear(sp.x, sp.z, 1600)
+      .sort((a, b) => Math.hypot(a.x - sp.x, a.z - sp.z) - Math.hypot(b.x - sp.x, b.z - sp.z));
+    check(`subway: the city has stations (seed ${seed})`, near.length >= 2, `${near.length} within 1.6 km of the spawn`);
+    if (!near.length) continue;
+    const st = near[0];
+
+    // Collision the same way the world serves it, around the entrance.
+    const cells = new Map<string, Float32Array[]>();
+    const loaded = new Set<string>();
+    const load = (rx: number, rz: number) => {
+      if (loaded.has(`${rx},${rz}`)) return;
+      loaded.add(`${rx},${rz}`);
+      for (const c of buildPlanRegion(rx, rz).colliders) {
+        const k = `${c.ci},${c.cj}`;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k)!.push(c.boxes);
+      }
+    };
+    // The station is built by the region its platform is in, and it reaches into the ones
+    // around it — the entrance can be over a seam. The game has all of them streamed in;
+    // loading only the one under each lookup would leave the stair out of the answer.
+    const sr = [Math.floor(st.x / (CELL * RC)), Math.floor(st.z / (CELL * RC))];
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) load(sr[0] + i, sr[1] + j);
+    const colliders = (x: number, z: number) => {
+      const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+      const parts: Float32Array[] = [];
+      for (let i = ci - 1; i <= ci + 1; i++)
+        for (let j = cj - 1; j <= cj + 1; j++) {
+          load(Math.floor(i / RC), Math.floor(j / RC));
+          for (const p of cells.get(`${i},${j}`) ?? []) parts.push(p);
+        }
+      const out = new Float32Array(parts.reduce((a, p) => a + p.length, 0));
+      let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    };
+
+    // Down the stair, and — the part that matters — walked into from each of the four sides
+    // in turn. An entrance you can only get into from one end is a hole in the pavement from
+    // everywhere else, which is exactly what a wall round the opening made of it.
+    const c = Math.cos(st.yaw), s = Math.sin(st.yaw);
+    const at = (along: number, across: number): [number, number] =>
+      [st.shaftX + s * along + c * across, st.shaftZ + c * along - s * across];
+    const mezz = st.y + 6.8;
+    let ways = 0;
+    for (const [la, ac] of [[9, 0], [-9, 0], [0, 8], [0, -8]] as [number, number][]) {
+      const from = at(la, ac);
+      const p = new Player(from[0], st.top + 1, from[1], st.yaw);
+      // the shape of a switchback: one column to the far landing, across it, back down the
+      // other. Walked long enough to take whichever flight the stair starts with.
+      for (let i = 0; i < 22 && p.pos[1] > mezz + 1.2; i++) {
+        walk(p, colliders(p.pos[0], p.pos[2]), [at(i % 4 < 2 ? -4.4 : 4.4, (i + 1) % 4 < 2 ? 1.0 : -1.0)], 8);
+      }
+      if (p.pos[1] < mezz + 1.5) ways++;
+    }
+    // Not all four: an entrance stands on a pavement, so something is often built behind it.
+    // But one is not enough either — that is an entrance with a single way in and a wall
+    // from every other angle, which is what a runner walking up to one usually finds.
+    check(`subway: the stair goes down from more than one side (seed ${seed})`, ways >= 2,
+      `${ways} of 4 approaches reached the mezzanine`);
+
+    // On down the well to the platform, starting where the passage arrives on the concourse.
+    //
+    // The opening over the well is set out in stations along the line and the stair under it
+    // in metres, and where the spline stretches those are not the same length: the top of the
+    // flight ends up buried under the roof and the foot of the opening has nothing in it, so
+    // the way down to the train is a hole in the floor with no stair in it.
+    const on = (along: number, off: number): [number, number] =>
+      [st.x + s * along - c * off, st.z + c * along + s * off];
+    const plat = st.y + PLAT_RISE;
+    const door = on(0, Math.sign(st.off * st.side) * 6);
+    const rider = new Player(door[0], mezz + 1, door[1], st.yaw);
+    for (let i = 0; i < 12 && rider.pos[1] > plat + 1.2; i++) {
+      walk(rider, colliders(rider.pos[0], rider.pos[2]), [on(0, 0), on(-6, 0), on(-18, 0)], 8);
+    }
+    check(`subway: the well stair reaches the platform (seed ${seed})`, rider.pos[1] < plat + 1.5,
+      `ended at y=${rider.pos[1].toFixed(2)}, platform=${plat.toFixed(2)}`);
+
+    // The timetable: both directions call at the platform, and they do not do it together.
+    let calls = 0;
+    for (let t = 0; t < PERIOD * 2; t += 0.5) {
+      for (const dir of [1, -1] as const) {
+        if (metroCycle(t, dir).stopped && trainAt(st.axis, st.line, st.k, dir, t) === st.s) calls++;
+      }
+    }
+    check(`subway: trains call at every platform (seed ${seed})`, calls > 0, `${calls} half-seconds with a train standing`);
+
+    // A ride: board, and stay on until the train next comes to a stand. It runs straight
+    // through a slot with no platform, so the next stop is the next station, however many
+    // slots along that is.
+    const ride = new Metro(st.axis, st.line, 1, st.k, 0);
+    const from = ride.stop?.name;
+    let standing = false, got = ride.stop, rode = 0;
+    for (let t = 0.1; t <= PERIOD * 5 && !(standing && ride.slot > st.k); t += 0.1) {
+      standing = ride.update(0.1, t, 0, 0).stopped;
+      got = ride.stop;
+      rode = t;
+    }
+    check(`subway: a ride reaches the next stop (seed ${seed})`, standing && !!got && ride.slot > st.k,
+      `${from} -> ${got ? got.name : "nowhere"} after ${rode.toFixed(0)} s, ${ride.slot - st.k} slot(s) on`);
+    if (got) {
+      const exit = ride.exitSpot()!;
+      check(`subway: stepping out lands on the platform (seed ${seed})`,
+        Math.abs(exit[1] - (got.y + PLAT_RISE)) < 0.01 && Math.hypot(exit[0] - got.x, exit[2] - got.z) < TRAIN,
+        `exit y=${exit[1].toFixed(2)} platform=${(got.y + PLAT_RISE).toFixed(2)}`);
     }
   }
   setFloor(0);

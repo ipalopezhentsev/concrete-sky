@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { boatBoxes, carriageBoxes, carBoxes, carBoxesFar, figureBoxes, flyerBoxes, flyerBoxesFar, liftBoxes, modelData } from "./vehicles/models";
+import { boatBoxes, carriageBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, figureBoxes, flyerBoxes, flyerBoxesFar, liftBoxes, modelData } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
@@ -52,6 +52,8 @@ export interface VehicleLists {
   flyers: InstanceList;
   boats: InstanceList;
   trains?: InstanceList;
+  /** The cars of the train being ridden, drawn from the inside. */
+  cabins?: InstanceList;
   /** People on foot, by pose: standing, left stride, right stride. */
   figures?: InstanceList[];
   lifts?: InstanceList;
@@ -155,7 +157,7 @@ export class Renderer {
   private cloudProg: Program;
   private vehicleProg: Program;
   private vehicleMeshes: {
-    car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh;
+    car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh; cabin: InstancedMesh;
     carFar: InstancedMesh; vanFar: InstancedMesh; flyerFar: InstancedMesh;
     figures: InstancedMesh[]; lift: InstancedMesh;
   };
@@ -224,6 +226,7 @@ export class Renderer {
       flyer: instanced(modelData(flyerBoxes())),
       boat: instanced(modelData(boatBoxes())),
       train: instanced(modelData(carriageBoxes())),
+      cabin: instanced(modelData(carriageInsideBoxes())),
       carFar: instanced(modelData(carBoxesFar(false))),
       vanFar: instanced(modelData(carBoxesFar(true))),
       flyerFar: instanced(modelData(flyerBoxesFar())),
@@ -433,7 +436,13 @@ export class Renderer {
     drawCulled(m.van, m.vanFar, vehicles.vans, 3.6);
     drawCulled(m.flyer, m.flyerFar, vehicles.flyers, 3.6);
     drawCulled(m.boat, null, vehicles.boats, 5.6);
-    if (vehicles.trains) drawCulled(m.train, null, vehicles.trains, 10.2);
+    if (vehicles.trains || vehicles.cabins?.count) {
+      // both sides: a passenger stands inside a carriage and has to see its walls
+      gl.disable(gl.CULL_FACE);
+      if (vehicles.trains) drawCulled(m.train, null, vehicles.trains, 10.2);
+      if (vehicles.cabins?.count) drawCulled(m.cabin, null, vehicles.cabins, 14);
+      gl.enable(gl.CULL_FACE);
+    }
     vehicles.figures?.forEach((list, i) => drawCulled(m.figures[i], null, list, 1.4));
     if (vehicles.lifts) drawCulled(m.lift, null, vehicles.lifts, LIFT_SIZE);
 
@@ -449,7 +458,10 @@ export class Renderer {
       .vec("uCamFwd", cam.fwd).vec("uCamRight", cam.right).vec("uCamUp", cam.up);
     this.tri.draw();
 
-    const rain = weather.params.rain;
+    // Rain, but not underground: the drops are a screen of lines round the camera with no
+    // notion of a roof over it, so in the subway the weather came down through the tunnel.
+    const roofed = this.groundAt !== null && cam.eye[1] < this.groundAt(cam.eye[0], cam.eye[2]) - 3;
+    const rain = roofed ? 0 : weather.params.rain;
     if (rain > 0.01) {
       timer.begin("rain");
       gl.depthFunc(nearer);

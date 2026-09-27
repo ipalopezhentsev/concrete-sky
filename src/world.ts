@@ -5,8 +5,29 @@ import { buildPlanRegion } from "./city/plan";
 import { CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Lift, type Pad, type ParkedCar, type RegionMesh } from "./city/generate";
 import { Mesh, type GL } from "./gl";
 import { aabbVisible, type Vec3 } from "./math";
-import type { TextureSet } from "./textures";
+import { TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
+import type { Station } from "./city/plan";
 import type { WorkerRequest } from "./worker";
+
+/** What a worker sends back, across all three kinds of job. */
+interface WorkerReply {
+  type: string;
+  mesh?: RegionMesh;
+  tx?: number;
+  tz?: number;
+  blocks?: Float32Array;
+  layer?: number;
+  albedo?: Uint8Array;
+  normal?: Uint8Array;
+  noise?: Uint8Array;
+  stations?: Float32Array;
+}
+
+/** One square of the map: the block outlines in it, and the subway entrances. */
+export interface MapTile {
+  blocks: Float32Array;
+  stations: Float32Array;
+}
 
 export const LOAD_RADIUS = 950;
 const UNLOAD_RADIUS = 1200;
@@ -20,6 +41,7 @@ interface Region {
   cars: (ParkedCar & { id: string })[];
   lifts: Lift[];
   boats: (Pad & { id: string })[];
+  stations: Station[];
   groundCount: number;
   cells: CellRange[];
   lo: Vec3;
@@ -42,9 +64,11 @@ export class World {
   private collideCache = new Map<string, Float32Array>(); // 3x3 cell neighbourhoods, most recent last
   // Block outlines for the map, tile by tile. They outlive the regions they overlap — a map
   // is worth having for ground the runner has left — so they are kept on their own count.
-  private mapCache = new Map<string, Float32Array>();
+  private mapCache = new Map<string, MapTile>();
   private mapBusy = new Set<string>();
   private mapQueue: string[] = [];
+  /** Set while the texture set is being built, to take the pieces as they come back. */
+  private onTexturePart: ((part: WorkerReply) => void) | null = null;
   /** Bumped whenever a map tile arrives, so the map knows to draw itself again. */
   mapVersion = 0;
   stats = { regions: 0, drawn: 0, pending: 0, tris: 0 };
@@ -90,6 +114,18 @@ export class World {
     for (const r of this.regions.values()) yield* r.boats;
   }
 
+  /**
+   * Every subway station the city has streamed in.
+   *
+   * Worked out in the worker that built the region and carried back with the mesh. Asking
+   * for it on the main thread instead means running the search for somewhere the entrance
+   * can stand, which is seconds of Voronoi for a stretch of city — a frozen frame wherever
+   * it lands, and the map asks about everything in view at once.
+   */
+  *stations(): Iterable<Station> {
+    for (const r of this.regions.values()) yield* r.stations;
+  }
+
   constructor(private gl: GL, private seed: number) {
     const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
     for (let i = 0; i < n; i++) {
@@ -100,17 +136,49 @@ export class World {
     }
   }
 
-  textures(): Promise<TextureSet> {
+  /**
+   * The material textures, built across the whole pool at once.
+   *
+   * The set is nine independent pieces — the small noise texture and eight material layers
+   * — and each one goes to whichever worker is free, so the wall-clock cost is the longest
+   * layer rather than the sum of all of them. They come back in whatever order they finish
+   * in and are copied into the stacked arrays the texture array wants; `progress` is called
+   * with the fraction done as each one lands.
+   */
+  textures(progress: (f: number) => void = () => {}): Promise<TextureSet> {
+    const px = TEX_SIZE * TEX_SIZE * 4;
+    const albedo = new Uint8Array(px * TEX_LAYERS);
+    const normal = new Uint8Array(px * TEX_LAYERS);
+    let noise: Uint8Array = new Uint8Array(0);
+    const jobs = TEX_LAYERS + 1;
+    let done = 0;
+    // The noise goes out first: it is much the smallest job, so starting it anywhere else
+    // would leave one worker finishing early and idle.
+    const queue: WorkerRequest[] = [{ type: "noise", seed: this.seed }];
+    for (let i = 0; i < TEX_LAYERS; i++) queue.push({ type: "layer", layer: i, seed: this.seed });
     return new Promise((resolve) => {
-      const w = this.workers[0];
-      const prev = w.onmessage;
-      w.onmessage = (e) => {
-        if (e.data.type === "textures") {
-          w.onmessage = prev;
-          resolve(e.data as TextureSet);
-        } else prev?.call(w, e);
+      const pump = () => {
+        while (queue.length) {
+          const w = this.busy.indexOf(0);
+          if (w < 0) break;
+          this.busy[w]++;
+          this.workers[w].postMessage(queue.shift()!);
+        }
       };
-      w.postMessage({ type: "textures", seed: this.seed } satisfies WorkerRequest);
+      this.onTexturePart = (part) => {
+        if (part.noise) noise = part.noise;
+        else {
+          albedo.set(part.albedo!, part.layer! * px);
+          normal.set(part.normal!, part.layer! * px);
+        }
+        progress(++done / jobs);
+        if (done < jobs) pump();
+        else {
+          this.onTexturePart = null;
+          resolve({ albedo, normal, noise });
+        }
+      };
+      pump();
     });
   }
 
@@ -121,8 +189,8 @@ export class World {
    * always works outward from wherever it is centred now rather than finishing an errand it
    * was sent on two zoom levels ago.
    */
-  mapTiles(want: [number, number][]): Float32Array[] {
-    const out: Float32Array[] = [];
+  mapTiles(want: [number, number][]): MapTile[] {
+    const out: MapTile[] = [];
     this.mapQueue.length = 0;
     for (const [tx, tz] of want) {
       const k = key(tx, tz);
@@ -138,14 +206,19 @@ export class World {
     return this.mapQueue.length + this.mapBusy.size;
   }
 
-  private onMessage(worker: number, data: { type: string; mesh?: RegionMesh; tx?: number; tz?: number; blocks?: Float32Array }): void {
+  private onMessage(worker: number, data: WorkerReply): void {
+    if (data.type === "noise" || data.type === "layer") {
+      this.busy[worker]--;
+      this.onTexturePart?.(data);
+      return;
+    }
     if (data.type === "map" && data.blocks) {
       this.busy[worker]--;
       const k = key(data.tx!, data.tz!);
       this.mapBusy.delete(k);
       // a few hundred tiles is a city twenty kilometres across; older ones can go
       if (this.mapCache.size > 400) this.mapCache.clear();
-      this.mapCache.set(k, data.blocks);
+      this.mapCache.set(k, { blocks: data.blocks, stations: data.stations ?? new Float32Array(0) });
       this.mapVersion++;
       return;
     }
@@ -187,6 +260,7 @@ export class World {
       cars: m.cars,
       lifts: m.lifts,
       boats: m.boats,
+      stations: m.stations as Station[],
       groundCount: m.groundCount,
       cells: m.cells,
       lo,

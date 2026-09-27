@@ -9,7 +9,7 @@ import {
 import { Finish, Mat, Win, type Tint } from "./materials";
 import { PAINT_COLORS } from "../vehicles/models";
 import {
-  ARTERY, ARTERY_HALF, arteryFrame, arteryLines, blocksIn, cellOf, checkSeed, grain, RIVER_HALF,
+  ARTERY, ARTERY_HALF, arteryFrame, arteryLines, arteryScale, blocksIn, cellOf, checkSeed, grain, RIVER_HALF,
   neighbours, QUAY, QUAY_RISE, rememberBySeed, riverFrame, riverLines, riverNear, ROAD, streetsOf, TERRACE, terrainAt, TILE,
   waterLevel,
   type Site, type Street, type Vec2,
@@ -1190,7 +1190,10 @@ function terrain(
       const cx = x + TILE / 2, cz = z + TILE / 2;
       // Only a tile well inside a block is left out, where the block's own plinth is a solid
       // extrusion that fills it. Anything else is laid and held down by its corners.
-      if (covered(cx, cz)?.deep) {
+      // Inside a block, where the block's own plinth is a solid extrusion that fills the
+      // tile; or over a subway entrance, where the ground is the one thing in the way of
+      // getting down to it.
+      if (covered(cx, cz)?.deep || shaftCut(cx, cz)) {
         endRun(z);
         continue;
       }
@@ -1285,6 +1288,7 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   arterialFill(ground, x0, z0);
   bridges(ground, x0, z0);
   rails(ground, x0, z0);
+  const stations = subway(ground, x0, z0);
   waterfront(ground, x0, z0);
   river(ground, x0, z0);
   vessels(ground, x0, z0);
@@ -1299,6 +1303,9 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   }
   const mesh = assembleRegion(rx, rz, parts, faceCull, false);
   mesh.colliders = byGridCell(mesh.colliders, rx, rz);
+  // carried back with the mesh so that nothing on the main thread ever has to work out
+  // where a station is for itself
+  mesh.stations = stations;
   return mesh;
 }
 
@@ -1347,12 +1354,31 @@ export { ROAD };
  * to move a step. An arterial's centreline is the one place in the city guaranteed to be clear
  * of every block, because the blocks are cut back off it by construction.
  */
-export function planSpawn(): { x: number; y: number; z: number; yaw: number } {
+export interface Spawn {
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
+/**
+ * The search for that spot, one arterial at a time.
+ *
+ * It is the first thing to ask the plan anything, and on a cold cache that means settling
+ * the rivers, the hills and every block around the origin before it can say where a bank
+ * is — seconds of work, all of it on whichever thread called. So it comes as a generator
+ * that yields how far along it is after each arterial: a caller with a page to keep alive
+ * can let it breathe and count in between, and `planSpawn` below just runs it to the end.
+ */
+export function* spawnSearch(): Generator<number, Spawn> {
   // Best of all, on the bank facing the nearest bridge: the river, the bridge, the quays and
   // the boats are the first thing seen rather than something a kilometre away to go and find.
-  let best: { x: number; y: number; z: number; yaw: number } | null = null, bd = Infinity;
+  let best: Spawn | null = null, bd = Infinity;
+  const near = arteryLines(0, ARTERY * 2.5);
+  const steps = 2 * near.length;
+  let step = 0;
   for (const axis of [1, 0] as const)
-    for (const line of arteryLines(0, ARTERY * 2.5))
+    for (const line of near) {
       for (let k = -3; k <= 2; k++)
         for (const c of crossings(axis, line, k))
           // back along the road until the spot is really in the street: near the water the
@@ -1369,6 +1395,8 @@ export function planSpawn(): { x: number; y: number; z: number; yaw: number } {
             best = { x, y: roadY(axis, line, s, x, z) + 0.4, z, yaw: Math.atan2(dir[0], dir[1]) };
             break;
           }
+      yield ++step / steps;
+    }
   if (best) return best;
   for (const axis of [1, 0] as const)
     for (const line of arteryLines(0, ARTERY)) {
@@ -1384,6 +1412,15 @@ export function planSpawn(): { x: number; y: number; z: number; yaw: number } {
       }
     }
   return { x: 0, y: groundAt(0, 0) + 0.4, z: 0, yaw: 0 };
+}
+
+/** The spawn, worked out in one go. */
+export function planSpawn(): Spawn {
+  const search = spawnSearch();
+  for (;;) {
+    const r = search.next();
+    if (r.done) return r.value;
+  }
 }
 
 /** True where a point is in the open and not inside any block, with room round it. */
@@ -1857,6 +1894,598 @@ function rails(b: Builder, x0: number, z0: number): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The subway
+//
+// A cut-and-cover box under an arterial, set deep enough that nothing the surface builds —
+// the roadway slab, the ground tiles, an embankment — reaches down to it. That depth is the
+// reason the rest of the city needs to know nothing about it: the one place the two meet is
+// the hole in the pavement the entrance comes up through.
+//
+// The line runs on the same armature as the elevated railway and never on an arterial that
+// already carries one: one road, one railway, above it or below it.
+
+/** Metres between stations along a line; a whole number of bays, so stations sit on nodes. */
+export const SUB_SPACING = 360;
+/** Length of the island platform. */
+export const PLATFORM = 72;
+/** Centre of each running track, off the tunnel centreline. */
+export const TRACK_OFF = 6.3;
+/** Interior of the running tunnel: half-width, and track bed to soffit. */
+const SUB_HALF = 9.2;
+const SUB_RISE = 6.0;
+const SUB_WALL = 0.9;
+/** Island platform: half-width, and how far it stands above the track bed. */
+const PLAT_HALF = 4.3;
+export const PLAT_RISE = 1.1;
+/** The mezzanine over the tracks: its floor above the track bed, and its headroom. */
+const MEZZ = SUB_RISE + 0.8;
+const MEZZ_RISE = 2.9;
+/** Track bed below the lowest ground anywhere near the line. */
+const SUB_DEPTH = 27;
+/** Length of tunnel built in one go, and the span its level is interpolated over. */
+const SUB_BAY = 30;
+/**
+ * The entrance shaft: half-sizes of the opening, across the line and along it.
+ *
+ * Narrow across, because the only ground beside an arterial that is neither carriageway nor
+ * building is the block's own pavement, and that is seven metres wide. Long the other way,
+ * along the kerb, where there is as much room as the stair needs.
+ */
+const SHAFT_X = 2.0;
+const SHAFT_Z = 5.6;
+
+export function hasSubway(axis: 0 | 1, line: number): boolean {
+  return !hasRail(axis, line) && hashInt(axis, line, 361) % 100 < 74;
+}
+
+/**
+ * Track bed level at a node of the line.
+ *
+ * Taken from the lowest ground across the corridor rather than from the road on the
+ * centreline: a road on an embankment stands metres above the dip beside it, and it is the
+ * dip whose ground tiles reach furthest down. A bridge is ignored — a tunnel does not follow
+ * a road up over a river — but an embankment is not, or the line would surface inside it.
+ */
+const subNodes = rememberBySeed<string, number>();
+
+/** The level the ground alone asks for at a point on the line. */
+function rawLevel(axis: 0 | 1, line: number, s: number): number {
+  const { p, dir } = arteryFrame(axis, line, s);
+  let low = Infinity;
+  for (const off of [0, -40, -20, 20, 40]) {
+    const x = p[0] - dir[1] * off, z = p[1] + dir[0] * off;
+    const g = terrainAt(x, z);
+    const road = off === 0 ? roadTopAt(x, z) : null;
+    low = Math.min(low, road === null ? g : Math.max(g, Math.min(road, g + 10)));
+  }
+  return low - SUB_DEPTH;
+}
+
+/** How many bays either side of a station are laid dead level, as a platform has to be. */
+const FLAT_BAYS = 2;
+/** Nodes per station, so that every station falls exactly on one. */
+const NODES_PER_STATION = SUB_SPACING / SUB_BAY;
+
+function subNode(axis: 0 | 1, line: number, k: number): number {
+  const key = `${axis},${line},${k}`;
+  checkSeed();
+  const hit = subNodes.get(key);
+  if (hit !== undefined) return hit;
+  // A station is level — a platform on a gradient is not a platform — so every node inside
+  // one takes the station's own level, and the bays on either side ramp up to whatever the
+  // ground is doing next. Which is why a station sits exactly on a node: the flat stretch
+  // and the boxes laid over it have to agree on where they begin and end.
+  const j = Math.round(k / NODES_PER_STATION);
+  let y = rawLevel(axis, line, k * SUB_BAY);
+  for (const n of [j - 1, j, j + 1]) {
+    const st = stationAt(axis, line, n);
+    if (st && Math.abs(k - st.node) <= FLAT_BAYS) y = st.y;
+  }
+  if (subNodes.size > 4096) subNodes.clear();
+  subNodes.set(key, y);
+  return y;
+}
+
+/** Track bed level anywhere along a line. */
+export function subwayY(axis: 0 | 1, line: number, s: number): number {
+  const k = Math.floor(s / SUB_BAY);
+  const t = s / SUB_BAY - k;
+  return subNode(axis, line, k) * (1 - t) + subNode(axis, line, k + 1) * t;
+}
+
+export interface Station {
+  axis: 0 | 1;
+  line: number;
+  /** Which station along the line. */
+  k: number;
+  /** Where it ended up on the spline, and the node that is — always a whole one. */
+  s: number;
+  node: number;
+  /** Centre of the platform. */
+  x: number;
+  z: number;
+  /** Track bed level; the platform stands `PLAT_RISE` above it. */
+  y: number;
+  /** Yaw of the line here, in the direction of rising `s`. */
+  yaw: number;
+  /** Centre of the entrance shaft, and the ground it opens onto. */
+  shaftX: number;
+  shaftZ: number;
+  top: number;
+  /** Which side of the line the entrance stands on, and how far out. */
+  side: 1 | -1;
+  off: number;
+  name: string;
+}
+
+const STATION_HEAD = [
+  "Ash", "Carrow", "Kiln", "Marl", "Brand", "Colt", "Fen", "Garrow", "Hale", "Ingle",
+  "Lime", "Mere", "Nether", "Ock", "Pike", "Quarry", "Rood", "Slate", "Tarn", "Vale",
+  "Warp", "Yarrow", "Bourne", "Clay", "Dray", "Elder", "Flint", "Gaunt",
+];
+const STATION_TAIL = [
+  "Street", "Cross", "Gate", "Wharf", "Yard", "Row", "Green", "Hill", "Quay", "Bridge",
+  "Works", "Sidings", "Fields", "Reach", "Bank", "End",
+];
+
+/**
+ * Where an entrance can stand.
+ *
+ * Not much choice: the carriageway runs out to `ARTERY_HALF` and the blocks are clipped back
+ * to exactly that, so the one strip of ground left is the pavement between a block's kerb
+ * and its building line. The opening is cut to fit it, and the search works outwards from
+ * the kerb on either side until it finds a stretch clear of the building, clear of any road
+ * slab, clear of the river and flat enough to walk off.
+ */
+function shaftSpot(axis: 0 | 1, line: number, s: number): { x: number; z: number; side: 1 | -1; off: number; top: number } | null {
+  const { p, dir } = arteryFrame(axis, line, s);
+  // Every block that could cover any of this search's candidates, gathered once. They all lie
+  // within a few tens of metres of the same point on the line, so they are all answered by the
+  // same handful of blocks — and gathering those is a walk over every seed within two slots,
+  // which used to happen afresh for each of the hundred-odd points asked about.
+  const REACH = 54;
+  const near = blocksIn(p[0] - REACH, p[1] - REACH, p[0] + REACH, p[1] + REACH);
+  // One look for the water, for the same reason: if the nearest river is further off than the
+  // clearance plus the reach of the search, then no candidate in it is near one either.
+  const WET = RIVER_HALF + QUAY + 14;
+  const wet = !!riverNear(p[0], p[1], WET + REACH);
+  // This used to ask `roadTopAt` first, which was both the dearest question here and a
+  // redundant one: `openGround` ends by asking `underRoad`, which is the same question put to
+  // a wider net of streets and with a margin on top, so anything the one turned down the other
+  // turns down too. Cutting a street into stretches walks the terrain under it, and the search
+  // was paying for that over every point it looked at — two thirds of what a station cost.
+  const clear = (px: number, pz: number) =>
+    (!wet || !riverNear(px, pz, WET)) && openGround(px, pz, near);
+  // Clear of the arterial itself: its carriageway is laid out to ARTERY_HALF and filled as a
+  // six-metre slab, and that fill is not a street piece, so nothing above would report it.
+  for (const off of [24, 27, 30, 34, 38]) {
+    for (const side of [1, -1] as const) {
+      const x = p[0] - dir[1] * off * side, z = p[1] + dir[0] * off * side;
+      // the spline test first: it asks nothing of the Voronoi, and it turns down the most
+      if (crossedByArtery(axis, line, x, z) || !clear(x, z)) continue;
+      let ok = true, lo = groundAt(x, z), hi = lo;
+      for (const a of [-1, 1])
+        for (const c of [-1, 1]) {
+          const px = x - dir[1] * a * (SHAFT_X + 0.4) * side + dir[0] * c * (SHAFT_Z + 0.4);
+          const pz = z + dir[0] * a * (SHAFT_X + 0.4) * side + dir[1] * c * (SHAFT_Z + 0.4);
+          if (!clear(px, pz)) ok = false;
+          const g = groundAt(px, pz);
+          lo = Math.min(lo, g);
+          hi = Math.max(hi, g);
+        }
+      // A forecourt is one level laid across ground that is not, so the step off it has to
+      // stay inside what a runner can walk. It is laid at the highest ground it meets, which
+      // makes every one of those steps a step down.
+      if (ok && hi - lo <= 0.5) return { x, z, side, off, top: hi };
+    }
+  }
+  return null;
+}
+
+const stations = rememberBySeed<string, Station | null>();
+
+/**
+ * Station `k` along a line, or null where no entrance to it would fit anywhere.
+ *
+ * One cache, one object. The level of the line has to know which stretches are stations
+ * before it can lay them flat, and for a while that was a second cache holding a second
+ * view of the same search — which is two things that can fall out of step, and did.
+ * Nothing here asks what level the line is at, so this and `subNode` are not circular.
+ */
+export function stationAt(axis: 0 | 1, line: number, k: number): Station | null {
+  if (!hasSubway(axis, line)) return null;
+  const key = `${axis},${line},${k}`;
+  checkSeed();
+  const hit = stations.get(key);
+  if (hit !== undefined) return hit;
+  let out: Station | null = null;
+  // A station can slide along the line to find an entrance, by whole bays so that it still
+  // begins and ends on a node. Nearest to where it belongs first.
+  //
+  // It slides a long way — a third of the way to the next stop either side. Blocks are clipped
+  // back to the carriageway and an entrance has to stand clear of both, so the only ground it
+  // can come up on is where a side street or a gap between blocks meets the arterial, and
+  // those are tens of metres apart. Searching two bays either way found one slot in three and
+  // left whole lines with no way into them at all, which on the map reads as a subway nobody
+  // can get on.
+  const slide = [0, 1, -1, 2, -2, 3, -3, 4, -4].map((n) => n * SUB_BAY);
+  for (const shift of slide) {
+    const s = k * SUB_SPACING + shift;
+    const spot = shaftSpot(axis, line, s);
+    if (!spot) continue;
+    const { p, dir } = arteryFrame(axis, line, s);
+    const h = hashInt(axis, line, k, 362);
+    out = {
+      axis, line, k, s, node: Math.round(s / SUB_BAY), x: p[0], z: p[1],
+      y: rawLevel(axis, line, s),
+      yaw: Math.atan2(dir[0], dir[1]),
+      shaftX: spot.x, shaftZ: spot.z, top: spot.top,
+      side: spot.side, off: spot.off,
+      name: `${STATION_HEAD[h % STATION_HEAD.length]} ${STATION_TAIL[(h >>> 8) % STATION_TAIL.length]}`,
+    };
+    break;
+  }
+  if (stations.size > 2048) stations.clear();
+  stations.set(key, out);
+  return out;
+}
+
+/**
+ * How far an arterial can be from the line it is named after.
+ *
+ * Its junctions wander up to a third of the lattice spacing, and the spline through them a
+ * little more, so a road called line 0 can run a couple of hundred metres away from x = 0.
+ * Asking `arteryLines` for a tight radius therefore misses roads that are right on top of
+ * you — which, when the caller was the one deciding whether to leave the ground out for an
+ * entrance, left stations sealed under the pavement.
+ */
+const WANDER = ARTERY * 0.4;
+
+/** Every station whose platform lies within `r` of a point. */
+export function stationsNear(x: number, z: number, r: number): Station[] {
+  const out: Station[] = [];
+  for (const axis of [0, 1] as const) {
+    const across = axis === 0 ? z : x, along = axis === 0 ? x : z;
+    for (const line of arteryLines(across, r + WANDER)) {
+      if (!hasSubway(axis, line)) continue;
+      for (let k = Math.floor((along - r - WANDER) / SUB_SPACING); k <= Math.ceil((along + r + WANDER) / SUB_SPACING); k++) {
+        const st = stationAt(axis, line, k);
+        if (st && Math.hypot(st.x - x, st.z - z) <= r) out.push(st);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * True where the ground has to be left out for an entrance.
+ *
+ * Each region lays its tiles from its own corner and the grids do not line up, so the hole a
+ * region cuts is its own tiles' idea of the opening. Asking about the tile centre with the
+ * opening grown by half a tile takes out every tile that overlaps it, and the surround built
+ * round the shaft is thick enough to face whatever ragged edge that leaves.
+ */
+export function shaftCut(x: number, z: number): boolean {
+  for (const st of stationsNear(x, z, 56)) {
+    const c = Math.cos(st.yaw), sn = Math.sin(st.yaw);
+    const dx = x - st.shaftX, dz = z - st.shaftZ;
+    if (Math.abs(dx * sn + dz * c) < SHAFT_Z + TILE / 2 && Math.abs(dx * c - dz * sn) < SHAFT_X + TILE / 2) return true;
+  }
+  return false;
+}
+
+/** The well the stair comes down through, over the middle of the platform. */
+const WELL = 12;
+/** Half-width of the passage from the entrance to the well. */
+const PASS_HALF = 3.4;
+
+/**
+ * The station whose mezzanine has taken over the roof of this bay, if any.
+ *
+ * A bay is roofed when both of its nodes are inside a station's flat stretch — which is the
+ * same test the level uses, so the flat concrete and the boxes laid on it begin and end
+ * together instead of a bay apart.
+ */
+function roofedBy(axis: 0 | 1, line: number, k: number): Station | null {
+  const j = Math.round(k / NODES_PER_STATION);
+  for (const n of [j - 1, j, j + 1]) {
+    const st = stationAt(axis, line, n);
+    if (st && k >= st.node - FLAT_BAYS && k <= st.node + FLAT_BAYS - 1) return st;
+  }
+  return null;
+}
+
+const CONCRETE: Tint = [0.79, 0.78, 0.75];
+const TILED: Tint = [0.93, 0.93, 0.9];
+const STEEL: Tint = [0.32, 0.33, 0.34];
+
+/**
+ * The subway: running tunnel, and at each station a platform, the mezzanine over the tracks
+ * and the shaft up to the street.
+ */
+function subway(b: Builder, x0: number, z0: number): Station[] {
+  const own: Station[] = [];
+  const pad = 140;
+  for (const axis of [0, 1] as const) {
+    const across = axis === 0 ? z0 + REGION / 2 : x0 + REGION / 2;
+    for (const line of arteryLines(across, REGION / 2 + pad)) {
+      if (!hasSubway(axis, line)) continue;
+      const from = (axis === 0 ? x0 : z0) - pad, to = (axis === 0 ? x0 + REGION : z0 + REGION) + pad;
+      const mine = (p: Vec2) => p[0] >= x0 && p[0] < x0 + REGION && p[1] >= z0 && p[1] < z0 + REGION;
+      for (let k = Math.floor(from / SUB_BAY); k <= Math.floor(to / SUB_BAY); k++) {
+        const bay = bayOf(axis, line, k * SUB_BAY, (k + 1) * SUB_BAY, SUB_HALF + SUB_WALL);
+        if (!mine(bay.p)) continue;
+        tunnelBay(b, axis, line, k, bay);
+      }
+      for (let k = Math.floor(from / SUB_SPACING) - 1; k <= Math.floor(to / SUB_SPACING) + 1; k++) {
+        const st = stationAt(axis, line, k);
+        if (st && mine([st.x, st.z])) {
+          station(b, st);
+          own.push(st);
+        }
+      }
+    }
+  }
+  return own;
+}
+
+/** A run of plain tunnel: invert, walls, roof, four rails and a line of light. */
+function tunnelBay(b: Builder, axis: 0 | 1, line: number, k: number, bay: Bay): void {
+  const { p, dir, turn, len, drop, riseOf } = bay;
+  const ya = subNode(axis, line, k), yb = subNode(axis, line, k + 1);
+  const y = (ya + yb) / 2, rise = riseOf(yb - ya);
+  const put = (halfW: number, y0: number, y1: number, off: number, mat: Mat, tint: Tint, style = 0, collide = true) => {
+    const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
+    b.box(cx - len / 2, y0 - drop, cz - halfW, cx + len / 2, y1 - drop, cz + halfW, mat, tint, style,
+      { turn, rise, detail: false, collide });
+  };
+  const outer = SUB_HALF + SUB_WALL;
+  put(outer, y - 1.2, y, 0, Mat.Board, CONCRETE, Finish.Cast); // invert
+  put(SUB_WALL / 2, y, y + MEZZ, SUB_HALF + SUB_WALL / 2, Mat.Board, TILED, Finish.Cast);
+  put(SUB_WALL / 2, y, y + MEZZ, -SUB_HALF - SUB_WALL / 2, Mat.Board, TILED, Finish.Cast);
+  // over a station the mezzanine floor is the roof, and it is laid with the station
+  if (!roofedBy(axis, line, k)) {
+    put(outer, y + SUB_RISE, y + MEZZ, 0, Mat.Board, CONCRETE, Finish.Cast);
+    put(0.22, y + SUB_RISE - 0.28, y + SUB_RISE - 0.06, 0, Mat.Strip, TILED, 0, false);
+  }
+  for (const off of [-TRACK_OFF - 0.72, -TRACK_OFF + 0.72, TRACK_OFF - 0.72, TRACK_OFF + 0.72]) {
+    put(0.09, y, y + 0.16, off, Mat.Metal, STEEL);
+  }
+}
+
+/** Everything that makes a station: the platform, the roof over it, the passage and the shaft. */
+function station(b: Builder, st: Station): void {
+  const { axis, line } = st;
+  const y = st.y, plat = y + PLAT_RISE, mezz = y + MEZZ;
+  const outer = SUB_HALF + SUB_WALL;
+  /** A box laid along the line, `off` to one side of it, from station a0 to a1. */
+  const along = (a0: number, a1: number, halfW: number, y0: number, y1: number, off: number,
+    mat: Mat, tint: Tint, style = 0, collide = true) => {
+    const bay = bayOf(axis, line, a0, a1, halfW);
+    const cx = bay.p[0] - bay.dir[1] * off, cz = bay.p[1] + bay.dir[0] * off;
+    b.box(cx - bay.len / 2, y0 - bay.drop, cz - halfW, cx + bay.len / 2, y1 - bay.drop, cz + halfW,
+      mat, tint, style, { turn: bay.turn, detail: false, collide });
+  };
+
+  // The roof the running bays left out, in lengths short enough to follow the spline, with
+  // the well over the platform left open. The station's own level is taken as flat: over
+  // eighty metres the line moves by a few centimetres, and a mezzanine is one floor.
+  //
+  // Everything here is set out in metres back along the line and turned into stations at the
+  // end, because a station is not a metre: the spline is parameterised by how far along the
+  // lattice it has come, so where the road wanders these are a third apart. The stair down the
+  // well is laid in metres in the line's own frame, and an opening measured in stations left
+  // its top buried under the roof and its foot in the open.
+  const K = st.node;
+  const scale = arteryScale(axis, line, st.s);
+  const back = (m: number) => st.s - m / scale;
+  const wellA = back(WELL + 4), wellB = back(4);
+  const end = (K + FLAT_BAYS) * SUB_BAY;
+  for (let a = (K - FLAT_BAYS) * SUB_BAY; a < end; a += 5) {
+    const to = Math.min(a + 5, end);
+    if (to > wellA && a < wellB) {
+      // over the well: two strips of roof with the stair down between them
+      for (const side of [1, -1]) {
+        along(a, to, (outer - PASS_HALF) / 2, y + SUB_RISE, mezz, side * (outer + PASS_HALF) / 2, Mat.Board, CONCRETE, Finish.Cast);
+      }
+    } else {
+      along(a, to, outer, y + SUB_RISE, mezz, 0, Mat.Board, CONCRETE, Finish.Cast);
+    }
+  }
+
+  // The concourse: the length of the mezzanine a passenger is ever on, shut off from the rest
+  // of it.
+  //
+  // The floor here is the tunnel roof, which is laid the whole flat length of the station and
+  // has nothing over it. There is no ground to be inside of — the terrain is a skin and a
+  // block fills sixteen metres under its own footprint, and a station stands eleven metres
+  // below that — so without this the way down from the street ended on an open slab a hundred
+  // metres long, hanging in the light with the city overhead and the fog underneath it.
+  const ceil = mezz + MEZZ_RISE, ceilTop = ceil + 0.7;
+  const roomA = back(WELL + 8), roomB = back(-8);
+  // the passage crosses the box here, bringing its own roof over half of it and a way in
+  // through the wall on its own side
+  const passA = back(PASS_HALF + 0.7), passB = back(-PASS_HALF - 0.7);
+  const doorA = back(PASS_HALF), doorB = back(-PASS_HALF);
+  const near = Math.sign(st.off * st.side);
+  /** A run of box laid along the line in lengths short enough to follow it. */
+  const run = (a0: number, a1: number, halfW: number, y0: number, y1: number, off: number, tint: Tint,
+    mat = Mat.Board, collide = true) => {
+    for (let a = a0; a < a1 - 0.01; a += 5) {
+      along(a, Math.min(a + 5, a1), halfW, y0, y1, off, mat, tint, mat === Mat.Board ? Finish.Cast : 0, collide);
+    }
+  };
+  // Ceiling, in the lengths the passage roof does not already cover. Laid over the top of it
+  // instead, the two would be the same slab twice and neither would settle.
+  run(roomA, passA, outer, ceil, ceilTop, 0, CONCRETE);
+  run(passB, roomB, outer, ceil, ceilTop, 0, CONCRETE);
+  run(passA, passB, outer / 2, ceil, ceilTop, (-near * outer) / 2, CONCRETE);
+  // Walls up off the tunnel's own, which stop at this floor. The near one stands aside for the
+  // way in; the passage roof is the lintel over it.
+  run(roomA, roomB, SUB_WALL / 2, mezz, ceilTop, -near * (SUB_HALF + SUB_WALL / 2), TILED);
+  run(roomA, doorA, SUB_WALL / 2, mezz, ceilTop, near * (SUB_HALF + SUB_WALL / 2), TILED);
+  run(doorB, roomB, SUB_WALL / 2, mezz, ceilTop, near * (SUB_HALF + SUB_WALL / 2), TILED);
+  run(doorA, doorB, SUB_WALL / 2, ceil, ceilTop, near * (SUB_HALF + SUB_WALL / 2), TILED);
+  // and the two ends of it
+  along(roomA - 0.7 / scale, roomA, outer, mezz, ceilTop, 0, Mat.Board, TILED, Finish.Cast);
+  along(roomB, roomB + 0.7 / scale, outer, mezz, ceilTop, 0, Mat.Board, TILED, Finish.Cast);
+  // Two lines of light down it, off to either side so that one of them hangs over the stair.
+  // Without them the concourse is the one room down here with nothing lighting it at all: the
+  // tunnels have their strips and the passage has one, and a station is not a coal cellar.
+  for (const side of [1, -1]) {
+    run(roomA + 1, roomB - 1, 0.22, ceil - 0.24, ceil - 0.04, side * 5, TILED, Mat.Strip, false);
+  }
+
+  // Platform: an island between the two tracks, with a tactile edge down each side and a
+  // line of light over it.
+  for (let a = st.s - PLATFORM / 2; a < st.s + PLATFORM / 2; a += 6) {
+    along(a, a + 6, PLAT_HALF, y, plat, 0, Mat.Board, TILED, Finish.Cast);
+    for (const side of [1, -1]) {
+      along(a, a + 6, 0.45, plat, plat + 0.02, side * (PLAT_HALF - 0.45), Mat.Paint, [0.78, 0.62, 0.12], 0, false);
+      along(a, a + 6, 0.22, y + SUB_RISE - 0.28, y + SUB_RISE - 0.06, side * 3.0, Mat.Strip, TILED, 0, false);
+    }
+  }
+  // the name, on the wall behind each track
+  for (const side of [1, -1]) {
+    along(st.s - 5, st.s + 5, 0.1, plat + 1.5, plat + 2.6, side * (SUB_HALF - 0.05), Mat.Strip, [0.5, 0.62, 0.8], 0, false);
+  }
+
+  // Everything above and beside the tracks stands in the entrance's own frame: local +z runs
+  // along the line and local +x from the shaft towards it, so the passage is a run in x.
+  const reach = st.off * st.side;
+  b.turned(st.shaftX, st.shaftZ, -st.yaw, () => {
+    const top = st.top;
+    // The shaft, and the surround that faces whatever ragged edge the cut tiles left. It is
+    // solid from the mezzanine to the street on three sides; on the fourth the passage has
+    // to get out, so that side is built round a doorway its full width and headroom.
+    const wallX = SHAFT_X + TILE + 1.2, wallZ = SHAFT_Z + TILE + 1.2;
+    const wall = (x0: number, x1: number, z0: number, z1: number, y0 = mezz - 1.2, y1 = top) =>
+      b.box(st.shaftX + x0, y0, st.shaftZ + z0, st.shaftX + x1, y1, st.shaftZ + z1,
+        Mat.Board, CONCRETE, Finish.Ribbed, { detail: false });
+    wall(-SHAFT_X, SHAFT_X, -wallZ, -SHAFT_Z);
+    wall(-SHAFT_X, SHAFT_X, SHAFT_Z, wallZ);
+    for (const s of [1, -1] as const) {
+      const [x0, x1] = s > 0 ? [SHAFT_X, wallX] : [-wallX, -SHAFT_X];
+      if (s !== Math.sign(reach)) {
+        wall(x0, x1, -wallZ, wallZ);
+        continue;
+      }
+      wall(x0, x1, -wallZ, -PASS_HALF);
+      wall(x0, x1, PASS_HALF, wallZ);
+      wall(x0, x1, -PASS_HALF, PASS_HALF, mezz + MEZZ_RISE, top); // the lintel over the way out
+    }
+    // a parapet round the opening, which is also what hides the edge of the cut
+    for (const [x0, x1, z0, z1] of [
+      [-SHAFT_X - 0.7, -SHAFT_X, -SHAFT_Z - 0.7, SHAFT_Z + 0.7], [SHAFT_X, SHAFT_X + 0.7, -SHAFT_Z - 0.7, SHAFT_Z + 0.7],
+      [-SHAFT_X, SHAFT_X, -SHAFT_Z - 0.7, -SHAFT_Z], // the fourth side is the way in
+    ]) {
+      b.box(st.shaftX + x0, top, st.shaftZ + z0, st.shaftX + x1, top + 0.5, st.shaftZ + z1, Mat.Panel, TILED);
+    }
+    // A lit sign on a mast at the open end, because from the street a subway entrance is
+    // otherwise a low kerb round a hole and there is nothing to say what it is. Tall enough
+    // to read down the pavement, and lit whatever the hour, like the lights below it.
+    for (const side of [1, -1]) {
+      const c = side * (SHAFT_X + 0.35);
+      b.box(st.shaftX + c - 0.12, top, st.shaftZ + SHAFT_Z + 0.1, st.shaftX + c + 0.12, top + 3.1,
+        st.shaftZ + SHAFT_Z + 0.34, Mat.Metal, STEEL);
+    }
+    b.box(st.shaftX - SHAFT_X - 0.5, top + 2.2, st.shaftZ + SHAFT_Z + 0.08, st.shaftX + SHAFT_X + 0.5,
+      top + 3.1, st.shaftZ + SHAFT_Z + 0.36, Mat.Strip, [0.55, 0.78, 0.72]);
+    // The floor of the shaft, which is the mezzanine: the flights stand on it, and anything
+    // that misses them lands on it rather than falling out of the world down the middle.
+    b.box(st.shaftX - SHAFT_X, mezz - 1.0, st.shaftZ - SHAFT_Z, st.shaftX + SHAFT_X, mezz,
+      st.shaftZ + SHAFT_Z, Mat.Board, CONCRETE, Finish.Cast, { detail: false });
+    shaftStair(b, st.shaftX, st.shaftZ, top, mezz);
+
+    // The passage from the foot of the shaft across to the well over the platform. Its floor
+    // stops at the tunnel wall, because from there on the tunnel roof is the floor.
+    const at = Math.sign(reach) * SHAFT_X, face = reach - Math.sign(reach) * outer;
+    const [px0, px1] = at < reach ? [at, reach] : [reach, at];
+    const [fx0, fx1] = at < face ? [at, face] : [face, at];
+    b.box(st.shaftX + fx0, mezz - 1.0, st.shaftZ - PASS_HALF - 0.7, st.shaftX + fx1,
+      mezz, st.shaftZ + PASS_HALF + 0.7, Mat.Board, CONCRETE, Finish.Cast, { detail: false });
+    // Its walls stop where its floor does, at the doorway in the concourse wall. Carried on
+    // to the centreline as they used to be, the passage ran halfway across the concourse as a
+    // blind corridor and the way down stood just behind the end of it, out of sight from the
+    // door and out of reach until you had walked past it and turned round.
+    for (const side of [1, -1]) {
+      const za = Math.min(side * PASS_HALF, side * (PASS_HALF + 0.7));
+      b.box(st.shaftX + fx0, mezz, st.shaftZ + za, st.shaftX + fx1, mezz + MEZZ_RISE + 0.7,
+        st.shaftZ + za + 0.7, Mat.Board, TILED, Finish.Cast, { detail: false });
+    }
+    b.box(st.shaftX + px0, mezz + MEZZ_RISE, st.shaftZ - PASS_HALF - 0.7, st.shaftX + px1,
+      mezz + MEZZ_RISE + 0.7, st.shaftZ + PASS_HALF + 0.7, Mat.Board, CONCRETE, Finish.Cast, { detail: false });
+    b.box(st.shaftX + px0 + 0.4, mezz + MEZZ_RISE - 0.24, st.shaftZ - 0.22, st.shaftX + px1 - 0.4,
+      mezz + MEZZ_RISE - 0.04, st.shaftZ + 0.22, Mat.Strip, TILED, 0, { collide: false, detail: false });
+  });
+  // the stair down through the well onto the platform, in the line's own frame
+  b.turned(st.x, st.z, -st.yaw, () => {
+    flight(b, st.x, st.z, -4, -WELL - 4, mezz, plat, PASS_HALF - 0.2, TILED);
+  });
+}
+
+/**
+ * A straight flight running along local z, from `za` at `yTop` down to `zb` at `yBot`.
+ *
+ * One raking slab with its nosings standing on it, which is what the stairs elsewhere in the
+ * city are: laid as treads alone there is nothing between them or under them, and a flight
+ * underground — where the only light is the strip over it — reads as a ladder of loose planks
+ * with the dark showing through.
+ */
+function flight(
+  b: Builder, cx: number, cz: number, za: number, zb: number, yTop: number, yBot: number,
+  halfW: number, tint: Tint,
+): void {
+  const drop = yTop - yBot, span = Math.abs(zb - za);
+  if (drop < 0.2 || span < 0.5) return;
+  const steps = Math.max(1, Math.round(drop / 0.48));
+  const rise = drop / steps, run = span / steps, dir = Math.sign(zb - za);
+  const z0 = Math.min(za, zb), z1 = Math.max(za, zb);
+  // The slab: its mean top halfway down, sheared so each end meets its own landing. The
+  // shear is measured from the box's own +z end, which is the *top* of the flight when the
+  // steps run towards -z — get that backwards and the soffit rakes against the treads, so
+  // the flight hangs in the air at the bottom and buries itself at the top.
+  b.box(cx - halfW, yTop - drop / 2 - 0.5, cz + z0, cx + halfW, yTop - drop / 2, cz + z1,
+    Mat.Board, tint, Finish.Cast, { riseZ: dir > 0 ? -drop : drop, detail: false });
+  for (let i = 1; i <= steps; i++) {
+    const top = yTop - i * rise;
+    const a = za + dir * (i - 1) * run, c = za + dir * i * run;
+    b.box(cx - halfW, top - 0.42, cz + Math.min(a, c), cx + halfW, top, cz + Math.max(a, c), Mat.Board, tint, Finish.Cast);
+  }
+}
+
+/**
+ * The stair up the entrance shaft: flights doubling back on each other in two columns, with
+ * a landing at each turn. Twenty metres of descent in a footprint the size of a room, and —
+ * since the flights stack over one another — solid ground under every point of the opening.
+ */
+function shaftStair(b: Builder, cx: number, cz: number, top: number, bottom: number): void {
+  const LAND = 1.7, RUN_Z = SHAFT_Z - LAND;
+  const drop = top - bottom;
+  const steps = Math.max(2, Math.round(drop / 0.47));
+  const perFlight = Math.max(2, Math.ceil(2 * RUN_Z / 0.8));
+  const flights = Math.max(1, Math.ceil(steps / perFlight));
+  const each = Math.ceil(steps / flights);
+  const rise = drop / steps;
+  // the threshold: the landing you step down onto from the street
+  b.box(cx - SHAFT_X, top - 0.5, cz + RUN_Z, cx + SHAFT_X, top, cz + SHAFT_Z, Mat.Board, TILED, Finish.Cast);
+  let y = top, done = 0, end = 1, col = 1;
+  while (done < steps) {
+    const n = Math.min(each, steps - done);
+    // the two flights meet down the middle: a gap between them would be a slot to fall down
+    const x0 = col > 0 ? cx : cx - SHAFT_X, x1 = col > 0 ? cx + SHAFT_X : cx;
+    flight(b, (x0 + x1) / 2, cz, end * RUN_Z, -end * RUN_Z, y, y - n * rise, (x1 - x0) / 2, TILED);
+    y -= n * rise;
+    done += n;
+    end = -end as 1 | -1;
+    col = -col;
+    // the landing it turns on, which is also where the next flight sets off from
+    const za = end > 0 ? RUN_Z : -SHAFT_Z, zb = end > 0 ? SHAFT_Z : -RUN_Z;
+    b.box(cx - SHAFT_X, y - 0.5, cz + za, cx + SHAFT_X, y, cz + zb, Mat.Board, TILED, Finish.Cast);
+  }
+}
+
 /**
  * The way up: a stair that climbs the block's own perimeter from the pavement to its deck.
  *
@@ -2326,4 +2955,124 @@ export function __piecesAt(x: number, z: number): Record<string, unknown>[] {
     });
   }
   return out;
+}
+
+/**
+ * True on open ground: no block, and no road slab.
+ *
+ * Both of those are solid a long way down — a block fills its outline from sixteen metres
+ * below its pavement up, and a carriageway is a slab six metres thick — so an entrance can
+ * only come up where neither is, which on this network is the ground between them.
+ */
+// A block's outline grown by the clearance an entrance keeps off it, kept by seed. The search
+// for somewhere an entrance can stand asks about a couple of hundred points and the same
+// dozen blocks answer for all of them; growing each one afresh every time was most of what
+// that search cost.
+const grownCells = rememberBySeed<string, Vec2[]>();
+
+function grownCell(s: Site): Vec2[] {
+  checkSeed();
+  const hit = grownCells.get(s.key);
+  if (hit) return hit;
+  const poly = cellOf(s);
+  const out = poly && poly.length >= 3 ? shrink(poly, -1.2) : [];
+  if (grownCells.size > 8192) grownCells.clear();
+  grownCells.set(s.key, out);
+  return out;
+}
+
+function openGround(x: number, z: number, near?: Site[]): boolean {
+  for (const s of near ?? blocksIn(x - 10, z - 10, x + 10, z + 10)) {
+    const grown = grownCell(s);
+    if (grown.length >= 3 && inPoly(grown, x, z)) return false;
+  }
+  // Clear of every arterial, not just the one the station is on. An arterial's carriageway
+  // is filled as a six-metre slab that is not a street piece and that no road lookup
+  // reports, so the only way to know is to measure to the spline — and the one that catches
+  // an entrance out is the arterial crossing the line, which nothing else would think to ask
+  // about.
+  for (const axis of [0, 1] as const)
+    for (const line of arteryLines(axis === 0 ? z : x, WANDER + 60)) {
+      // The spline is parameterised so that its station is close to the along coordinate, so
+      // a handful of samples either side of that is enough to find how near the road passes.
+      for (const d of [-14, -7, 0, 7, 14]) {
+        const at = arteryFrame(axis, line, (axis === 0 ? x : z) + d).p;
+        if (Math.hypot(at[0] - x, at[1] - z) < ARTERY_HALF + 4) return false;
+      }
+    }
+  return !underRoad(x, z);
+}
+
+/**
+ * True where another arterial passes close enough to cover the entrance.
+ *
+ * An arterial's carriageway is filled as a six-metre slab which is not a street piece, so no
+ * road lookup in the plan reports it — the only way to know is to measure to the spline. The
+ * line the station is on is left out, because the offset the entrance was placed at already
+ * says how far from that one it stands; what catches an entrance out is the arterial
+ * crossing it, which nothing else would think to ask about.
+ *
+ * Asked once per candidate rather than at every corner of the opening, with the opening's
+ * own half-diagonal folded into the clearance, because a spline lookup is not cheap and this
+ * search runs over a hundred candidates for every station in the city.
+ */
+function crossedByArtery(own: 0 | 1, ownLine: number, x: number, z: number): boolean {
+  const reach = ARTERY_HALF + 4 + Math.hypot(SHAFT_X, SHAFT_Z);
+  for (const axis of [0, 1] as const)
+    for (const line of arteryLines(axis === 0 ? z : x, WANDER + reach)) {
+      if (axis === own && line === ownLine) continue;
+      // the spline's station runs with the along coordinate, so a few samples either side of
+      // it bracket the nearest approach
+      for (const d of [-13, 0, 13]) {
+        const at = arteryFrame(axis, line, (axis === 0 ? x : z) + d).p;
+        if (Math.hypot(at[0] - x, at[1] - z) < reach) return true;
+      }
+    }
+  return false;
+}
+
+/**
+ * True where any stretch of street is laid over a point.
+ *
+ * `roadTopAt` would be the obvious thing to ask, and it is what the ground itself asks — but
+ * it reads the pieces remembered for the cell the point is in, and a piece belongs to the
+ * cell its own midpoint falls in. A street eighty metres long therefore covers ground its
+ * cell has never heard of. Everything else that asks is deciding how high to lay a tile, and
+ * gets it slightly wrong in a way nobody sees; here the answer decides whether an entrance
+ * comes up under six metres of tarmac, so this one walks the neighbouring cells too.
+ */
+const wideStreets = rememberBySeed<string, Street[]>();
+
+/**
+ * The ground a street's carriageway is laid over: its footprint, and nothing else about it.
+ *
+ * The same rectangle `cutPieces` fills, before it is cut into stretches — which is the only
+ * part of a street this question needs. Cutting one walks the terrain under it and the terrain
+ * reads the rivers, and asking for the stretches here made the search for somewhere an
+ * entrance could stand into a terrain survey of every road for a kilometre around it.
+ */
+function underStreet(st: Street, x: number, z: number, margin: number): boolean {
+  const [ax, az] = st.a, [bx, bz] = st.b;
+  const L = Math.hypot(bx - ax, bz - az) || 1;
+  const ux = (bx - ax) / L, uz = (bz - az) / L;
+  // carried past each end to fill the junction, exactly as the stretches themselves are
+  const ext = st.half >= ARTERY_HALF - 0.5 ? 0 : Math.min(st.half * 1.8, 30);
+  const dx = x - (ax + bx) / 2, dz = z - (az + bz) / 2;
+  return Math.abs(dx * ux + dz * uz) <= L / 2 + ext + margin
+    && Math.abs(dz * ux - dx * uz) <= st.half + 0.4 + margin;
+}
+
+function underRoad(x: number, z: number): boolean {
+  const ci = Math.floor(x / PIECE_CELL), cj = Math.floor(z / PIECE_CELL);
+  const key = `${ci},${cj}`;
+  checkSeed();
+  let near = wideStreets.get(key);
+  if (!near) {
+    const r = 140;
+    near = streetsIn(ci * PIECE_CELL - r, cj * PIECE_CELL - r, (ci + 1) * PIECE_CELL + r, (cj + 1) * PIECE_CELL + r);
+    if (wideStreets.size > 512) wideStreets.clear();
+    wideStreets.set(key, near);
+  }
+  for (const st of near) if (underStreet(st, x, z, 1)) return true;
+  return false;
 }

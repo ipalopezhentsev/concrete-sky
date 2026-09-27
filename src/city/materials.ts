@@ -17,6 +17,7 @@ export const enum Mat {
   Pad = 13, // landing pad markings
   Signal = 14, // traffic signal aspect; style picks red, amber or green and seed the cycle phase
   Water = 15, // river surface
+  Strip = 16, // tube light: lit whatever the hour, for places the sky never reaches
 }
 
 export const enum Win {

@@ -9,11 +9,13 @@ import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import { Lifts } from "./lifts";
 import { Boat } from "./vehicles/boat";
+import { Metro, metroCycle, onTrack, trackOff, trainAt, TRAIN } from "./vehicles/metro";
 import { Car } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { Parking } from "./vehicles/parking";
 import { InstanceList, Traffic } from "./vehicles/traffic";
 import type { VehicleLists } from "./renderer";
+import { PLAT_RISE, type Station } from "./city/plan";
 import type { World } from "./world";
 
 const REACH = 1.6; // how close (to the body) you must be to get in
@@ -61,8 +63,12 @@ export class Rides {
   flyer: Flyer | null = null;
   car: Car | null = null;
   boat: Boat | null = null;
+  metro: Metro | null = null;
   cockpit = false;
   private worldVersion = -1;
+  private time = 0;
+  /** The stations the city has streamed in; see World.stations. */
+  private stations: Station[] = [];
   private carLookYaw = 0;
   private carLookPitch = 0;
   private lookIdle = 0;
@@ -105,7 +111,7 @@ export class Rides {
   };
 
   get riding(): boolean {
-    return this.flyer !== null || this.car !== null || this.boat !== null;
+    return this.flyer !== null || this.car !== null || this.boat !== null || this.metro !== null;
   }
 
   /** Position that drives world streaming and sound. */
@@ -123,11 +129,39 @@ export class Rides {
     if (this.world.version === this.worldVersion) return;
     this.worldVersion = this.world.version;
     this.parking.sync(this.world.pads(), this.world.parkedCars(), this.world.boats());
+    this.stations = [...this.world.stations()];
     this.lifts.sync(this.world.lifts());
+  }
+
+  /**
+   * A train standing at the platform the runner is on, with its doors open: which way it is
+   * going, and the station it is standing at.
+   *
+   * Reach is generous on purpose. The platform is between the two tracks, so anywhere on it
+   * is beside one train or the other, and a passenger should not have to stand on a mark.
+   */
+  private atTrain(): { st: Station; dir: 1 | -1 } | null {
+    const [x, y, z] = this.player.pos;
+    for (const st of this.stations) {
+      if (Math.abs(st.x - x) > TRAIN || Math.abs(st.z - z) > TRAIN) continue;
+      if (Math.abs(y - (st.y + PLAT_RISE)) > 2.5) continue;
+      for (const dir of [1, -1] as const) {
+        if (!metroCycle(this.time, dir, true).stopped) continue;
+        if (trainAt(st.axis, st.line, st.k, dir, this.time) !== st.s) continue;
+        const door = onTrack(st.axis, st.line, st.s, trackOff(dir));
+        // within the length of the train, and on the platform rather than out in the tunnel
+        if (Math.hypot(door.pos[0] - x, door.pos[2] - z) < TRAIN / 2) return { st, dir };
+      }
+    }
+    return null;
   }
 
   /** What E would do right now, for the on-screen prompt. */
   promptText(): string {
+    if (this.metro) {
+      const st = this.metro.stop;
+      return st ? `E  step out at ${st.name}` : "";
+    }
     if (this.flyer) return this.flyer.canExit ? "E  step out" : "";
     if (this.car) return this.car.canExit ? "E  step out" : "";
     if (this.boat) return "E  step ashore";
@@ -135,12 +169,25 @@ export class Rides {
     const parked = this.parking.nearest(p[0], p[1], p[2], REACH);
     if (parked) return parked.kind === "flyer" ? "E  board flyer" : parked.kind === "boat" ? "E  board boat" : "E  get in";
     if (this.traffic.nearestCar(p[0], p[1], p[2], REACH + 1)) return "E  take this car";
+    const train = this.atTrain();
+    if (train) {
+      const dest = new Metro(train.st.axis, train.st.line, train.dir, train.st.k, this.time).next;
+      return dest ? `E  board the train for ${dest.name}` : "E  board the train";
+    }
     return "";
   }
 
   /** The E key. Returns a message if nothing could be done. */
   interact(): string | null {
     const pl = this.player;
+    if (this.metro) {
+      const spot = this.metro.exitSpot();
+      if (!spot) return "the train is between stations";
+      pl.pos = spot;
+      pl.vel = [0, 0, 0];
+      this.metro = null;
+      return null;
+    }
     if (this.boat) {
       const b = this.boat;
       if (Math.abs(b.speed) > 1.5) return "stop first";
@@ -191,6 +238,16 @@ export class Rides {
       this.carLookYaw = this.carLookPitch = 0;
       return null;
     }
+    const train = this.atTrain();
+    if (train) {
+      const ride = new Metro(train.st.axis, train.st.line, train.dir, train.st.k, this.time);
+      // step on where you were standing, so boarding does not shuffle you down the platform
+      const door = onTrack(train.st.axis, train.st.line, train.st.s, trackOff(train.dir));
+      const ahead = (p[0] - door.pos[0]) * Math.sin(door.yaw) + (p[2] - door.pos[2]) * Math.cos(door.yaw);
+      ride.along = Math.max(-TRAIN / 2 + 2.5, Math.min(TRAIN / 2 - 2.5, ahead)) * train.dir;
+      this.metro = ride;
+      return null;
+    }
     return null;
   }
 
@@ -219,13 +276,22 @@ export class Rides {
   leave(): void {
     this.flyer = this.car = null;
     this.boat = null;
+    this.metro = null;
     this.carLookYaw = this.carLookPitch = 0;
     this.cockpit = false;
   }
 
   /** Vehicle simulation for this frame (before the traffic of this frame is known). */
-  drive(dt: number, c: Controls): void {
+  drive(dt: number, c: Controls, time = 0): void {
+    this.time = time;
     const pl = this.player;
+    if (this.metro) {
+      pl.look(c.mouseDX, c.mouseDY);
+      const at = this.metro.update(dt, time, c.moveX, c.moveZ);
+      pl.pos = at.pos;
+      pl.vel = [0, 0, 0];
+      return;
+    }
     if (this.flyer) {
       pl.look(c.mouseDX, c.mouseDY);
       this.flyer.update(dt, {
@@ -281,6 +347,10 @@ export class Rides {
 
   /** Traffic, hunters, weapons and effects; call after drive() and once the camera is known. */
   update(dt: number, time: number, cam: RideCamera, fire: boolean): void {
+    this.time = time;
+    // which train, if any, is to be drawn from the inside
+    const m = this.metro;
+    this.traffic.ridden = m ? { axis: m.axis, line: m.line, dir: m.dir, slot: m.slot } : null;
     this.traffic.update(time, cam.eye, cam.fwd);
     const armed = this.hunters.active;
     if (this.flyer && fire) {
@@ -395,6 +465,9 @@ export class Rides {
   /** Everything the renderer draws with vehicle meshes. */
   get vehicleLists(): VehicleLists {
     const t = this.traffic;
-    return { cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, figures: this.hunters.figures, lifts: this.liftList };
+    return {
+      cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, cabins: t.cabins,
+      figures: this.hunters.figures, lifts: this.liftList,
+    };
   }
 }

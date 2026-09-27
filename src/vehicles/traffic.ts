@@ -7,9 +7,10 @@
 // every bridge; north-south and east-west corridors sit at different heights.
 
 import { arteryFrame, arteryLines, RIVER_HALF, riverFrame, riverLines, waterLevel } from "../city/network";
-import { hasRail, railY, roadY } from "../city/plan";
+import { groundAt, hasRail, hasSubway, railY, roadY, SUB_SPACING, subwayY } from "../city/plan";
 import { worldSeed, type Vec3 } from "../math";
 import { CARRIAGE, PAINT_COLORS } from "./models";
+import { CARS, onTrack, trackOff, trackScale, trainAt } from "./metro";
 
 export const INSTANCE_LAYOUT = [3, 3, 4]; // position, rotation (yaw, pitch, roll), colour (rgb, lights)
 export const INSTANCE_STRIDE = 10;
@@ -121,6 +122,10 @@ export class Traffic {
   flyers = new InstanceList(256);
   boats = new InstanceList(64);
   trains = new InstanceList(64);
+  /** The cars of the train the runner is riding, which are drawn as interiors instead. */
+  cabins = new InstanceList(8);
+  /** Which train that is, set by the ride before the traffic of the frame is worked out. */
+  ridden: { axis: 0 | 1; line: number; dir: 1 | -1; slot: number } | null = null;
   /** Slots whose vehicle was taken or destroyed; they stay empty. */
   readonly removed = new Set<number>();
   private velocities = new Map<number, Vec3>();
@@ -143,6 +148,7 @@ export class Traffic {
     this.flyers.clear();
     this.boats.clear();
     this.trains.clear();
+    this.cabins.clear();
     this.velocities.clear();
     const ahead = (x: number, y: number, z: number, margin: number) =>
       (x - eye[0]) * fwd[0] + (y - eye[1]) * fwd[1] + (z - eye[2]) * fwd[2] > -margin;
@@ -158,7 +164,56 @@ export class Traffic {
       this.stream(time, "ew", line, 0, eye[0], AIR_EW, AIR_RADIUS, ahead, 4, 0);
     }
     this.railways(time, eye, ahead);
+    this.subways(time, eye, ahead);
     this.rivers(time, eye, ahead);
+  }
+
+  /**
+   * Trains in the subway, which are the same trains as the ones on the viaducts and run to
+   * the timetable in `metro.ts`. Only worked out when the eye is down there with them: above
+   * ground there is a good deal of tunnel in range and not one metre of it can be seen.
+   */
+  private subways(time: number, eye: Vec3, ahead: (x: number, y: number, z: number, m: number) => boolean): void {
+    // Above ground there is nothing to see and nothing to hear, and the question is not a
+    // cheap one: where a train is depends on how deep its line runs, which is a walk down the
+    // ground and every road laid over it. The first line to come within range of a runner on
+    // the street cost seconds of it, in one frame. What the ground is doing under your feet is
+    // a noise lookup, so that is what gets asked first.
+    if (eye[1] > groundAt(eye[0], eye[2]) - 3) return;
+    const R = 620;
+    for (const axis of [0, 1] as const) {
+      const across = axis === 0 ? eye[2] : eye[0], centre = axis === 0 ? eye[0] : eye[2];
+      for (const line of arteryLines(across, R)) {
+        if (!hasSubway(axis, line)) continue;
+        if (eye[1] > subwayY(axis, line, centre) + 26) continue;
+        for (let k = Math.floor((centre - R) / SUB_SPACING); k <= Math.ceil((centre + R) / SUB_SPACING); k++) {
+          for (const dir of [1, -1] as const) {
+            const mid = trainAt(axis, line, k, dir, time);
+            if (Math.abs(mid - centre) > R) continue;
+            const color = PAINT_COLORS[h32(line, 150 + axis, k, this.seed) % PAINT_COLORS.length];
+            const r = this.ridden;
+            const inside = !!r && r.axis === axis && r.line === line && r.dir === dir && r.slot === k;
+            // a carriage is twenty metres long, which is not twenty stations along the line
+            const scale = trackScale(axis, line, mid);
+            for (let c = 0; c < CARS; c++) {
+              const s = mid + ((c - (CARS - 1) / 2) * CARRIAGE * dir) / scale;
+              const at = onTrack(axis, line, s, trackOff(dir));
+              const yaw = at.yaw + (dir > 0 ? 0 : Math.PI);
+              // The train the runner is in is drawn as an interior, on the track bed rather
+              // than lifted onto its rails so that its floor meets their feet; and it is never
+              // behind them — they are standing in the middle of it.
+              if (inside) {
+                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, 0, 0, color);
+                continue;
+              }
+              const y = at.pos[1] + 0.16;
+              if (!ahead(at.pos[0], y, at.pos[2], 40)) continue;
+              this.trains.push(at.pos[0], y, at.pos[2], yaw, 0, 0, color);
+            }
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -178,8 +233,9 @@ export class Traffic {
             if ((h & 0xff) / 256 > 0.75) continue;
             const head = k * SPACING + ((h >>> 8) & 0xff) / 255 * SPACING * 0.4 + shift;
             const color = PAINT_COLORS[(h >>> 16) % PAINT_COLORS.length];
+            const scale = trackScale(axis, line, head);
             for (let c = 0; c < CARS; c++) {
-              const s = head - dir * c * CARRIAGE;
+              const s = head - (dir * c * CARRIAGE) / scale;
               if (Math.abs(s - centre) > R) continue;
               const { p, dir: d } = arteryFrame(axis, line, s);
               // keep right: each direction has its own pair of rails

@@ -1,24 +1,30 @@
 // Background generation of textures, city regions and map tiles.
 
-import { mapTile } from "./city/mapdata";
+import { mapStations, mapTile } from "./city/mapdata";
 import { buildPlanRegion } from "./city/plan";
 import { setWorldSeed } from "./math";
-import { generateTextures } from "./textures";
+import { generateLayer, generateNoise } from "./textures";
 
 export type WorkerRequest =
-  | { type: "textures"; seed: number }
+  | { type: "noise"; seed: number }
+  | { type: "layer"; layer: number; seed: number }
   | { type: "region"; rx: number; rz: number; seed: number; faceCull: boolean }
   | { type: "map"; tx: number; tz: number; seed: number };
 
 self.onmessage = (e: MessageEvent<WorkerRequest>) => {
   const msg = e.data;
-  if (msg.type === "textures") {
-    const t = generateTextures(msg.seed);
-    postMessage({ type: "textures", ...t }, { transfer: [t.albedo.buffer, t.normal.buffer, t.noise.buffer] });
+  if (msg.type === "noise") {
+    const noise = generateNoise(msg.seed);
+    postMessage({ type: "noise", noise }, { transfer: [noise.buffer] });
+  } else if (msg.type === "layer") {
+    const l = generateLayer(msg.seed, msg.layer);
+    postMessage({ type: "layer", layer: msg.layer, ...l }, { transfer: [l.albedo.buffer, l.normal.buffer] });
   } else if (msg.type === "map") {
     setWorldSeed(msg.seed);
     const blocks = mapTile(msg.tx, msg.tz);
-    postMessage({ type: "map", tx: msg.tx, tz: msg.tz, blocks }, { transfer: [blocks.buffer] });
+    const stations = mapStations(msg.tx, msg.tz);
+    postMessage({ type: "map", tx: msg.tx, tz: msg.tz, blocks, stations },
+      { transfer: [blocks.buffer, stations.buffer] });
   } else {
     setWorldSeed(msg.seed);
     const m = buildPlanRegion(msg.rx, msg.rz, msg.faceCull);

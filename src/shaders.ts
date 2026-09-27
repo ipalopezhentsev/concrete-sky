@@ -34,6 +34,7 @@ uniform float uFogTint;
 uniform float uMist;
 uniform float uGroundRef; // street level near the camera (0 on the grid city)
 uniform float uNight;
+uniform float uMoon; // how far the moon has taken over from the sun as the light (0..1)
 uniform float uCloudDither; // amplitude of the cloud-shadow dither (0 disables it)
 uniform float uWet;
 uniform float uTime;
@@ -129,15 +130,62 @@ vec4 clouds(vec3 rd) {
   return vec4(col, d * mix(0.35, 1.0, fade) * mix(0.9, 1.0, uCloudCover));
 }
 
+/**
+ * The stars. A grid of cells over a flat projection of the view direction; seven cells in
+ * a hundred hold a star, hashed to a position inside the cell and a magnitude, which is
+ * squared so that a handful are bright and the rest are barely there. Points, not texels:
+ * interpolated noise peaks so narrowly that thresholding it gives stars a pixel wide that
+ * vanish between one frame and the next. A drifting noise fetch makes them scintillate.
+ *
+ * They crowd towards the horizon, which is what a flat projection does; at this field of
+ * view a spherical one costs more than it shows, and they fade out down there anyway.
+ */
+vec3 starField(vec3 rd) {
+  vec2 sp = rd.xz / (rd.y + 0.15) * 70.0;
+  vec2 cell = floor(sp), f = sp - cell;
+  float h = hash12(cell);
+  if (h < 0.93) return vec3(0.0);
+  vec2 at = vec2(hash12(cell + 11.3), hash12(cell + 27.7));
+  float d = length(f - at);
+  float mag = (h - 0.93) / 0.07;
+  float point = smoothstep(0.16, 0.0, d) * mag * mag + smoothstep(0.42, 0.0, d) * 0.12 * mag;
+  float twinkle = mix(0.55, 1.35, texture(uNoise, sp * 0.01 + uTime * 0.02).b);
+  vec3 tint = mix(vec3(0.72, 0.82, 1.0), vec3(1.0, 0.9, 0.74), hash12(cell + 5.1));
+  return tint * point * twinkle * 2.6 * smoothstep(0.0, 0.16, rd.y);
+}
+
+const float MOON_R = 0.028; // sine of the moon's angular radius, about 1.6°
+
+/**
+ * The moon, where uSunDir points once uMoon says the moon is the light in the sky. It is
+ * drawn rather than dropped in as a bright dot: a disc with maria across its face, a limb
+ * that falls away, and a small halo — without the halo it reads as a sticker on the sky.
+ * All of it is windowed out well before the early-out below, so there is no edge to it.
+ */
+vec3 moonDisc(vec3 rd, float sd) {
+  if (uMoon < 0.002 || sd < 0.98) return vec3(0.0);
+  vec3 up = abs(uSunDir.y) > 0.99 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+  vec3 t = normalize(cross(uSunDir, up));
+  vec2 uv = vec2(dot(rd, t), dot(rd, cross(t, uSunDir))) / MOON_R;
+  float r = length(uv);
+  float disc = 1.0 - smoothstep(0.96, 1.02, r);
+  float maria = texture(uNoise, uv * 0.16 + 0.37).g;
+  float face = mix(0.7, 1.0, smoothstep(0.34, 0.74, maria)) * mix(1.0, 0.8, smoothstep(0.25, 1.0, r));
+  float halo = exp(-r * 1.6) * 0.3 + exp(-r * 0.6) * 0.045;
+  return uMoon * smoothstep(0.985, 0.995, sd)
+    * (vec3(0.95, 0.96, 1.0) * disc * face * 10.0 + vec3(0.6, 0.72, 1.0) * halo);
+}
+
 vec3 skyColor(vec3 rd) {
   vec3 col = skyBase(rd);
   float sd = dot(rd, uSunDir);
-  if (rd.y > 0.0) {
-    vec2 sp = rd.xz / (rd.y + 0.15) * 3.0;
-    float star = step(0.9985, texture(uNoise, sp).a) * texture(uNoise, sp * 0.5 + uTime * 0.02).b;
-    col += vec3(star) * uNight * (1.0 - uCloudCover) * 1.5 * smoothstep(0.0, 0.2, rd.y);
-  }
-  col += uSunColor * smoothstep(0.99955, 0.99975, sd) * 25.0 * step(0.0, rd.y);
+  // The stars and both bodies sit under the cloud deck, which is mixed over them below.
+  // Stars come out well after the lamps do, and a dark afternoon under storm cloud is not
+  // night however low uNight drives the light, so they take a steep power of it.
+  float starLit = uNight * uNight * uNight * uNight;
+  if (rd.y > 0.0 && starLit > 0.002) col += starField(rd) * starLit * mix(1.0, 0.35, uCloudCover);
+  col += uSunColor * smoothstep(0.99955, 0.99975, sd) * 25.0 * step(0.0, rd.y) * (1.0 - uMoon);
+  col += moonDisc(rd, sd);
   vec4 c = clouds(rd);
   col = mix(col, c.rgb, c.a);
   float skyFog = clamp(uFogDensity * 70.0, 0.0, 1.0) * (1.0 - 0.6 * clamp(rd.y * 2.0, 0.0, 1.0));
@@ -459,7 +507,10 @@ void main() {
   int mat = int(vInfo.x + 0.5);
   float style = vInfo.y;
   float seed = vInfo.z;
-  vec3 N = normalize(vNrm);
+  // Seen from inside — which happens in a subway carriage, where the rider stands in the
+  // model — a face would otherwise be lit by a normal pointing away from them, and the
+  // inside of the train would be black.
+  vec3 N = normalize(vNrm) * (gl_FrontFacing ? 1.0 : -1.0);
   vec3 V = uCamPos - vPos;
   float dist = length(V);
   V /= dist;
@@ -604,6 +655,12 @@ void main() {
   } else if (mat == 9) {
     emissive = GLOW_COL * (0.25 + 6.0 * uNight);
     albedo = vec3(0.3);
+  } else if (mat == 16) {
+    // A tube light underground, where there is no hour of the day and nothing else to see by.
+    // Every other light in the city takes its strength from uNight; this one cannot, or the
+    // subway would be pitch dark all afternoon.
+    emissive = vec3(2.6, 2.7, 2.6);
+    albedo = vec3(0.55);
   } else if (mat == 10) {
     albedo = vTint;
     Nd = N;

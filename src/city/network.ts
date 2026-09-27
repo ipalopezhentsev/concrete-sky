@@ -374,13 +374,33 @@ function edgeHalf(here: Site, other: Site | null, mid: Vec2): number {
 /** Search radius for the seeds that can touch one block. */
 const RANGE = SLOT * (REACH + 0.5);
 
+// Cells are kept by seed. One costs every seed within two slots of it and a clip against each
+// one, and the same handful is asked for over and over: by the region that builds them, by the
+// map, and hardest of all by the search for somewhere a subway entrance can stand, which asks
+// what block covers each of a couple of hundred candidate points.
+//
+// The polygon handed back is the cached one. Nothing writes to it — every caller either reads
+// it or builds a new polygon from it — and it follows from the world seed, so there is nothing
+// to keep private.
+const cellCache = rememberBySeed<string, Vec2[] | null>();
+
 /**
  * The block grown from a seed: its Voronoi cell, pulled back off each of its own edges by
  * half the street that runs along it. Both blocks facing a street work out the same width and
  * each gives up half, which is where the street's width actually comes from.
  */
 export function cellOf(here: Site, neighbours?: Site[]): Vec2[] | null {
-  const near = neighbours ?? sitesNear(here.p[0], here.p[1], RANGE);
+  if (!neighbours) {
+    checkSeed();
+    const hit = cellCache.get(here.key);
+    if (hit !== undefined) return hit;
+    if (cellCache.size > 8192) cellCache.clear();
+    const { near, poly } = rawCell(here);
+    const out = poly.length < 3 ? null : offEdges(here, poly, near);
+    cellCache.set(here.key, out);
+    return out;
+  }
+  const near = neighbours;
   let poly: Vec2[] = [
     [here.p[0] - RANGE, here.p[1] - RANGE], [here.p[0] + RANGE, here.p[1] - RANGE],
     [here.p[0] + RANGE, here.p[1] + RANGE], [here.p[0] - RANGE, here.p[1] + RANGE],
@@ -390,7 +410,44 @@ export function cellOf(here: Site, neighbours?: Site[]): Vec2[] | null {
     poly = clip(poly, here.p, s.p);
     if (poly.length < 3) return null;
   }
-  // now pull each edge back by its own street
+  return offEdges(here, poly, near);
+}
+
+/**
+ * The seeds that can bound one block, and its cell before any street is taken off it.
+ *
+ * `cellOf` and `streetsOf` both begin with exactly this and each used to work it out for
+ * itself, so every question about what the roads are doing over a stretch of city paid for the
+ * same Voronoi twice — and the search for somewhere a subway entrance can come up asks that
+ * question a few thousand times over.
+ */
+const rawCells = rememberBySeed<string, { near: Site[]; poly: Vec2[] }>();
+
+function rawCell(here: Site): { near: Site[]; poly: Vec2[] } {
+  checkSeed();
+  const hit = rawCells.get(here.key);
+  if (hit) return hit;
+  const near = sitesNear(here.p[0], here.p[1], RANGE);
+  let poly: Vec2[] = [
+    [here.p[0] - RANGE, here.p[1] - RANGE], [here.p[0] + RANGE, here.p[1] - RANGE],
+    [here.p[0] + RANGE, here.p[1] + RANGE], [here.p[0] - RANGE, here.p[1] + RANGE],
+  ];
+  for (const s of near) {
+    if (s.key === here.key) continue;
+    poly = clip(poly, here.p, s.p);
+    if (poly.length < 3) {
+      poly = [];
+      break;
+    }
+  }
+  const out = { near, poly };
+  if (rawCells.size > 8192) rawCells.clear();
+  rawCells.set(here.key, out);
+  return out;
+}
+
+/** A cell pulled back off each of its own edges by half the street that runs along it. */
+function offEdges(here: Site, poly: Vec2[], near: Site[]): Vec2[] | null {
   let land = poly;
   for (let k = 0; k < poly.length; k++) {
     const a = poly[k], b = poly[(k + 1) % poly.length];
@@ -483,6 +540,20 @@ export function blocksIn(x0: number, z0: number, x1: number, z1: number): Site[]
   const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
   const r = Math.max(x1 - cx, z1 - cz) + SLOT * 2;
   return sitesNear(cx, cz, r);
+}
+
+/**
+ * How many metres of road one unit of `s` is worth here.
+ *
+ * `arteryFrame` takes its station as a straight fraction of the lattice spacing rather than as
+ * true arc length, so where the road wanders a bay of it runs longer than its stations say —
+ * by a third, in places. Anything laid between two stations is built from the chord between
+ * them and never notices. Anything placed by station arithmetic has to ask, or what it puts
+ * down is out by however far the spline is stretched where it stands.
+ */
+export function arteryScale(axis: 0 | 1, line: number, s: number): number {
+  const a = arteryFrame(axis, line, s - 5).p, b = arteryFrame(axis, line, s + 5).p;
+  return Math.hypot(b[0] - a[0], b[1] - a[1]) / 10;
 }
 
 /**
@@ -766,30 +837,68 @@ export interface RiverHit {
   dir: Vec2;
 }
 
-/** The nearest river to a point, if one runs close enough to matter there. */
+/**
+ * The nearest river to a point, if one runs close enough to matter there.
+ *
+ * Every square metre of ground asks this — `terrainAt` cuts each river's valley out of the
+ * land — so the loop keeps to scalars: it compares squared distances, takes no square root
+ * until it knows which segment won, and builds the one object it returns at the end rather
+ * than a new one each time the winner changes.
+ */
 export function riverNear(x: number, z: number, reach = 340): RiverHit | null {
-  let best: RiverHit | null = null;
+  let bestD2 = Infinity, bestLine = 0, bestX = 0, bestZ = 0, bestVX = 0, bestVZ = 0, bestL2 = 1;
   for (let line = Math.floor((x - reach) / RIVER) - 1; line <= Math.floor((x + reach) / RIVER) + 1; line++) {
     // a river wanders at most this far off its line (the nodes 450, the spline a little more)
     if (Math.abs(x - line * RIVER) > reach + 620) continue;
-    for (let k = Math.floor((z - reach) / RIVER_STEP) - 1; k <= Math.floor((z + reach) / RIVER_STEP) + 1; k++)
-      for (const [a, b] of riverSpan(line, k)) {
+    for (let k = Math.floor((z - reach) / RIVER_STEP) - 1; k <= Math.floor((z + reach) / RIVER_STEP) + 1; k++) {
+      const spans = riverSpan(line, k);
+      for (let i = 0; i < spans.length; i++) {
+        const a = spans[i][0], b = spans[i][1];
         const vx = b[0] - a[0], vz = b[1] - a[1];
         const l2 = vx * vx + vz * vz || 1;
         const t = Math.max(0, Math.min(1, ((x - a[0]) * vx + (z - a[1]) * vz) / l2));
         const px = a[0] + vx * t, pz = a[1] + vz * t;
-        const d = Math.hypot(x - px, z - pz);
-        if (!best || d < best.dist) {
-          const l = Math.sqrt(l2);
-          best = { line, dist: d, p: [px, pz], dir: [vx / l, vz / l] };
+        const dx = x - px, dz = z - pz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          bestLine = line;
+          bestX = px;
+          bestZ = pz;
+          bestVX = vx;
+          bestVZ = vz;
+          bestL2 = l2;
         }
       }
+    }
   }
-  return best && best.dist <= reach ? best : null;
+  if (bestD2 === Infinity) return null;
+  const dist = Math.hypot(x - bestX, z - bestZ);
+  if (dist > reach) return null;
+  const l = Math.sqrt(bestL2);
+  return { line: bestLine, dist, p: [bestX, bestZ], dir: [bestVX / l, bestVZ / l] };
 }
+
+// Kept, like the arterial pairs above and for the same reason: every point that asks what
+// blocks stand near it asks for every river seed within reach, and each one costs four spline
+// nodes and the walk along them. Uncached, the search for somewhere a subway entrance could
+// stand — which asks about a couple of hundred points, each of them about the blocks around
+// it — spent the better part of a second per station on the same handful of bank seeds.
+const riverSiteCache = rememberBySeed<number, Site[]>();
 
 /** The pair of seeds flanking one river station, which makes the water a Voronoi edge. */
 function riverSites(line: number, k: number, m: number): Site[] {
+  const key = ((line & 8191) * 65536 + (k & 65535)) * 32 + m;
+  checkSeed();
+  const hit = riverSiteCache.get(key);
+  if (hit) return hit;
+  if (riverSiteCache.size > 8192) riverSiteCache.clear();
+  const out = riverSitesFresh(line, k, m);
+  riverSiteCache.set(key, out);
+  return out;
+}
+
+function riverSitesFresh(line: number, k: number, m: number): Site[] {
   const t = k + m / RIVER_STATIONS;
   const p = riverAt(line, t);
   const q = riverAt(line, t + 0.01);
@@ -903,16 +1012,8 @@ export function streetsOf(here: Site): Street[] {
 }
 
 function streetsFresh(here: Site): Street[] {
-  const near = sitesNear(here.p[0], here.p[1], RANGE);
-  let poly: Vec2[] = [
-    [here.p[0] - RANGE, here.p[1] - RANGE], [here.p[0] + RANGE, here.p[1] - RANGE],
-    [here.p[0] + RANGE, here.p[1] + RANGE], [here.p[0] - RANGE, here.p[1] + RANGE],
-  ];
-  for (const s of near) {
-    if (s.key === here.key) continue;
-    poly = clip(poly, here.p, s.p);
-    if (poly.length < 3) return [];
-  }
+  const { near, poly } = rawCell(here);
+  if (poly.length < 3) return [];
   const out: Street[] = [];
   for (let k = 0; k < poly.length; k++) {
     const a = poly[k], b = poly[(k + 1) % poly.length];

@@ -11,8 +11,9 @@
 // Every frame does one blit of that, plus the marker and the furniture on top.
 
 import { arterialRoutes, MAP_REACH, MAP_TILE, riverRoutes } from "./city/mapdata";
+
 import { ARTERY_HALF, RIVER_HALF } from "./city/network";
-import type { World } from "./world";
+import type { MapTile, World } from "./world";
 
 /** How wide a view of the city the panel shows, in metres. */
 const ZOOMS = [500, 1000, 2000, 4000];
@@ -26,6 +27,7 @@ const INK = {
   block: "#21242a",
   artery: "#848d98",
   rail: "#c8a05a",
+  tube: "#5fb8a6",
   water: "#2d5673",
   you: "#f2efe9",
 };
@@ -133,7 +135,8 @@ export class MapView {
     const tiles = this.tilesFor(x, z, reach);
     ctx.fillStyle = INK.block;
     ctx.beginPath();
-    for (const t of tiles) {
+    for (const tile of tiles) {
+      const t = tile.blocks;
       let i = 0;
       while (i < t.length) {
         const n = t[i++];
@@ -173,10 +176,26 @@ export class MapView {
     for (const a of arteries) stroke(a.pts, ARTERY_HALF * 2, INK.artery);
     // and the elevated railways, which are carried above those same roads
     for (const a of arteries) if (a.rail) stroke(a.pts, RAIL_WIDE, INK.rail, true);
+    // the subway, which runs under them: a thin line, and a ring at every entrance, because
+    // a station is the one thing on this map you have to be able to walk to
+    for (const a of arteries) if (a.tube) stroke(a.pts, RAIL_WIDE * 0.62, INK.tube, true);
+    ctx.fillStyle = INK.tube;
+    ctx.strokeStyle = "rgba(12, 13, 15, 0.85)";
+    ctx.lineWidth = Math.max(1, 1.4 * scale * 4);
+    const r = Math.max(2.5, 7 * scale * 4);
+    for (const tile of tiles) {
+      const s = tile.stations;
+      for (let i = 0; i < s.length; i += 2) {
+        ctx.beginPath();
+        ctx.arc(px(s[i]), pz(s[i + 1]), r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
   }
 
   /** Tiles covering a square of `reach` metres either side of the runner, nearest first. */
-  private tilesFor(x: number, z: number, reach: number): Float32Array[] {
+  private tilesFor(x: number, z: number, reach: number): MapTile[] {
     const t0x = Math.floor((x - reach) / MAP_TILE), t1x = Math.floor((x + reach) / MAP_TILE);
     const t0z = Math.floor((z - reach) / MAP_TILE), t1z = Math.floor((z + reach) / MAP_TILE);
     const want: [number, number, number][] = [];

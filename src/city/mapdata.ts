@@ -12,7 +12,7 @@
 // handful of hashed junctions, cheap enough to walk again every time the map is redrawn.
 
 import { artery, ARTERY, arteryLines, blocksIn, cellOf, riverAt, riverLines, RIVER_STEP } from "./network";
-import { hasRail } from "./plan";
+import { hasRail, hasSubway, stationsNear } from "./plan";
 
 /** Side of one tile of block outlines, in metres. */
 export const MAP_TILE = 800;
@@ -44,10 +44,37 @@ export function mapTile(tx: number, tz: number): Float32Array {
   return new Float32Array(out);
 }
 
-/** A road or watercourse to draw: a run of x, z pairs, and whether a railway rides over it. */
+/**
+ * The subway entrances in one tile, as x, z pairs.
+ *
+ * These travel with the block outlines because they belong to the same question: what is in
+ * this square of city. The map used to take them from the regions streamed in around the
+ * runner instead, which reach a kilometre — so a map zoomed out past that drew the subway
+ * lines, which are a hashed spline and cost nothing, and not one station on them.
+ *
+ * A station belongs to the tile its entrance stands in, whichever tile the platform below it
+ * is under, so none is drawn twice and none falls down a seam.
+ */
+export function mapStations(tx: number, tz: number): Float32Array {
+  const x0 = tx * MAP_TILE, z0 = tz * MAP_TILE;
+  const out: number[] = [];
+  // asked about the platforms, which stand within their own entrance's offset of the entrance
+  for (const st of stationsNear(x0 + MAP_TILE / 2, z0 + MAP_TILE / 2, MAP_TILE * 0.71 + 40)) {
+    if (st.shaftX < x0 || st.shaftX >= x0 + MAP_TILE) continue;
+    if (st.shaftZ < z0 || st.shaftZ >= z0 + MAP_TILE) continue;
+    out.push(st.shaftX, st.shaftZ);
+  }
+  return new Float32Array(out);
+}
+
+/**
+ * A road or watercourse to draw: a run of x, z pairs, and what else rides this alignment —
+ * a railway over it, a subway under it. Both follow arterials, and never the same one.
+ */
 export interface Route {
   pts: Float32Array;
   rail: boolean;
+  tube: boolean;
 }
 
 /** Samples per span of spline. Fine enough that a bend reads as a curve at any map scale. */
@@ -70,7 +97,7 @@ export function arterialRoutes(cx: number, cz: number, r: number): Route[] {
           pts[i++] = p[0];
           pts[i++] = p[1];
         }
-      out.push({ pts, rail: hasRail(axis, line) });
+      out.push({ pts, rail: hasRail(axis, line), tube: hasSubway(axis, line) });
     }
   }
   return out;

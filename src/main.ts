@@ -1,7 +1,7 @@
 // Concrete Sky: boot, input, main loop and HUD.
 
 import { Audio } from "./audio";
-import { groundAt, planSpawn } from "./city/plan";
+import { groundAt, spawnSearch } from "./city/plan";
 import { setFloor } from "./player";
 import { Demo } from "./demo";
 import { MAX_HEALTH } from "./hunters";
@@ -11,7 +11,7 @@ import { openSpot, Player, type Input } from "./player";
 import { Renderer, type Camera, LAMP_SLOTS } from "./renderer";
 import { Rides, type Controls } from "./rides";
 import { TouchControls } from "./touch";
-import { STATES, Weather } from "./weather";
+import { MOMENTS, START_HOUR, STATES, Weather } from "./weather";
 import { World } from "./world";
 
 const params = new URLSearchParams(location.search);
@@ -59,11 +59,45 @@ const debug = {
 };
 (window as unknown as { __cs: typeof debug }).__cs = debug;
 
+// Where the loading bar stands when each phase of the boot hands over to the next. The
+// textures go across the worker pool and are over in a moment; the search for a spawn is
+// single-threaded and cold and takes the longest of the three; the city then streams in
+// across the pool again. The shares are roughly what they cost on a machine with cores to
+// spare, so the count moves at something like an even pace.
+const TEXTURE_SHARE = 0.08;
+const CITY_FROM = 0.5;
+
+/** The loading line: one count from 0 to 100, whatever the phase under way is called. */
+function loading(what: string, fraction: number): void {
+  statusEl.textContent = `${what} ${Math.round(fraction * 100)}%`;
+}
+
+/**
+ * Run a stepped search to the end, giving the page a turn between steps so the line above
+ * repaints. Without it the work is one long block and the count stands still through it.
+ */
+async function stepWise<T>(steps: Generator<number, T>, progress: (f: number) => void): Promise<T> {
+  for (;;) {
+    const r = steps.next();
+    if (r.done) return r.value;
+    progress(r.value);
+    await new Promise((done) => setTimeout(done, 0));
+  }
+}
+
 function fail(msg: string): never {
   debug.error = msg;
   statusEl.textContent = msg;
   statusEl.style.color = "#e88";
   throw new Error(msg);
+}
+
+/** `?time=` as an hour: "19:45" or "19.75". Null when it is missing or not a time. */
+function parseHour(text: string | null): number | null {
+  if (!text) return null;
+  const [h, m] = text.split(":").map(Number);
+  const hour = Number.isFinite(m) ? h + m / 60 : h;
+  return Number.isFinite(hour) ? ((hour % 24) + 24) % 24 : null;
 }
 
 let captionTimer = 0;
@@ -96,8 +130,8 @@ async function main(): Promise<void> {
   if (Number(params.get("geolod")) > 0) world.detailScale = Number(params.get("geolod"));
   if (Number(params.get("farlod")) > 0) world.farScale = Number(params.get("farlod"));
   if (params.get("facecull") === "0") world.faceCull = false;
-  statusEl.textContent = "generating textures…";
-  const textures = await world.textures();
+  loading("generating textures…", 0);
+  const textures = await world.textures((f) => loading("generating textures…", f * TEXTURE_SHARE));
   let renderer: Renderer;
   try {
     const num = (k: string) => (params.has(k) ? Number(params.get(k)) : undefined);
@@ -135,23 +169,32 @@ async function main(): Promise<void> {
   resize();
   window.addEventListener("resize", resize);
 
-  const spawn = planSpawn();
-  const player = new Player(spawn.x, spawn.y, spawn.z, spawn.yaw);
   const pose = params.get("pose")?.split(",").map(Number);
-  if (pose && pose.length >= 5) {
-    player.pos = [pose[0], pose[1], pose[2]];
-    player.yaw = pose[3];
-    player.pitch = pose[4];
-  }
+  const posed = !!pose && pose.length >= 5;
+  // A pose says exactly where to stand, so there is no reason to spend seconds searching
+  // for a spawn and then throw the answer away.
+  const spawn = posed ? { x: pose[0], y: pose[1], z: pose[2], yaw: pose[3] } : await stepWise(
+    spawnSearch(),
+    (f) => loading("surveying the ground…", TEXTURE_SHARE + f * (CITY_FROM - TEXTURE_SHARE)),
+  );
+  const player = new Player(spawn.x, spawn.y, spawn.z, spawn.yaw);
+  if (posed) player.pitch = pose[4];
   if (Number(params.get("fov")) > 0) player.fov = Number(params.get("fov"));
-  const startWeather = params.get("weather") ?? "clear sky";
-  const weather = new Weather(STATES[startWeather] ? startWeather : "clear sky");
+  // `?weather=` takes a state, or one of the moments — names like "golden hour" that are
+  // really an hour of the day and set the clock as well as the sky.
+  const asked = params.get("weather") ?? "";
+  const moment = MOMENTS[asked];
+  const weather = new Weather(moment?.weather ?? (STATES[asked] ? asked : "clear sky"), moment?.hour ?? START_HOUR);
+  const startTime = parseHour(params.get("time"));
+  if (startTime !== null) weather.hour = startTime;
+  const dayLength = Number(params.get("daylength"));
+  if (params.get("daylength") !== null && dayLength >= 0) weather.dayLength = dayLength;
   if (params.has("shot")) weather.cycle = false;
   const audio = new Audio();
 
-  statusEl.textContent = "pouring concrete…";
+  loading("pouring concrete…", CITY_FROM);
   await world.ready(player.pos[0], player.pos[2], params.has("shot") ? 950 : 450, (f) => {
-    statusEl.textContent = `pouring concrete… ${Math.round(f * 100)}%`;
+    loading("pouring concrete…", CITY_FROM + f * (1 - CITY_FROM));
   });
   // Put the runner down somewhere they can actually stand and walk away from. The spawn is
   // worked out from the plan before any geometry exists, so it can land inside something — a
@@ -321,6 +364,7 @@ async function main(): Promise<void> {
     const q: Record<string, string | number> = {
       seed,
       weather: weather.name,
+      time: weather.hour.toFixed(3),
       pose: [...player.pos, player.yaw, player.pitch].map((v) => v.toFixed(3)).join(","),
       fov: player.fov.toFixed(1),
       msaa: renderer.samples,
@@ -370,11 +414,20 @@ async function main(): Promise<void> {
       else takeOver(false);
     }
     keys.add(e.code);
+    // , and . wind the clock an hour at a time, and keep winding while they are held
+    if (e.code === "Comma" || e.code === "Period") {
+      weather.skip(e.code === "Period" ? 1 : -1);
+      caption(weather.clock);
+    }
     if (e.repeat) return;
     if (e.code === "KeyN") weather.next(6);
     if (e.code === "KeyL") {
       weather.cycle = !weather.cycle;
       caption(weather.cycle ? "weather drifting" : "weather held");
+    }
+    if (e.code === "KeyK") {
+      weather.running = !weather.running;
+      caption(weather.running ? `clock running — ${weather.clock}` : `clock held at ${weather.clock}`);
     }
     if (e.code === "KeyH" && mode !== "demo") setHunt(!hunt);
     if (mode !== "play") return;
@@ -482,7 +535,7 @@ async function main(): Promise<void> {
         controls.fire = Math.sin(time * 2) > 0.3;
         player.yaw += dt * 0.12 * Math.sin(time * 0.3);
       }
-      rides.drive(dt, controls);
+      rides.drive(dt, controls, time);
     } else if (active) {
       player.look(controls.mouseDX, controls.mouseDY);
       const input: Input = {
@@ -500,6 +553,10 @@ async function main(): Promise<void> {
       if (player.landed > 0.2) audio.landing(player.landed);
     }
     mouseDX = mouseDY = 0;
+
+    // The name of each stop as the train comes to a stand, which is all a passenger gets.
+    // A slot with no platform is run straight through, so there is nothing to announce.
+    if (rides.metro?.arrived && rides.metro.stop) caption(rides.metro.stop.name);
 
     weather.update(params.has("shot") ? 0 : dt);
     if (weather.changed) {
@@ -665,6 +722,7 @@ async function main(): Promise<void> {
         hunters: hunters.list.map((x) => x.mode).join(","), health: hunters.health, hunterKills: hunters.kills, caught: hunters.caught,
         mode, demo: demo.kind, touch: touchPlay,
         map: map.open ? map.across : 0, mapPending: map.pending,
+        clock: weather.clock, sunElev: weather.sky.elev,
       };
       {
         statsText = [
@@ -675,7 +733,7 @@ async function main(): Promise<void> {
           // Where *and* which way, as the string the screenshot tool takes: a position alone
           // does not say what is in front of you, so a view cannot be reproduced from it.
           `pose ${player.pos.map((v) => v.toFixed(1)).join(",")},${player.yaw.toFixed(3)},${player.pitch.toFixed(3)}`,
-          `weather: ${weather.name}   city seed ${seed}`,
+          `weather: ${weather.name}   ${weather.clock}${weather.running ? "" : " (held)"}   sun ${weather.sky.elev.toFixed(0)}° / ${weather.sky.azim.toFixed(0)}°${weather.sky.moon > 0 ? " (moonlit)" : ""}   city seed ${seed}`,
           `vehicles: ${t.cars.count} cars, ${t.vans.count} vans, ${t.flyers.count} flyers (${renderer.vehiclesDrawn} in view)`,
           `hunters: ${hunt ? hunters.list.map((x) => x.mode).join(" ") || "none yet" : "off"} (up to ${hunters.pressure})`,
           `gpu ms: ${renderer.timer.summary()}  = ${renderer.timer.total.toFixed(2)} total`,

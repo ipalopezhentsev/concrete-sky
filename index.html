@@ -17,15 +17,16 @@
     <div id="start">
       <h1>CONCRETE SKY</h1>
       <p class="seed" id="seed"></p>
-      <p class="status" id="status">pouring concrete…</p>
+      <p class="status" id="status">generating textures…</p>
       <p class="hint" id="begin" hidden>click to run</p>
       <button class="watch" id="watch" type="button" hidden>watch the demo</button>
       <p class="gpu" id="gpu" hidden></p>
       <p class="keys mouse-only">
         mouse look · WASD run · shift sprint · ctrl walk · space jump / climb<br />
-        E get in / out of cars and flyers · click shoot · V cockpit view<br />
+        E get in / out of cars, flyers and subway trains · click shoot · V cockpit view<br />
         M map (+ / − to zoom) · H hunters on / off · R back to last roof<br />
-        N next weather · L hold weather · F3 stats · F4 copy stats · esc pause
+        N next weather · L hold weather · , / . wind the clock · K hold the clock<br />
+        F3 stats · F4 copy stats · esc pause
       </p>
       <p class="keys touch-only">
         left thumb run (push further to sprint) · right thumb look<br />
@@ -65,7 +66,7 @@
     <div id="map" hidden>
       <canvas id="mapview"></canvas>
       <div class="legend">
-        <span class="road">road</span><span class="rail">rail</span><span class="water">river</span><span class="you">you</span>
+        <span class="road">road</span><span class="rail">rail</span><span class="tube">subway</span><span class="water">river</span><span class="you">you</span>
       </div>
       <div class="zoom">
         <button id="mapout" type="button" aria-label="zoom out">−</button>

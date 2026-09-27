@@ -118,31 +118,77 @@ export function aabbVisible(planes: Float64Array[], lo: Vec3, hi: Vec3): boolean
 // ---------------------------------------------------------------------------
 // Deterministic hashing and RNG
 
-const M64 = (1n << 64n) - 1n;
-let WORLD_SEED = 1971n;
 let worldSeedNumber = 1971;
 
 /** Choose which city gets generated (must be set identically in every worker). */
 export function setWorldSeed(seed: number): void {
   worldSeedNumber = Math.floor(seed) >>> 0;
-  WORLD_SEED = BigInt(worldSeedNumber);
 }
 
 export function worldSeed(): number {
   return worldSeedNumber;
 }
 
-/** 64-bit mix of integers, returned as a non-negative JS number (53 bits). */
+/**
+ * 64-bit mix of integers, returned as a non-negative JS number (53 bits).
+ *
+ * The splitmix64 finaliser, and the seed of everything the city is: which blocks stand
+ * where, how tall they are, where the rivers run, which windows are lit. It reads as four
+ * lines in BigInt, and did — but it runs tens of millions of times to work out one spawn
+ * point or one region, and that was over half of what either cost. So the same 64 bits are
+ * carried as two 32-bit halves instead.
+ *
+ * `h * K` is the awkward part, and it is written out twice below rather than put in a
+ * function, because a call here costs more than the arithmetic does. Each multiply splits
+ * the low half into 16-bit pieces — the widest product a double still holds exactly — and
+ * lets the two cross terms, which can only reach the high word, wrap through Math.imul.
+ * Bit for bit the numbers the BigInt version gave, so a seed still brings back its city.
+ */
 export function hashInt(...values: number[]): number {
-  let h = (0x9e3779b97f4a7c15n ^ WORLD_SEED) & M64;
-  for (const v of values) {
-    h ^= BigInt.asUintN(64, BigInt(Math.trunc(v)));
-    h = (h * 0xbf58476d1ce4e5b9n) & M64;
-    h ^= h >> 31n;
-    h = (h * 0x94d049bb133111ebn) & M64;
-    h ^= h >> 29n;
+  let hi = 0x9e3779b9, lo = (0x7f4a7c15 ^ worldSeedNumber) >>> 0;
+  for (let n = 0; n < values.length; n++) {
+    const v = Math.trunc(values[n]);
+    // two's complement in 64 bits, which is what BigInt.asUintN(64, …) gave
+    let vhi: number, vlo: number;
+    if (v >= 0) {
+      vlo = v >>> 0;
+      vhi = Math.floor(v / 4294967296) >>> 0;
+    } else {
+      const a = -v, al = a >>> 0;
+      vlo = -al >>> 0;
+      vhi = -(Math.floor(a / 4294967296) + (al !== 0 ? 1 : 0)) >>> 0;
+    }
+    let ahi = hi ^ vhi, alo = (lo ^ vlo) >>> 0;
+
+    // h *= 0xbf58476d1ce4e5b9
+    let a0 = alo & 0xffff, a1 = alo >>> 16;
+    let p00 = a0 * 0xe5b9, p01 = a0 * 0x1ce4, p10 = a1 * 0xe5b9;
+    let mid = (p00 >>> 16) + (p01 & 0xffff) + (p10 & 0xffff);
+    let carry = (mid >>> 16) + (p01 >>> 16) + (p10 >>> 16) + a1 * 0x1ce4;
+    let rlo = (((mid & 0xffff) << 16) | (p00 & 0xffff)) >>> 0;
+    let rhi = (carry + Math.imul(ahi, 0x1ce4e5b9) + Math.imul(alo, 0xbf58476d)) >>> 0;
+    // h ^= h >> 31
+    hi = rhi ^ (rhi >>> 31);
+    lo = (rlo ^ ((rhi << 1) | (rlo >>> 31))) >>> 0;
+
+    // h *= 0x94d049bb133111eb
+    ahi = hi >>> 0;
+    alo = lo;
+    a0 = alo & 0xffff;
+    a1 = alo >>> 16;
+    p00 = a0 * 0x11eb;
+    p01 = a0 * 0x1331;
+    p10 = a1 * 0x11eb;
+    mid = (p00 >>> 16) + (p01 & 0xffff) + (p10 & 0xffff);
+    carry = (mid >>> 16) + (p01 >>> 16) + (p10 >>> 16) + a1 * 0x1331;
+    rlo = (((mid & 0xffff) << 16) | (p00 & 0xffff)) >>> 0;
+    rhi = (carry + Math.imul(ahi, 0x133111eb) + Math.imul(alo, 0x94d049bb)) >>> 0;
+    // h ^= h >> 29
+    hi = (rhi ^ (rhi >>> 29)) >>> 0;
+    lo = (rlo ^ ((rhi << 3) | (rlo >>> 29))) >>> 0;
   }
-  return Number(h >> 11n);
+  // h >> 11, as a number: the high word carries 21 bits of it and the low word the rest
+  return hi * 2097152 + (lo >>> 11);
 }
 
 /** Small seeded PRNG (sfc32). */

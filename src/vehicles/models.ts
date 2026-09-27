@@ -172,15 +172,77 @@ export function boatBoxes(): ModelBox[] {
 /** Length of one railway carriage, coupling to coupling. */
 export const CARRIAGE = 20;
 
+/** Where the band of windows sits in a carriage side, and how far along the body it runs. */
+const WIN_SILL = 2.3, WIN_HEAD = 3.3, WIN_END = 8.8;
+
 /** A railway carriage: a long painted body, a band of windows, a roof and a lit front. */
 export function carriageBoxes(): ModelBox[] {
   return [
     box(-1.55, 0.9, -9.6, 1.55, 3.9, 9.6, Mat.Paint, true),
-    box(-1.58, 2.3, -8.8, 1.58, 3.3, 8.8, Mat.VGlass),
+    box(-1.58, WIN_SILL, -WIN_END, 1.58, WIN_HEAD, WIN_END, Mat.VGlass),
     box(-1.3, 3.9, -9.2, 1.3, 4.3, 9.2, Mat.Metal),
     box(-1.2, 0.3, -8.4, 1.2, 0.9, -5.4, Mat.Metal),
     box(-1.2, 0.3, 5.4, 1.2, 0.9, 8.4, Mat.Metal),
     ...pair(0.6, 1.4, 9.6, 1.2, 1.7, 9.64, Mat.Glow),
     ...pair(0.6, 1.4, -9.64, 1.2, 1.7, -9.6, Mat.Tail),
   ];
+}
+
+/**
+ * The same carriage from the inside, for the one train the runner is on.
+ *
+ * Vehicle glass is a dark mirror — which is what a carriage should look like from the
+ * platform, and what leaves a passenger sealed in a box. So the train being ridden is built
+ * without any: the window band is an opening with pillars across it, the body is split into a
+ * sill below and a header above, and there is a floor to stand on and a lit ceiling overhead.
+ *
+ * The shell runs the whole CARRIAGE rather than stopping short of the couplings, so that the
+ * cars of a train meet and the inside is one length the runner can walk from end to end —
+ * which is what they do, since the controls walk them along the whole train and not one car
+ * of it. The two ends are left open for the same reason, and a cabin carries no lights: they
+ * would hang in the mouth of the next car along.
+ */
+export function carriageInsideBoxes(): ModelBox[] {
+  const HX = 1.55, WALL = 0.16, HALF = CARRIAGE / 2;
+  // The floor stands where metro.ts puts the runner's feet, and a cabin is placed on the
+  // track bed rather than up on its rails, so the two agree without an offset between them.
+  const FLOOR = 1.06, CEIL = 3.74;
+  const out: ModelBox[] = [
+    // A floor in plain panel rather than the metal the underframe is: metal here is all but
+    // black, and a carriage lit by one tube has no light to spare on the floor of it.
+    box(-HX, 0.9, -HALF, HX, FLOOR, HALF, Mat.Panel),
+    box(-HX, CEIL, -HALF, HX, 3.9, HALF, Mat.Paint, true),
+    box(-1.3, 3.9, -9.2, 1.3, 4.3, 9.2, Mat.Metal),
+    box(-1.2, 0.3, -8.4, 1.2, 0.9, -5.4, Mat.Metal),
+    box(-1.2, 0.3, 5.4, 1.2, 0.9, 8.4, Mat.Metal),
+  ];
+  // Tubes down the middle of the ceiling: the same light that is in the tunnels, and the only
+  // one there is in here — no daylight reaches this far down. In lengths with gaps between
+  // them, because one unbroken tube overhead is a white bar across the top of every view.
+  for (let i = 0; i < 6; i++) {
+    const z = -HALF + 1.2 + i * 2.95;
+    out.push(box(-0.16, CEIL - 0.06, z, 0.16, CEIL, z + 2.25, Mat.Strip));
+  }
+  const PANES = 8, step = (2 * WIN_END) / PANES;
+  for (const s of [1, -1]) {
+    const x0 = s > 0 ? HX - WALL : -HX, x1 = s > 0 ? HX : -HX + WALL;
+    out.push(box(x0, FLOOR, -HALF, x1, WIN_SILL, HALF, Mat.Paint, true));
+    out.push(box(x0, WIN_HEAD, -HALF, x1, CEIL, HALF, Mat.Paint, true));
+    // the body beyond either end of the window band, then a pillar between each pair of panes
+    out.push(box(x0, WIN_SILL, -HALF, x1, WIN_HEAD, -WIN_END, Mat.Paint, true));
+    out.push(box(x0, WIN_SILL, WIN_END, x1, WIN_HEAD, HALF, Mat.Paint, true));
+    for (let i = 1; i < PANES; i++) {
+      const z = -WIN_END + i * step;
+      out.push(box(x0, WIN_SILL, z - 0.09, x1, WIN_HEAD, z + 0.09, Mat.Paint, true));
+    }
+    // Backing behind the joint with the next car, a hand's breadth either side of it. Two
+    // shells that merely meet leave the runner standing on the plane where both of them end
+    // as they walk over it — which, for that step, is standing in a carriage with no walls,
+    // looking out at the tunnel. This is set two centimetres outside every surface it backs,
+    // so it is behind whichever shell is there and is only ever seen at the joint itself.
+    out.push(box(x0 + 0.02 * s, FLOOR, HALF - 0.4, x1 + 0.02 * s, CEIL, HALF + 0.4, Mat.Paint, true));
+  }
+  out.push(box(-HX, 0.9, HALF - 0.4, HX, FLOOR - 0.02, HALF + 0.4, Mat.Metal));
+  out.push(box(-HX, CEIL + 0.02, HALF - 0.4, HX, 3.9, HALF + 0.4, Mat.Paint, true));
+  return out;
 }

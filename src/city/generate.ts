@@ -1901,6 +1901,8 @@ export interface RegionMesh {
   cars: (ParkedCar & { id: string })[];
   lifts: (Lift & { id: string })[];
   boats: (Pad & { id: string })[];
+  /** Subway stations whose platform is in this region; see src/city/plan.ts. */
+  stations: unknown[];
   maxHeight: number;
   colliders: { ci: number; cj: number; boxes: Float32Array }[];
 }
@@ -2195,7 +2197,7 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
   const boats = cells.flatMap(({ ci, cj, b }) => b.boats.map((v, k) => ({ ...v, id: `b${ci},${cj},${k}` })));
   return {
     rx, rz, vertices, positions: positionsOf(vertices, v), indices: indices.slice(0, idx),
-    groundCount, cells: ranges, pads, cars, lifts, boats, maxHeight, colliders,
+    groundCount, cells: ranges, pads, cars, lifts, boats, stations: [], maxHeight, colliders,
     lamps: cells.flatMap(({ b }) => b.lamps),
   };
 }

@@ -690,20 +690,41 @@ export interface TextureSet {
   noise: Uint8Array;
 }
 
-export function generateTextures(seed = 7): TextureSet {
-  const rng = new Rng(seed);
-  // the shader noise comes first so it stays the same whatever the material recipes do
-  const noise = shaderNoise(rng);
-  const layers = [
-    boardFormed(rng), precastPanel(rng), asphalt(rng), paving(rng), ribbed(rng), castInPlace(rng),
-    facadePanel(rng, false), facadePanel(rng, true),
-  ];
-  const px = TEX_SIZE * TEX_SIZE * 4;
-  const albedo = new Uint8Array(px * layers.length);
-  const normal = new Uint8Array(px * layers.length);
-  layers.forEach((l, i) => {
-    albedo.set(l.albedo, i * px);
-    normal.set(l.normal, i * px);
-  });
-  return { albedo, normal, noise };
+/** One built material layer: a tile of the albedo array and a tile of the normal array. */
+export interface TexLayerData {
+  albedo: Uint8Array;
+  normal: Uint8Array;
+}
+
+/** The material recipes, in `Layer` order. */
+const RECIPES: ((rng: Rng) => TexLayer)[] = [
+  boardFormed, precastPanel, asphalt, paving, ribbed, castInPlace,
+  (r) => facadePanel(r, false), (r) => facadePanel(r, true),
+];
+
+/**
+ * A stream of random numbers of its own for each piece of the set.
+ *
+ * The whole set used to come off one sequence, in one call, which meant a layer's
+ * appearance depended on how many numbers the layers before it had drawn — so the pieces
+ * could not be built out of order, and nothing could be built at the same time. Seeding
+ * each piece from the world seed and its own index unpicks that: the pool can take them in
+ * any order and on as many threads as it has, and the result is the same either way.
+ */
+function pieceSeed(seed: number, piece: number): number {
+  let h = (seed ^ Math.imul(piece + 1, 0x9e3779b1)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+/** One material layer of the texture array, by its `Layer` index. */
+export function generateLayer(seed: number, layer: number): TexLayerData {
+  const { albedo, normal } = RECIPES[layer](new Rng(pieceSeed(seed, layer + 1)));
+  return { albedo, normal };
+}
+
+/** The small noise texture the sky, the clouds and the weathering all read. */
+export function generateNoise(seed: number): Uint8Array {
+  return shaderNoise(new Rng(pieceSeed(seed, 0)));
 }
