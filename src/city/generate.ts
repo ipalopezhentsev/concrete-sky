@@ -144,6 +144,8 @@ export class Builder {
   /** Small craft tied up along a quay, which can be boarded. */
   boats: Pad[] = [];
   lifts: Lift[] = [];
+  /** Boxes whose underside is buried in solid ground and can never be seen; see `buried`. */
+  bottomless = new Set<number>();
   /** Concrete finish given to Mat.Board boxes that don't ask for one. */
   finish: Finish = Finish.Boards;
   constructor(private rng: Rng) {}
@@ -187,9 +189,14 @@ export class Builder {
   box(
     x0: number, y0: number, z0: number, x1: number, y1: number, z1: number,
     mat: Mat, tint: Tint = WHITE, style = 0,
-    opts: { collide?: boolean; detail?: boolean; seed?: number; turn?: number; hidden?: boolean; rise?: number; riseZ?: number } = {},
+    opts: {
+      collide?: boolean; detail?: boolean; seed?: number; turn?: number; hidden?: boolean; rise?: number; riseZ?: number;
+      /** The underside is deep in the ground, so its bottom face is left out of the mesh. */
+      buried?: boolean;
+    } = {},
   ): void {
     if (x1 - x0 < 1e-3 || y1 - y0 < 1e-3 || z1 - z0 < 1e-3) return;
+    if (opts.buried) this.bottomless.add(this.count);
     const volume = (x1 - x0) * (y1 - y0) * (z1 - z0);
     const detail = opts.detail ?? volume < 20;
     if (mat === Mat.Board && style === 0) style = this.finish;
@@ -2176,8 +2183,11 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
 
   const emit = (d: ArrayLike<number>, o: number, buried = 0, turn = 0, rise = 0, riseZ = 0) => {
     maxHeight = Math.max(maxHeight, d[o + 4] + (Math.abs(rise) + Math.abs(riseZ)) / 2);
-    // a bottom face resting on the street or a sidewalk can never be seen either
-    const mask = buried | (d[o + 1] <= 0.19 ? 1 << 5 : 0);
+    // A bottom face resting on the street or a sidewalk can never be seen either — but only in
+    // the grid city, where y = 0 is the street. The network city has ground of its own at any
+    // height, and there this took the underside off whatever happened to stand at zero: a
+    // bridge deck carried over the quay, seen from under it, was open to the sky.
+    const mask = buried | (street && d[o + 1] <= 0.19 ? 1 << 5 : 0);
     ({ v, idx } = emitBox(d, o, vertices, v, indices, idx, boxIndex * 24, mask, turn, rise, riseZ));
     boxIndex++;
   };
@@ -2208,7 +2218,8 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
     const tierPass = (tier: number) => {
       for (let i = 0; i < b.count; i++) {
         const o = i * FLOATS_PER_BOX;
-        if (d[o + 12] !== HIDDEN && boxTier(d, o) === tier) emit(d, o, buried[i], d[o + 14], d[o + 15], d[o + 16]);
+        if (d[o + 12] !== HIDDEN && boxTier(d, o) === tier)
+          emit(d, o, buried[i] | (b.bottomless.has(i) ? 1 << 5 : 0), d[o + 14], d[o + 15], d[o + 16]);
       }
     };
     const coarseStart = idx;

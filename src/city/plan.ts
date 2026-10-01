@@ -1247,7 +1247,7 @@ function terrain(
     let run: { z: number; h: number; drowned: boolean } | null = null;
 
     const endRun = (z: number) => {
-      if (run) b.box(x, run.h - 16, run.z, x + TILE, run.h, z, Mat.Asphalt, run.drowned ? BED : t, 0, { seed: 0, detail: false });
+      if (run) b.box(x, run.h - 16, run.z, x + TILE, run.h, z, Mat.Asphalt, run.drowned ? BED : t, 0, { seed: 0, detail: false, buried: true });
       run = null;
     };
 
@@ -1288,7 +1288,7 @@ function terrain(
       if (gx || gz) {
         endRun(z);
         b.box(x, h - 16, z, x + TILE, h, z + TILE, Mat.Asphalt, drowned ? BED : t, 0,
-          { seed: 0, detail: false, rise: gx, riseZ: gz });
+          { seed: 0, detail: false, buried: true, rise: gx, riseZ: gz });
       } else if (!run || run.h !== h || run.drowned !== drowned) {
         endRun(z);
         run = { z, h, drowned };
@@ -1665,6 +1665,10 @@ export function crossings(axis: 0 | 1, line: number, k: number): Crossing[] {
     // A deck that cannot clear the water is no bridge, and `span` declines to build one. It
     // must not be in this list either, or the traffic rides a crossing that was never built.
     if (deck < waterLevel(r.line) + 5) return;
+    // And it clears the quays. Over the bank by only a metre, the deck sat across the walk
+    // along the water as a wall, and the quay that runs the length of the river stopped at
+    // every bridge. It goes under, with the same headroom as a street.
+    deck = Math.max(deck, waterLevel(r.line) + QUAY_RISE + UNDER);
     // Then over any street the ramps would otherwise meet part way up. Raising the deck
     // lengthens the ramps, and a longer ramp can reach the next street out, so this goes round
     // until the ramps come down clear of everything — or reach a street at its own level, which
@@ -2033,9 +2037,14 @@ function span(
     const foot = groundAt(p[0], p[1]);
     b.box(p[0] - 3.4, foot - 3, p[1] - 3.4, p[0] + 3.4, top, p[1] + 3.4, Mat.Board, t, Finish.Ribbed, { detail: false });
   };
-  // piers, standing on the bed clear of the water
+  // piers, standing in the water — not on the quay, which is the walk that passes under
   const piers = Math.max(1, Math.round((s1 - s0) / 46));
-  for (let k = 1; k < piers; k++) pier(s0 + ((s1 - s0) * k) / piers, deck - 2.2);
+  for (let k = 1; k < piers; k++) {
+    const s = s0 + ((s1 - s0) * k) / piers;
+    const { p } = arteryFrame(axis, line, s);
+    const r = riverNear(p[0], p[1], RIVER_HALF + 10);
+    if (r && r.dist < RIVER_HALF - 5) pier(s, deck - 2.2);
+  }
   // and on land, under the deck where it is carried high over the bank — but never in a road,
   // which is the whole reason it is up there
   for (const [from, to] of [[c.a0, s0], [s1, c.a1]]) {
