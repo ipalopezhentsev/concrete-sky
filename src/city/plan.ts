@@ -1267,7 +1267,15 @@ function terrain(
       const c01 = C[node(i, j + 1)], c11 = C[node(i + 1, j + 1)];
       const gx = ((c10 + c11) - (c00 + c01)) / 2;
       const gz = ((c01 + c11) - (c00 + c10)) / 2;
-      const h = (c00 + c10 + c01 + c11) / 4;
+      // A tile is one plane and four corners need not lie in one, so the plane is the best fit
+      // through them, and a twisted tile overshoots: three corners high and one low puts the
+      // corner opposite the low one a quarter of the difference *above* where it was asked to
+      // be. Along the river that difference is the whole drop from the quay to the bed, six and
+      // a half metres, and every tile the cut crosses that way stood a metre and a half of
+      // ground up through the stone of the quay — the row of wedges along every bank. However
+      // it is fitted, no corner of a tile may stand above the highest corner it was given.
+      const over = Math.abs(gx) / 2 + Math.abs(gz) / 2 + (c00 + c10 + c01 + c11) / 4 - Math.max(c00, c10, c01, c11);
+      const h = (c00 + c10 + c01 + c11) / 4 - Math.max(0, over);
       const r = riverNear(cx, cz, RIVER_HALF + TILE_DIAG + 4);
       const w = r ? waterLevel(r.line) : Infinity;
       // Only ground that is actually under a river is riverbed. Comparing against a water
@@ -1576,6 +1584,13 @@ interface Crossing {
    */
   a0: number;
   a1: number;
+  /**
+   * Where the level deck ends and each ramp begins. The banks themselves (`s0`, `s1`) unless a
+   * street runs across the approach: then the deck carries on at full height until it is past
+   * that street, and comes down only beyond it. See `UNDER`.
+   */
+  e0: number;
+  e1: number;
   deck: number;
   water: number;
 }
@@ -1585,6 +1600,19 @@ const crossCache = rememberBySeed<string, Crossing[]>();
 const RAMP = 24;
 /** Steepest an approach ramp may be; past this it is a wall, not a road. */
 const RAMP_GRADE = 0.08;
+/**
+ * How far a deck carried over a street stands above that street's surface: a lorry's
+ * headroom under the soffit, and the depth of the deck itself.
+ *
+ * A road along a river runs parallel to the bank, which puts it straight across the approach
+ * to every bridge. The ramps used to come down at grade wherever they happened to be and
+ * cross whatever was under them — so at the street along the bank the ramp was still a metre
+ * and a half up, and the street ran into the side of it: a concrete wall across the road
+ * with the bridge sitting on top. A bridge goes over the road along the bank, not through it.
+ */
+const UNDER = 5 + 2.2;
+/** How far past the far kerb of a street it crosses the level deck runs before the ramp starts. */
+const UNDER_RUN = 8;
 
 /**
  * Where a road crosses water, worked out once per road per span and kept.
@@ -1633,11 +1661,53 @@ export function crossings(axis: 0 | 1, line: number, k: number): Crossing[] {
     if (!r) return;
     // The deck clears the higher of the two banks. Taken there and not at the ramp feet, so
     // that it does not depend on the feet the ramps are then chosen to reach.
-    const deck = Math.max(surface(a - 6), surface(b)) + 1.2;
+    let deck = Math.max(surface(a - 6), surface(b)) + 1.2;
     // A deck that cannot clear the water is no bridge, and `span` declines to build one. It
     // must not be in this list either, or the traffic rides a crossing that was never built.
     if (deck < waterLevel(r.line) + 5) return;
-    out.push({ s0: a, s1: b, a0: foot(a, -1, deck), a1: foot(b, 1, deck), water: waterLevel(r.line), deck });
+    // Then over any street the ramps would otherwise meet part way up. Raising the deck
+    // lengthens the ramps, and a longer ramp can reach the next street out, so this goes round
+    // until the ramps come down clear of everything — or reach a street at its own level, which
+    // is a junction and fine.
+    let e0 = a, e1 = b, a0 = foot(e0, -1, deck), a1 = foot(e1, 1, deck);
+    for (let pass = 0; pass < 4; pass++) {
+      const c: Crossing = { s0: a, s1: b, a0, a1, e0, e1, deck, water: 0 };
+      const lo = blocked(c, e0, a0, -1), hi = blocked(c, e1, a1, 1);
+      if (!lo && !hi) break;
+      if (lo) {
+        e0 = Math.min(e0, lo.s - UNDER_RUN);
+        deck = Math.max(deck, lo.top + UNDER);
+      }
+      if (hi) {
+        e1 = Math.max(e1, hi.s + UNDER_RUN);
+        deck = Math.max(deck, hi.top + UNDER);
+      }
+      a0 = foot(e0, -1, deck);
+      a1 = foot(e1, 1, deck);
+    }
+    out.push({ s0: a, s1: b, a0, a1, e0, e1, water: waterLevel(r.line), deck });
+  };
+  /**
+   * The street furthest out along one ramp that the ramp passes over without meeting it — at
+   * its station, with the highest surface among those found — or null where the ramp is clear.
+   *
+   * Only a street that runs right across, seen on both sides of the deck. A side street that
+   * merely ends at the main road is a junction, and lifting a bridge over every one of those
+   * would never bring a ramp down at all.
+   */
+  const blocked = (c: Crossing, from: number, to: number, dir: -1 | 1) => {
+    let at: number | null = null, high = -Infinity;
+    for (let s = from; dir < 0 ? s > to : s < to; s += dir * 3) {
+      const top = crossTop(axis, line, s);
+      if (top === null) continue;
+      const y = spanY(axis, line, c, s);
+      // at its own level the ramp meets the street and the two simply cross; high enough, it
+      // is already over it
+      if (y - top < 0.5 || y - top >= UNDER - 0.05) continue;
+      at = s;
+      high = Math.max(high, top);
+    }
+    return at === null ? null : { s: at, top: high };
   };
   /** Height of whatever a vehicle runs on at a station: the carriageway, else the ground. */
   const surface = (s: number) => {
@@ -1781,10 +1851,11 @@ export function rideAt(x: number, z: number, below: number): number | null {
  * one height across its width. The traffic reads the same function, so the two cannot part.
  */
 function spanY(axis: 0 | 1, line: number, c: Crossing, s: number): number {
-  const foot = s < c.s0 ? c.a0 : c.a1;
+  if (s >= c.e0 && s <= c.e1) return c.deck;
+  const foot = s < c.e0 ? c.a0 : c.a1;
   const p = arteryFrame(axis, line, foot).p;
   const bank = roadRideAt(p[0], p[1]) ?? terrainAt(p[0], p[1]);
-  const t = s < c.s0 ? (s - c.a0) / (c.s0 - c.a0) : s > c.s1 ? (c.a1 - s) / (c.a1 - c.s1) : 1;
+  const t = s < c.e0 ? (s - c.a0) / (c.e0 - c.a0) : (c.a1 - s) / (c.a1 - c.e1);
   const e = Math.max(0, Math.min(1, t));
   return bank * (1 - e) + c.deck * e;
 }
@@ -1898,6 +1969,22 @@ function crossedHere(axis: 0 | 1, line: number, x: number, z: number): boolean {
   return false;
 }
 
+/**
+ * The surface of a road running right across this one at a station — seen just outside the
+ * carriageway on both sides — or null where nothing does.
+ */
+function crossTop(axis: 0 | 1, line: number, s: number): number | null {
+  const { p, dir } = arteryFrame(axis, line, s);
+  let top = -Infinity;
+  for (const side of [1, -1]) {
+    const off = side * (ARTERY_HALF + 1.6);
+    const x = p[0] - dir[1] * off, z = p[1] + dir[0] * off;
+    if (!crossedHere(axis, line, x, z)) return null;
+    top = Math.max(top, roadTopAt(x, z) ?? terrainAt(x, z));
+  }
+  return top;
+}
+
 /** One bridge: deck, parapets and piers, from station `s0` to `s1` along the road. */
 function span(
   b: Builder, axis: 0 | 1, line: number, c: Crossing, t: Tint, x0: number, z0: number,
@@ -1930,22 +2017,36 @@ function span(
     // then its parapet is a metre of panel standing right across that road's carriageway. The
     // traffic drove through it, because the traffic does not collide with the city; anybody
     // driving it themselves met a concrete block across the road with no way round. The deck is
-    // left where it is and the two roads simply cross on it.
+    // left where it is and the two roads simply cross on it. Only at grade, though: where the
+    // deck has been carried up over the street (see `UNDER`) the street is underneath, and the
+    // parapet stays.
     for (const side of [1, -1] as const) {
       const off = side * (HALF - 0.4);
       const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
-      if (crossedHere(axis, line, cx, cz)) continue;
+      if (crossedHere(axis, line, cx, cz) && mid - (roadTopAt(cx, cz) ?? terrainAt(cx, cz)) < UNDER - 1) continue;
       put(0.4, mid, mid + 1.15, off, Mat.Panel);
     }
   }
+  const pier = (s: number, top: number) => {
+    const { p } = arteryFrame(axis, line, s);
+    if (p[0] < x0 || p[0] >= x0 + REGION || p[1] < z0 || p[1] >= z0 + REGION) return;
+    const foot = groundAt(p[0], p[1]);
+    b.box(p[0] - 3.4, foot - 3, p[1] - 3.4, p[0] + 3.4, top, p[1] + 3.4, Mat.Board, t, Finish.Ribbed, { detail: false });
+  };
   // piers, standing on the bed clear of the water
   const piers = Math.max(1, Math.round((s1 - s0) / 46));
-  for (let k = 1; k < piers; k++) {
-    const s = s0 + ((s1 - s0) * k) / piers;
-    const { p } = arteryFrame(axis, line, s);
-    if (p[0] < x0 || p[0] >= x0 + REGION || p[1] < z0 || p[1] >= z0 + REGION) continue;
-    const foot = groundAt(p[0], p[1]);
-    b.box(p[0] - 3.4, foot - 3, p[1] - 3.4, p[0] + 3.4, deck - 2.2, p[1] + 3.4, Mat.Board, t, Finish.Ribbed, { detail: false });
+  for (let k = 1; k < piers; k++) pier(s0 + ((s1 - s0) * k) / piers, deck - 2.2);
+  // and on land, under the deck where it is carried high over the bank — but never in a road,
+  // which is the whole reason it is up there
+  for (const [from, to] of [[c.a0, s0], [s1, c.a1]]) {
+    for (let s = from + 15; s < to - 10; s += 30) {
+      const { p } = arteryFrame(axis, line, s);
+      const top = spanY(axis, line, c, s) - 2.2;
+      if (top - groundAt(p[0], p[1]) < 3) continue;
+      let clear = true;
+      for (const dx of [-5, 0, 5]) for (const dz of [-5, 0, 5]) if (roadTopAt(p[0] + dx, p[1] + dz) !== null) clear = false;
+      if (clear) pier(s, top);
+    }
   }
 }
 
