@@ -3,7 +3,7 @@
 import type { Vec3 } from "../math";
 import { FLOOR, type Colliders } from "../player";
 import { exitSpot } from "./exit";
-import { footprint } from "./parking";
+import { CAR_DIMS } from "./models";
 
 export interface DriveInput {
   throttle: number; // -1..1 (S brakes, then reverses)
@@ -67,12 +67,36 @@ const ROAD_DEEP = 1.2;
 const STEP = 0.4;
 const ROAD_STEP = 0.6;
 
+/** The steepest fall, per metre travelled, a car keeps its wheels on rather than leaving. */
+const STICK = 0.35;
+
 /** The road under the car this frame, and the bands it sets on what collision says. */
 interface Road {
   y: number; // the asphalt
   reach: number; // the highest thing the car will climb onto from it
   ceiling: number; // tops at or under this may be the road described in boxes
   floor: number; // ... but only if their undersides reach at least this far below it
+}
+
+/**
+ * Whether the car, a rectangle of half-length `hl` and half-width `hw` centred on (x, z) and
+ * pointing along (fx, fz), overlaps box `i` seen from above.
+ *
+ * The car as it is, turned. It used to be the square-on box round the turned car, which is the
+ * car itself only when it points along an axis — true of every street in the grid city, and of
+ * almost none in this one. Going the diagonal, that box is a metre and a half wider than the car
+ * on either side, and the car stopped dead against kerbs, walls and parked cars it could be
+ * seen to be well clear of.
+ */
+function touches(boxes: Float32Array, i: number, x: number, z: number, fx: number, fz: number, hl: number, hw: number): boolean {
+  const ex = (boxes[i + 3] - boxes[i]) / 2, ez = (boxes[i + 5] - boxes[i + 2]) / 2;
+  const dx = boxes[i] + ex - x, dz = boxes[i + 2] + ez - z;
+  const ax = Math.abs(fx), az = Math.abs(fz);
+  // the four axes that can part them: the world's two and the car's two
+  if (Math.abs(dx) >= ex + ax * hl + az * hw) return false;
+  if (Math.abs(dz) >= ez + az * hl + ax * hw) return false;
+  if (Math.abs(dx * fx + dz * fz) >= hl + ex * ax + ez * az) return false;
+  return Math.abs(dx * fz - dz * fx) < hw + ex * az + ez * ax;
 }
 
 /** Whether box `i` is the road itself rather than something standing on it. */
@@ -123,11 +147,11 @@ export class Car {
   private overlapping(
     boxes: Float32Array, x: number, y: number, z: number, yaw: number, road: Road | null, reach: number,
   ): number {
-    const f = footprint(this.kind, yaw);
+    const d = CAR_DIMS[this.kind], fx = Math.sin(yaw), fz = Math.cos(yaw);
     let top = -1;
     for (let i = 0; i < boxes.length; i += 6) {
-      if (boxes[i] < x + f.hx && boxes[i + 3] > x - f.hx && boxes[i + 2] < z + f.hz && boxes[i + 5] > z - f.hz &&
-          boxes[i + 1] < y + f.h && boxes[i + 4] > reach && !isRoad(boxes, i, road)) top = Math.max(top, i);
+      if (boxes[i + 1] < y + d.h && boxes[i + 4] > reach && !isRoad(boxes, i, road) &&
+          touches(boxes, i, x, z, fx, fz, d.hz, d.hx)) top = Math.max(top, i);
     }
     return top; // index of a blocking box, or -1
   }
@@ -194,14 +218,22 @@ export class Car {
     // reach, which changes as it moves and as it turns, so the ride was a tremor the length of
     // every sloping street. What is still read off collision here is everything that is not the
     // road: a ramp up off it, a deck, a roof, the ground where the road runs out.
-    const f = footprint(this.kind, this.yaw);
+    const d = CAR_DIMS[this.kind], fx = Math.sin(this.yaw), fz = Math.cos(this.yaw);
     let ground = road?.y ?? FLOOR;
     for (let i = 0; i < boxes.length; i += 6) {
-      if (boxes[i] < this.pos[0] + f.hx && boxes[i + 3] > this.pos[0] - f.hx &&
-          boxes[i + 2] < this.pos[2] + f.hz && boxes[i + 5] > this.pos[2] - f.hz &&
-          boxes[i + 4] <= reach && !isRoad(boxes, i, road)) ground = Math.max(ground, boxes[i + 4]);
+      if (boxes[i + 4] <= reach && boxes[i + 4] > ground && !isRoad(boxes, i, road) &&
+          touches(boxes, i, this.pos[0], this.pos[2], fx, fz, d.hz, d.hx)) ground = boxes[i + 4];
     }
-    if (this.pos[1] <= ground + 1e-3) {
+    // Going downhill the road falls away under the car every frame, and a car let go of each
+    // time it did fell from a standstill, landed a few frames later and was let go again: down
+    // any steep street at speed, a run of hops a third of a metre high. On the ground it stays
+    // on whatever falls no faster than a steep road can under it, and carries the road's own
+    // fall with it, so over the top of a real crest it still leaves the ground as it should.
+    const drop = this.pos[1] - ground;
+    if (this.grounded && drop > 1e-3 && drop <= Math.abs(this.speed) * dt * STICK + 0.02) {
+      this.vy = -drop / dt;
+      this.pos[1] = ground;
+    } else if (this.pos[1] <= ground + 1e-3) {
       this.pos[1] = this.pos[1] + (ground - this.pos[1]) * Math.min(1, dt * 20);
       if (Math.abs(this.pos[1] - ground) < 0.01) this.pos[1] = ground;
       this.vy = 0;

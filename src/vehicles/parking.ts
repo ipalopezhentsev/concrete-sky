@@ -23,6 +23,9 @@ export interface Parked {
 }
 
 /** Axis-aligned bounds of a vehicle footprint rotated by yaw. */
+/** Boxes a parked car is cut into for collision, along its length; see `boxes`. */
+const SLICES = 4;
+
 export function footprint(kind: VehicleKind, yaw: number): { hx: number; hz: number; h: number } {
   if (kind === "flyer") return { hx: 1.0, hz: 1.0, h: 1.55 };
   if (kind === "boat") {
@@ -144,8 +147,21 @@ export class Parking {
     const list: number[] = [];
     for (const p of this.all()) {
       if (Math.abs(p.x - x) > 160 || Math.abs(p.z - z) > 160) continue;
-      const f = footprint(p.kind, p.yaw);
-      list.push(p.x - f.hx, p.y, p.z - f.hz, p.x + f.hx, p.y + f.h, p.z + f.hz);
+      if (p.kind !== "car" && p.kind !== "van") {
+        const f = footprint(p.kind, p.yaw);
+        list.push(p.x - f.hx, p.y, p.z - f.hz, p.x + f.hx, p.y + f.h, p.z + f.hz);
+        continue;
+      }
+      // Cut into slices along its length, each boxed on its own: the square-on box round a car
+      // parked on a street running the diagonal stood out a metre and a half into the lane.
+      const d = CAR_DIMS[p.kind], fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);
+      const slice = d.hz / SLICES;
+      const ex = Math.abs(fx) * slice + Math.abs(fz) * d.hx, ez = Math.abs(fz) * slice + Math.abs(fx) * d.hx;
+      for (let k = 0; k < SLICES; k++) {
+        const t = -d.hz + slice * (2 * k + 1);
+        const cx = p.x + fx * t, cz = p.z + fz * t;
+        list.push(cx - ex, p.y, cz - ez, cx + ex, p.y + d.h, cz + ez);
+      }
     }
     const boxes = Float32Array.from(list);
     this.boxCache.set(key, boxes);

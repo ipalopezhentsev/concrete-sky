@@ -9,7 +9,7 @@
 import { hashInt, Rng } from "../math";
 import { Finish, Mat, Win, type Tint } from "./materials";
 import { PAINT_COLORS } from "../vehicles/models";
-import { emitBox, FLOATS_PER_VERTEX, positionsOf, YAW_STEP, YAW_STEPS, yawStep } from "./mesh";
+import { emitBox, emitTri, FLOATS_PER_TRI, FLOATS_PER_VERTEX, positionsOf, YAW_STEP, YAW_STEPS, yawStep } from "./mesh";
 
 export { VERTEX_LAYOUT, FLOATS_PER_VERTEX } from "./mesh";
 
@@ -148,7 +148,21 @@ export class Builder {
   bottomless = new Set<number>();
   /** Concrete finish given to Mat.Board boxes that don't ask for one. */
   finish: Finish = Finish.Boards;
+  /** Free triangles, FLOATS_PER_TRI each (see `emitTri` in mesh.ts): drawn, never collided with. */
+  tris: number[] = [];
+  triCount = 0;
   constructor(private rng: Rng) {}
+
+  /**
+   * One free triangle: three corners of x y z, normal and u v. Placed in the world as given —
+   * a turned frame does not apply — and never solid: whatever stands for it in collision is
+   * placed as boxes of its own.
+   */
+  tri(corners: number[][], mat: Mat, tint: Tint = WHITE, style = 0): void {
+    for (const c of corners) for (let k = 0; k < 8; k++) this.tris.push(c[k]);
+    this.tris.push(tint[0], tint[1], tint[2], mat, mat === Mat.Board && style === 0 ? this.finish : style, 0);
+    this.triCount++;
+  }
 
   /** Active turned frame; see `turned`. */
   private frame: { x: number; z: number; turn: number; cs: number; sn: number } | null = null;
@@ -2171,12 +2185,14 @@ export interface Part {
  * bounds the frustum test uses. Shared by both plans — only what fills the builders differs.
  */
 export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull = true, street = true): RegionMesh {
-  let total = 1;
-  for (const c of cells) total += c.b.count;
+  let total = 1, triTotal = 0;
+  for (const c of cells) {
+    total += c.b.count;
+    triTotal += c.b.triCount;
+  }
 
-  const vertices = new Float32Array(total * 24 * FLOATS_PER_VERTEX);
-  const indices = new Uint32Array(total * 36);
-  let boxIndex = 0;
+  const vertices = new Float32Array((total * 24 + triTotal * 3) * FLOATS_PER_VERTEX);
+  const indices = new Uint32Array(total * 36 + triTotal * 3);
   let idx = 0;
   let v = 0;
   let maxHeight = 0;
@@ -2188,8 +2204,7 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
     // height, and there this took the underside off whatever happened to stand at zero: a
     // bridge deck carried over the quay, seen from under it, was open to the sky.
     const mask = buried | (street && d[o + 1] <= 0.19 ? 1 << 5 : 0);
-    ({ v, idx } = emitBox(d, o, vertices, v, indices, idx, boxIndex * 24, mask, turn, rise, riseZ));
-    boxIndex++;
+    ({ v, idx } = emitBox(d, o, vertices, v, indices, idx, v / FLOATS_PER_VERTEX, mask, turn, rise, riseZ));
   };
 
   // Street slab for the whole region: the grid city's streets are the plane y = 0. The network
@@ -2215,6 +2230,16 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
       lo[1] = Math.min(lo[1], d[o + 1] - shear); hi[1] = Math.max(hi[1], d[o + 4] + shear);
       lo[2] = Math.min(lo[2], v0); hi[2] = Math.max(hi[2], v1);
     }
+    const t = b.tris;
+    for (let i = 0; i < b.triCount; i++)
+      for (let c = 0; c < 3; c++) {
+        const o = i * FLOATS_PER_TRI + c * 8;
+        for (let a = 0; a < 3; a++) {
+          lo[a] = Math.min(lo[a], t[o + a]);
+          hi[a] = Math.max(hi[a], t[o + a]);
+        }
+        maxHeight = Math.max(maxHeight, t[o + 1]);
+      }
     const tierPass = (tier: number) => {
       for (let i = 0; i < b.count; i++) {
         const o = i * FLOATS_PER_BOX;
@@ -2224,6 +2249,9 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
     };
     const coarseStart = idx;
     tierPass(0);
+    // free triangles are surfaces laid over whole streets, and read from anywhere
+    for (let i = 0; i < b.triCount; i++)
+      ({ v, idx } = emitTri(t, i * FLOATS_PER_TRI, vertices, v, indices, idx, v / FLOATS_PER_VERTEX));
     const midStart = idx;
     tierPass(1);
     const detailStart = idx;

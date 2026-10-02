@@ -145,6 +145,56 @@ export function emitBox(
   return { v, idx };
 }
 
+/**
+ * The face code for a vertex of a free triangle with this normal: the top face leaned over by
+ * `normalCode` where the tilt is in its range, an underside as the bottom face, and anything
+ * else — a wall — the +x face turned round to face the same way, horizontal, as near as the
+ * code gets.
+ */
+function surfaceCode(nx: number, ny: number, nz: number): number {
+  const len = Math.hypot(nx, ny, nz) || 1;
+  if (ny / len > Math.cos(PITCH_MAX * PITCH_STEP)) return 4 + normalCode(nx, ny, nz);
+  if (ny / len < -0.9) return 5; // an underside, taken as facing straight down
+  return yawStep(Math.atan2(nz, nx)) * 8;
+}
+
+/**
+ * Floats per free triangle: for each of its three corners x y z, the normal there and u v,
+ * then r g b mat style seed for the whole of it.
+ */
+export const FLOATS_PER_TRI = 30;
+
+/**
+ * Writes one free triangle (see FLOATS_PER_TRI) into the buffers: a surface that is not the
+ * face of any box, such as the road, whose corners are shared with the triangles round it
+ * rather than standing at heights of their own. Each corner carries its own normal, so a
+ * surface laid from these shades smoothly across its joints.
+ */
+export function emitTri(
+  t: ArrayLike<number>, o: number, vertices: Float32Array, v: number, indices: Uint32Array, idx: number,
+  baseVertex: number,
+): { v: number; idx: number } {
+  const u8 = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
+  const tint = u8(t[o + 24]) * 65536 + u8(t[o + 25]) * 256 + u8(t[o + 26]);
+  const matStyle = t[o + 27] + t[o + 28] * 64;
+  for (let c = 0; c < 3; c++) {
+    const k = o + c * 8;
+    vertices[v++] = t[k];
+    vertices[v++] = t[k + 1];
+    vertices[v++] = t[k + 2];
+    vertices[v++] = surfaceCode(t[k + 3], t[k + 4], t[k + 5]);
+    vertices[v++] = t[k + 6];
+    vertices[v++] = t[k + 7];
+    vertices[v++] = 1;
+    vertices[v++] = 1;
+    vertices[v++] = tint;
+    vertices[v++] = matStyle;
+    vertices[v++] = t[o + 29];
+    indices[idx++] = baseVertex + c;
+  }
+  return { v, idx };
+}
+
 /** Mesh for a small list of boxes (12 floats each). */
 export function boxesMesh(boxes: number[]): { vertices: Float32Array; indices: Uint32Array } {
   const n = boxes.length / 12;

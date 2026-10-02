@@ -447,31 +447,40 @@ function buildBlock(site: Site, b: Builder): void {
 // The terrace and the tile live with the terrain field: between them they set the steepest
 // ground it is allowed to ask for, and neither can be changed here alone.
 
-/** One flat stretch of street: a turned rectangle at one height. */
-interface Piece {
+/**
+ * A rectangle of carriageway and the gradient it was cut to: a stretch of street, or a bay of
+ * fill along a main road. These say where the road is and roughly how high; what the surface
+ * actually is, everywhere, is `fieldAt`.
+ */
+interface Lane {
   cx: number;
   cz: number;
   ux: number;
   uz: number;
   hl: number; // half length, along u
   hw: number; // half width, across
-  /** Height on the centreline at the stretch's middle. */
+  /** Height on the centreline at the middle. */
   y: number;
+  /** How much the surface climbs per metre along `u`. */
+  grade: number;
+  /**
+   * How much it climbs per metre across, at either end; see `cutPieces`. Nothing on a main
+   * road or fill, which are level across.
+   */
+  c0: number;
+  c1: number;
+}
+
+/** One straight gradient of street: a turned rectangle sloping along its own length. */
+interface Piece extends Lane {
   street: Street;
   /** Stations along the street this stretch runs between, and the street's length. */
   s0: number;
   s1: number;
   len: number;
-  /**
-   * How much the surface climbs per metre along `u`.
-   *
-   * A stretch is a plane, not a terrace. Everything else in this city is an axis-aligned box
-   * and a turn about the vertical, and a hillside built out of those can only be steps — but
-   * a road built out of them is a flight of stairs, which is not what a road is. So a stretch
-   * is laid as one tilted slab (see `rise` in mesh.ts) and the cut into stretches is a cut
-   * into straight gradients, not into half-metre treads.
-   */
-  grade: number;
+  /** Stations of the unbroken run of stretches this one is part of: where the street is laid. */
+  run0: number;
+  run1: number;
 }
 
 /** Surface height of a stretch at a station along its street. */
@@ -480,10 +489,13 @@ function pieceYAt(p: Piece, s: number): number {
   return p.y + p.grade * (Math.max(p.s0, Math.min(p.s1, s)) - mid);
 }
 
-/** Surface height of a stretch under a point, which is taken to lie on it. */
-function pieceYOn(p: Piece, x: number, z: number): number {
-  const u = (x - p.cx) * p.ux + (z - p.cz) * p.uz;
-  return p.y + p.grade * Math.max(-p.hl, Math.min(p.hl, u));
+/** Height of a lane's own surface under a point, carried on level past its ends and sides. */
+function pieceYOn(p: Lane, x: number, z: number): number {
+  const dx = x - p.cx, dz = z - p.cz;
+  const u = Math.max(-p.hl, Math.min(p.hl, dx * p.ux + dz * p.uz));
+  const v = Math.max(-p.hw, Math.min(p.hw, dz * p.ux - dx * p.uz));
+  const t = p.hl > 0 ? (u + p.hl) / (2 * p.hl) : 0.5;
+  return p.y + p.grade * u + (p.c0 + (p.c1 - p.c0) * t) * v;
 }
 
 // Cutting a street into stretches walks its whole length a metre at a time, asking the height
@@ -528,10 +540,11 @@ const FADE = 22;
  * reference: it is a Voronoi vertex, which where a street meets an arterial stands off in the
  * block line tens of metres from the carriageway, over ground that on a flank is a metre and a
  * half from the road's. Away from any arterial the corner is the shared point and its own
- * ground is what they all agree on.
+ * ground is what they all agree on — the ground itself, not the terrace it rounds to, since every
+ * street there follows the ground and any offset from it is a difference between them.
  */
 function cornerHeight(x: number, z: number): number {
-  return arterialAt(x, z, 18) ?? groundAt(x, z);
+  return arterialAt(x, z, 18) ?? terrainAt(x, z);
 }
 
 /**
@@ -613,6 +626,44 @@ function arterialBlend(x: number, z: number, margin: number, feather: number): {
 }
 
 /**
+ * The ground along the centreline of the main roads in `segs` nearest a point, and how much
+ * of a say it has there: `arterialBlend` for the fill, which is laid at that height.
+ */
+function mainBlend(
+  segs: [Vec2, Vec2][], x: number, z: number, margin: number, feather: number,
+): { y: number; w: number } | null {
+  let sum = 0, wsum = 0, most = 0;
+  for (const [a, b] of segs) {
+    const dx = b[0] - a[0], dz = b[1] - a[1];
+    const l2 = dx * dx + dz * dz;
+    const t = l2 < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / l2));
+    const qx = a[0] + t * dx, qz = a[1] + t * dz;
+    const out = Math.hypot(x - qx, z - qz) - (FILL_HALF + margin);
+    if (out > feather) continue;
+    const u = out <= 0 ? 0 : out / feather;
+    const w = 1 - u * u * (3 - 2 * u);
+    sum += fillGround(qx, qz) * w;
+    wsum += w;
+    most = Math.max(most, w);
+  }
+  return wsum > 0 ? { y: sum / wsum, w: most } : null;
+}
+
+/**
+ * The level fill is laid at on a main road's centreline: the ground, except near the road's
+ * own stretches, where it comes to meet them.
+ *
+ * A stretch runs along the straight edge between the blocks either side of it, which can stand
+ * well off the spline the fill follows, and on a flank the ground under the two is metres
+ * apart. Where the blocks ran out and the fill took over, the road stepped by all of that.
+ */
+function fillGround(x: number, z: number): number {
+  const g = terrainAt(x, z);
+  const over = arterialBlend(x, z, 0, FADE);
+  return over ? g + (over.y - g) * over.w : g;
+}
+
+/**
  * How far past a main road's kerb its carriageway still owns the ground: the widest its own
  * structure ever gets, which is the bridge deck at ARTERY_HALF + 2.
  */
@@ -633,11 +684,16 @@ const ARTERY_MARGIN = 2.5;
  * products and nothing else — which matters, because it is asked for every metre of every
  * street in the city.
  */
-function onArtery(segs: [Vec2, Vec2][], x: number, z: number): boolean {
-  const reach = ARTERY_HALF + ARTERY_MARGIN;
+function onArtery(segs: [Vec2, Vec2][], x: number, z: number, ux: number, uz: number): boolean {
   for (const [a, b] of segs) {
     const dx = b[0] - a[0], dz = b[1] - a[1];
     const l2 = dx * dx + dz * dz;
+    // A street that meets the main road runs on to just inside the fill's own edge, so that
+    // the two overlap; stopping at the margin left a slot of bare ground two metres wide across
+    // the mouth of every side street. One running alongside it, in the strip between the road
+    // and the blocks cut back off it, keeps the margin and is not laid there at all.
+    const along = l2 > 1e-9 && Math.abs(dx * ux + dz * uz) / Math.sqrt(l2) > Math.SQRT1_2;
+    const reach = along ? ARTERY_HALF + ARTERY_MARGIN : FILL_HALF - 0.5;
     const t = l2 < 1e-9 ? 0 : Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / l2));
     if (Math.hypot(x - (a[0] + t * dx), z - (a[1] + t * dz)) <= reach) return true;
   }
@@ -698,7 +754,7 @@ function cutPieces(st: Street): Piece[] {
   // Every main road that comes near this street, gathered once for the whole of it rather than
   // per sample: see `onArtery`.
   const mains = arterial ? []
-    : arteriesNear((ax + bx) / 2, (az + bz) / 2, L / 2 + ext + ARTERY_HALF + ARTERY_MARGIN + 1);
+    : arteriesNear((ax + bx) / 2, (az + bz) / 2, L / 2 + ext + ARTERY_HALF + st.half + FADE + 4);
   // The height of the ground on the centreline, the same number the traffic drives on — except
   // near either end, where it holds the height of the corner instead.
   //
@@ -721,13 +777,57 @@ function cutPieces(st: Street): Piece[] {
   // only for a street that has junctions at its ends; an arterial asking would send this round
   // in a circle, since what it would be asking is which arterial it lies in
   const yA = corners ? cornerHeight(ax, az) : 0, yB = corners ? cornerHeight(bx, bz) : 0;
-  const yAt = (s: number) => {
+  const dA = corners ? yA - terrainAt(ax, az) : 0, dB = corners ? yB - terrainAt(bx, bz) : 0;
+  /**
+   * Height on the centreline at a station, and how much the surface climbs per metre across
+   * the street there.
+   *
+   * A street is level across almost everywhere. In a junction it is not: two streets crossing
+   * on a flank each carried the ground along their own middles, and where they overlapped they
+   * disagreed by the fall across half a road — over a metre at a corner on steep ground. So in
+   * the junction, and fading out with it, a street takes the ground's fall across it as well as
+   * along it, and past its own ends follows the ground on into the junction rather than holding
+   * the corner's height. Every street meeting there is then the ground plus the same offset,
+   * which is the same surface, so they agree wherever they overlap.
+   */
+  /**
+   * What the main roads near a station make of it, every COARSE metres: the ground's fall
+   * across the street, and for the fill and the stretches of a main road in turn how much say
+   * they have, times the height they ask for and times their slope across this street. All of
+   * it changes over tens of metres, so it is read this often and interpolated between, which is
+   * most of what cutting a street costs saved; kept times the say, since a say of nothing has
+   * no height to interpolate.
+   */
+  const COARSE = 4;
+  const coarse = new Map<number, number[]>();
+  const mainsAt = (k: number): number[] => {
+    const hit = coarse.get(k);
+    if (hit) return hit;
+    const s = k * COARSE, x = ax + ux * s, z = az + uz * s;
+    const out = [fallAcross(x, z, ux, uz)];
+    // a main road has no main roads to meet, only others crossing it
+    if (!corners) out[0] *= crossingSay(x, z, ux, uz);
+    else for (const f of [
+      (px: number, pz: number) => mainBlend(mains, px, pz, st.half + 2, FADE),
+      (px: number, pz: number) => arterialBlend(px, pz, st.half + 2, FADE),
+    ]) {
+      const m = f(x, z);
+      const l = m && f(x - uz, z + ux), r = m && f(x + uz, z - ux);
+      out.push(m ? m.w : 0, m ? m.w * m.y : 0, m && l && r ? (m.w * (l.y - r.y)) / 2 : 0);
+    }
+    coarse.set(k, out);
+    return out;
+  };
+  const yAt = (s: number): [number, number] => {
     const c = Math.max(0, Math.min(L, s));
-    const x = ax + ux * c, z = az + uz * c;
+    const x = ax + ux * s, z = az + uz * s;
     // An arterial simply follows the ground, and now follows it as a gradient rather than as
     // the terrace it stands nearest. Consecutive stretches of one are separate streets that
     // meet end to end, and both read this at the same point, so they still agree exactly.
-    if (!corners) return terrainAt(x, z);
+    const k0 = Math.floor(s / COARSE), f = s / COARSE - k0;
+    const lo = mainsAt(k0), hi = mainsAt(k0 + 1);
+    const m = lo.map((v, e) => v + (hi[e] - v) * f);
+    if (!corners) return [terrainAt(ax + ux * c, az + uz * c), m[0]];
     // How much each end's junction still has a say here: all of it out to JUNCTION, none of
     // it past JUNCTION + FADE.
     const hold = (d: number) => {
@@ -742,19 +842,29 @@ function cutPieces(st: Street): Piece[] {
     // fell away inside that the carriageway stayed up and stood on a plinth — a table a
     // metre and a half proud of the land with a cliff round it, which from below is a pit in
     // the middle of the road. Carrying the corner's *offset* from the ground instead, rather
-    // than its height, keeps every street that shares the corner agreeing to within the
-    // terrace the corner was rounded to, and lets all of them follow the hill down.
-    const ground = terrainAt(ax + ux * c, az + uz * c);
-    const dA = yA - terrainAt(ax, az), dB = yB - terrainAt(bx, bz);
-    const own = wA + wB >= 1
+    // than its height, lets every street that shares the corner follow the hill down together.
+    const ground = terrainAt(x, z);
+    let y = wA + wB >= 1
       ? ground + (dA * wA + dB * wB) / (wA + wB)
       : ground + dA * wA + dB * wB;
+    let cross = Math.min(1, wA + wB) * m[0];
     // Where this street lies in a main road it is that road's surface, not its own — a side
     // street leaving an arterial at a shallow angle stays in the carriageway for thirty or
     // forty metres. Eased out over the same distance a junction is, so that leaving the road
-    // is a ramp off it rather than the step off its edge that it was.
-    const over = arterialBlend(x, z, st.half + 2, FADE);
-    return over ? own + (over.y - own) * over.w : own;
+    // is a ramp off it rather than the step off its edge that it was. First to the fill, where
+    // the main road has no stretches here (see `fillIn`) — without it a side street met the
+    // fill as much as a metre and a half above it — then to the stretches.
+    //
+    // And to its slope across this street's mouth as well as its level: which is mostly the
+    // main road's own gradient, running across the end of a street that meets it square.
+    // Levelled out instead, a street came into the side of a main road on a flank with one kerb
+    // above it and the other below.
+    for (const e of [1, 4]) {
+      const w = m[e];
+      y = y * (1 - w) + m[e + 1];
+      cross = cross * (1 - w) + m[e + 2];
+    }
+    return [y, cross];
   };
   // Nothing is laid over the water, and nothing is laid inside a main road either: where a
   // side street runs into an arterial, the arterial's own carriageway is the junction, and a
@@ -766,7 +876,7 @@ function cutPieces(st: Street): Piece[] {
     // The main road's carriageway is the junction, wherever it is: laid as its own stretches,
     // filled in where the blocks beside it ran out, or carried over a valley on a bridge whose
     // ramps come down through here. A side street stops at the kerb in all three.
-    if (corners && (arterialAt(x, z, 0) !== null || onArtery(mains, x, z))) return true;
+    if (corners && (arterialAt(x, z, 0) !== null || onArtery(mains, x, z, ux, uz))) return true;
     // Past its own ends a street is only there to fill the junction, and a junction is as wide
     // as the roads that meet in it — not as wide as `ext`, which carries the slab up to thirty
     // metres on. Where the overhang has left the junction and run into a block it is asphalt
@@ -777,11 +887,11 @@ function cutPieces(st: Street): Piece[] {
     return !!r && r.dist < RIVER_HALF + QUAY + 2;
   };
   const out: Piece[] = [];
-  const push = (s0: number, s1: number, ya: number, yb: number) => {
+  const push = (s0: number, s1: number, ya: number, yb: number, c0: number, c1: number) => {
     const m = (s0 + s1) / 2;
     out.push({
       cx: ax + ux * m, cz: az + uz * m, ux, uz, hl: (s1 - s0) / 2, hw,
-      y: (ya + yb) / 2, grade: (yb - ya) / (s1 - s0), street: st, s0, s1, len: L,
+      y: (ya + yb) / 2, grade: (yb - ya) / (s1 - s0), c0, c1, street: st, s0, s1, len: L, run0: s0, run1: s1,
     });
   };
 
@@ -793,10 +903,12 @@ function cutPieces(st: Street): Piece[] {
   // surface however the gradient changes.
   const s0 = -ext, s1 = L + ext;
   const n = Math.max(1, Math.round(s1 - s0));
-  const ys: number[] = [], dry: boolean[] = [];
+  const ys: number[] = [], cs: number[] = [], dry: boolean[] = [];
   for (let k = 0; k <= n; k++) {
     const s = s0 + ((s1 - s0) * k) / n;
-    ys.push(yAt(s));
+    const [y, c] = yAt(s);
+    ys.push(y);
+    cs.push(c);
     dry.push(!wet(s));
   }
   const at = (k: number) => s0 + ((s1 - s0) * k) / n;
@@ -809,18 +921,74 @@ function cutPieces(st: Street): Piece[] {
     let j = i + 1;
     for (; j <= n; j++) {
       if (!dry[j]) break;
-      // the straight line from i to j, tested against every sample it passes over
+      // the straight line from i to j, tested against every sample it passes over, on the
+      // centreline and at either kerb
       let off = 0;
-      for (let k = i + 1; k < j; k++)
-        off = Math.max(off, Math.abs(ys[k] - (ys[i] + ((ys[j] - ys[i]) * (k - i)) / (j - i))));
+      for (let k = i + 1; k < j; k++) {
+        const f = (k - i) / (j - i);
+        off = Math.max(off, Math.abs(ys[k] - (ys[i] + (ys[j] - ys[i]) * f)) + Math.abs(cs[k] - (cs[i] + (cs[j] - cs[i]) * f)) * hw);
+      }
       if (off > SAG) break;
     }
     j--; // the last one that fitted
     if (j <= i) j = i + 1;
-    push(at(i), at(j), ys[i], ys[j]);
+    push(at(i), at(j), ys[i], ys[j], cs[i], cs[j]);
     i = j;
   }
+  // each stretch learns the run it belongs to: consecutive ones meet exactly end to end
+  for (let k = 0; k < out.length;) {
+    let e = k;
+    while (e + 1 < out.length && out[e + 1].s0 === out[e].s1) e++;
+    for (let m = k; m <= e; m++) {
+      out[m].run0 = out[k].s0;
+      out[m].run1 = out[e].s1;
+    }
+    k = e + 1;
+  }
   return out;
+}
+
+/** How much the ground climbs per metre across a road running along (ux, uz) at a point. */
+function fallAcross(x: number, z: number, ux: number, uz: number): number {
+  return (terrainAt(x - uz, z + ux) - terrainAt(x + uz, z - ux)) / 2;
+}
+
+/**
+ * How much of the ground's fall across it a main road running along (ux, uz) takes at a point.
+ *
+ * Where another main road crosses it, all of it, as a street does in a junction (see
+ * `cutPieces`): two main roads crossing on a flank, each level across its own width, disagreed
+ * at the crossing by the fall across half of one — a metre and more, on a road thirty-five
+ * metres wide. Away from a crossing a main road stays level across, as it always was, and so
+ * meets the ramps up to its bridges, which are built that way, flush.
+ */
+/** How far from a river a bridge and its ramps can reach. */
+const BRIDGE_REACH = RIVER_HALF + 46 + 24 * 8 + 40;
+
+function crossingSay(x: number, z: number, ux: number, uz: number): number {
+  const reach = ARTERY_HALF * 2 + 4, far = reach + FADE;
+  let best = Infinity;
+  for (const [a, b] of arteriesNear(x, z, far)) {
+    const dx = b[0] - a[0], dz = b[1] - a[1];
+    const l2 = dx * dx + dz * dz;
+    if (l2 < 1e-9) continue;
+    // this road itself, or one running alongside it, is no crossing
+    if (Math.abs(dx * ux + dz * uz) / Math.sqrt(l2) > 0.8) continue;
+    const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / l2));
+    const qx = a[0] + t * dx, qz = a[1] + t * dz;
+    const d = Math.hypot(x - qx, z - qz);
+    if (d >= best) continue;
+    // A crossing near a river may be on a bridge or its ramps, which are level across and have
+    // to meet the road flush at their feet; a road tilted to meet the other one there met the
+    // foot of a ramp a third of a metre high at one kerb and as low at the other.
+    const r = riverNear(qx, qz, BRIDGE_REACH);
+    if (r && r.dist < BRIDGE_REACH) continue;
+    best = d;
+  }
+  if (best <= reach) return 1;
+  if (best >= far) return 0;
+  const t = (best - reach) / FADE;
+  return 1 - t * t * (3 - 2 * t);
 }
 
 /** How far a stretch of road may depart from the ground it is laid over before it is cut. */
@@ -892,77 +1060,505 @@ function piecesNear(x: number, z: number): Piece[] {
   return out;
 }
 
+/** Whether a lane's rectangle covers a point. */
+function laneCovers(l: Lane, x: number, z: number): boolean {
+  const dx = x - l.cx, dz = z - l.cz;
+  return Math.abs(dx * l.ux + dz * l.uz) <= l.hl && Math.abs(dz * l.ux - dx * l.uz) <= l.hw;
+}
+
+/** Whether a stretch of street covers a point: not the fill, and not a bridge. */
+function onStretch(x: number, z: number): boolean {
+  return piecesNear(x, z).some((p) => laneCovers(p, x, z));
+}
+
+// ---------------------------------------------------------------------------
+// The road surface
+//
+// A road used to be its stretches, each laid as a slab of its own: a tilted box at the
+// gradient it was cut to. Two slabs meeting anywhere but end to end — at every junction, and
+// wherever a side street eased into a main road — were two planes at two heights, and the
+// difference between them was a lip across the carriageway. Each fix moved the lip somewhere
+// else, because slabs that do not share corners can only ever agree by luck.
+//
+// So the surface is not the stretches any more. It is one triangulated sheet laid on a grid
+// fixed to the world, and each corner of that grid has one height that every triangle round
+// it uses. Whatever the stretches say, the sheet cannot step: two triangles that meet share
+// the two corners of the edge they meet along. The stretches only say where the road is and
+// roughly how high, and the corners take a blend of them.
+
 /**
- * The top of the highest stretch of street laid over a point, or null where no road covers it.
+ * Spacing of the grid the road is laid on. Fixed to the world and a divisor of REGION, so
+ * every region asks for the same corners along a seam.
+ */
+const RGRID = 4;
+
+/** One bay of fill along a main road; see `fillIn`. */
+interface Fill extends Lane {
+  axis: 0 | 1;
+  line: number;
+  s: number;
+  /** Whether it is laid: false under a bridge's ramps. Worked out the first time it is asked. */
+  laid?: boolean;
+}
+
+const FILL_STEP = 9;
+const FILL_HALF = ARTERY_HALF + 0.4;
+
+/**
+ * The bays of fill along every main road that reach a rectangle: carriageway laid straight
+ * along an arterial wherever no street was built over it.
  *
- * Which is not the same question as the one `pieceAt` asks. A carriageway is a flat slab the
- * whole way across, cut to the ground along its own middle, so where two streets cross on a
- * slope one of them laps over the other a metre higher — and what anything standing there sits
- * on is whichever of them ended up on top, not the one whose road it nominally is.
+ * A street exists here only between two blocks, because that is where the network puts one —
+ * so where the blocks either side run out, and they do along every waterfront and wherever the
+ * plan thins, the main road would simply stop. Laid at the ground along its centreline, or
+ * coming to meet the road's own stretches near them; see `fillGround`. Water is left alone: the bridge owns every station its crossing reaches.
+ *
+ * Every bay is returned, including the ones under a bridge's ramps, which are not laid (see
+ * `laid`): the surface's height may lean on them, but nothing is drawn over them. That keeps
+ * the field clear of the crossings, which themselves ask the field how high the road is.
+ */
+function fillIn(x0: number, z0: number, x1: number, z1: number): Fill[] {
+  const out: Fill[] = [];
+  // Stations, not coordinates: a station is a fraction of the lattice spacing along a spline
+  // whose nodes wander a quarter of that spacing, so the bays over a rectangle can be numbered
+  // well outside its own extent. Searching only sixty metres past it missed them, and the
+  // road had a hole in it the length of a bay.
+  const pad = ARTERY / 4 + 60;
+  for (const axis of [0, 1] as const) {
+    const across = axis === 0 ? (z0 + z1) / 2 : (x0 + x1) / 2;
+    const half = (axis === 0 ? z1 - z0 : x1 - x0) / 2;
+    for (const line of arteryLines(across, half + pad)) {
+      const from = (axis === 0 ? x0 : z0) - pad, to = (axis === 0 ? x1 : z1) + pad;
+      for (let s = Math.floor(from / FILL_STEP) * FILL_STEP; s < to; s += FILL_STEP) {
+        const { p, dir, len, chord } = bayOf(axis, line, s, s + FILL_STEP, FILL_HALF);
+        const r = Math.hypot(len / 2, FILL_HALF);
+        if (p[0] + r < x0 || p[0] - r > x1 || p[1] + r < z0 || p[1] - r > z1) continue;
+        const w = riverNear(p[0], p[1], RIVER_HALF + 46);
+        if (w && w.dist < RIVER_HALF + 46) continue;
+        const a = arteryFrame(axis, line, s).p, c = arteryFrame(axis, line, s + FILL_STEP).p;
+        const ya = fillGround(a[0], a[1]), yb = fillGround(c[0], c[1]);
+        const across = (q: Vec2) => crossingSay(q[0], q[1], dir[0], dir[1]) * fallAcross(q[0], q[1], dir[0], dir[1]);
+        out.push({
+          cx: p[0], cz: p[1], ux: dir[0], uz: dir[1], hl: len / 2, hw: FILL_HALF,
+          y: (ya + yb) / 2, grade: (yb - ya) / chord, c0: across(a), c1: across(c), axis, line, s,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a lane is drawn and driven on: every stretch, and fill except where a bridge's ramps
+ * carry the road over the whole of the bay. A bay a ramp only reaches into is laid, at the foot
+ * where the ramp has come down to it — or the road stopped at the last whole bay and the ramp
+ * ended in a gap of up to nine metres with nothing beyond it.
+ */
+function laid(l: Lane): boolean {
+  const f = l as Fill;
+  if (f.axis === undefined) return true;
+  return (f.laid ??= !crossings(f.axis, f.line, Math.floor(f.s / ARTERY))
+    .some((c) => f.s >= c.a0 && f.s + FILL_STEP <= c.a1));
+}
+
+/**
+ * Whether a road is there to come down to: a stretch of street or a bay of fill, laid or not.
+ * What a bridge's ramp looks for its foot on, which cannot ask whether the fill is laid, since
+ * that is decided by where the ramps are.
+ */
+function onCarriageway(x: number, z: number): boolean {
+  return onStretch(x, z) || lanesNear(x, z).some((l) => (l as Fill).axis !== undefined && laneCovers(l, x, z));
+}
+
+/** How far past a cell the lanes kept for it reach: past the furthest any lane has a say. */
+const LANE_REACH = RGRID * 3.5 + 1;
+const laneCells = rememberBySeed<string, Lane[]>();
+
+/** Every lane, stretch or fill, within LANE_REACH of the cell a point is in. */
+function lanesNear(x: number, z: number): Lane[] {
+  const ci = Math.floor(x / PIECE_CELL), cj = Math.floor(z / PIECE_CELL);
+  const key = `${ci},${cj}`;
+  checkSeed();
+  const hit = laneCells.get(key);
+  if (hit) return hit;
+  const x0 = ci * PIECE_CELL - LANE_REACH, z0 = cj * PIECE_CELL - LANE_REACH;
+  const x1 = (ci + 1) * PIECE_CELL + LANE_REACH, z1 = (cj + 1) * PIECE_CELL + LANE_REACH;
+  const out: Lane[] = [...streetPieces(x0, z0, x1, z1), ...fillIn(x0, z0, x1, z1)];
+  if (laneCells.size > 2048) laneCells.clear();
+  laneCells.set(key, out);
+  return out;
+}
+
+/**
+ * How a corner's height is blended from the lanes round it: a lane has all of its say on its
+ * centreline, a little of it at its edge, and outside it a say that dies away over FADE_OUT and
+ * is gone at BLEND_OUT.
+ *
+ * Inside, so that where two lanes overlap — a junction, a side street running into a main
+ * road — neither wins outright and the surface eases from one to the other across the whole of
+ * the overlap rather than stepping at the edge of either. Two roads crossing on a flank each
+ * carry the ground along their own middles, which disagree by the fall across half a road;
+ * eased over a few metres at the kerb that was a forty per cent ramp in the junction.
+ *
+ * Along a street the say only falls away towards the ends of the run it is laid in, never at
+ * the joint between two of its own stretches, which agree there anyway. Fill has no ends to
+ * speak of: it runs on into more fill, or into a stretch that has come to meet it.
+ *
+ * Outside, because a corner of a triangle that is partly
+ * road can stand a grid diagonal clear of every lane, and still needs a height that continues
+ * the road and not the hillside — the road nearest to it, which is why the say dies away so
+ * fast. Given a steady share of it instead, a street across a narrow block reached over and
+ * tilted the outer lane of this one by a quarter of a metre.
+ */
+const BLEND_OUT = RGRID * 3.5;
+const FADE_OUT = 0.75;
+const EDGE_SAY = 0.05;
+
+function laneWeight(l: Lane, x: number, z: number): number {
+  const dx = x - l.cx, dz = z - l.cz;
+  const across = l.hw - Math.abs(dz * l.ux - dx * l.uz);
+  const p = l as Piece;
+  let along = l.hl - Math.abs(dx * l.ux + dz * l.uz), end = Infinity;
+  if (p.street) {
+    const s = (x - p.street.a[0]) * l.ux + (z - p.street.a[1]) * l.uz;
+    end = Math.min(s - p.run0, p.run1 - s);
+  }
+  const inside = Math.min(along, across, end);
+  if (inside < -BLEND_OUT) return 0;
+  if (inside < 0) return EDGE_SAY * Math.exp(inside / FADE_OUT);
+  const smooth = (t: number) => (t >= 1 ? 1 : t * t * (3 - 2 * t));
+  return EDGE_SAY + (1 - EDGE_SAY) * smooth(across / l.hw) * smooth(end / l.hw);
+}
+
+const rawCache = rememberBySeed<number, number>();
+const nodeCache = rememberBySeed<number, number>();
+
+/** The blend of the lanes at the road grid's corner (i, j), before it is smoothed. */
+function rawY(i: number, j: number): number {
+  const key = (i + 50000) * 100000 + (j + 50000);
+  checkSeed();
+  const hit = rawCache.get(key);
+  if (hit !== undefined) return hit;
+  const x = i * RGRID, z = j * RGRID;
+  let sum = 0, wsum = 0;
+  for (const l of lanesNear(x, z)) {
+    const w = laneWeight(l, x, z);
+    if (w <= 0) continue;
+    sum += w * pieceYOn(l, x, z);
+    wsum += w;
+  }
+  const y = wsum > 0 ? sum / wsum : terrainAt(x, z);
+  if (rawCache.size > 400000) rawCache.clear();
+  rawCache.set(key, y);
+  return y;
+}
+
+/**
+ * Height of the road grid's corner (i, j): one number, whoever asks for it.
+ *
+ * The blend smoothed once over the corners round it. Lanes that disagree — streets meeting on
+ * a flank, each pulled its own way by what it is near — still meet without a step, since the
+ * sheet is one; but left as they are they meet across a single cell of the grid, which on the
+ * worst of them is a ramp of a metre and a half in four. Spread over three cells instead it is
+ * a third of that. The kernel is symmetric, so a road that is a straight gradient — nearly all
+ * of them, nearly everywhere — comes through it exactly as it was.
+ */
+function nodeY(i: number, j: number): number {
+  const key = (i + 50000) * 100000 + (j + 50000);
+  checkSeed();
+  const hit = nodeCache.get(key);
+  if (hit !== undefined) return hit;
+  let y = 0;
+  for (let a = -1; a <= 1; a++)
+    for (let c = -1; c <= 1; c++) y += rawY(i + a, j + c) * (a ? 1 : 2) * (c ? 1 : 2);
+  y /= 16;
+  if (nodeCache.size > 400000) nodeCache.clear();
+  nodeCache.set(key, y);
+  return y;
+}
+
+/**
+ * The road's surface at a point, whether or not a road is laid there: the grid cell's two
+ * triangles, split along the diagonal from its low corner to its high one. Exactly what is
+ * drawn (see `roadSurface`), so a vehicle reading it is on the asphalt it can see.
+ */
+function fieldAt(x: number, z: number): number {
+  const gx = x / RGRID, gz = z / RGRID;
+  const i = Math.floor(gx), j = Math.floor(gz);
+  const fx = gx - i, fz = gz - j;
+  const h00 = nodeY(i, j), h11 = nodeY(i + 1, j + 1);
+  if (fx >= fz) {
+    const h10 = nodeY(i + 1, j);
+    return h00 + fx * (h10 - h00) + fz * (h11 - h10);
+  }
+  const h01 = nodeY(i, j + 1);
+  return h00 + fz * (h01 - h00) + fx * (h11 - h01);
+}
+
+/**
+ * The road surface over a point, or null where no road is laid: a stretch of street or a bay
+ * of fill along a main road. Bridges are not in it; see `rideAt`.
  */
 export function roadTopAt(x: number, z: number): number | null {
-  return topPieceAt(x, z)?.[1] ?? null;
+  for (const l of lanesNear(x, z)) if (laneCovers(l, x, z) && laid(l)) return fieldAt(x, z);
+  return null;
 }
 
-/** The lowest stretch laid over a point. Against `roadTopAt` it says what a junction disagrees by. */
-export function roadLowAt(x: number, z: number): number | null {
-  let low: number | null = null;
-  for (const p of piecesNear(x, z)) {
-    const dx = x - p.cx, dz = z - p.cz;
-    if (Math.abs(dx * p.ux + dz * p.uz) > p.hl || Math.abs(dz * p.ux - dx * p.uz) > p.hw) continue;
-    const y = pieceYOn(p, x, z);
-    if (low === null || y < low) low = y;
-  }
-  return low;
-}
-
-/**
- * The highest stretch of street laid over a point, with its surface there, or null where no
- * road covers it. A stretch is a plane, so which of two is on top is asked at the point, not
- * of the stretches as wholes.
- */
-function topPieceAt(x: number, z: number): [Piece, number] | null {
-  let top: [Piece, number] | null = null;
-  for (const p of piecesNear(x, z)) {
-    const dx = x - p.cx, dz = z - p.cz;
-    if (Math.abs(dx * p.ux + dz * p.uz) > p.hl || Math.abs(dz * p.ux - dx * p.uz) > p.hw) continue;
-    const y = pieceYOn(p, x, z);
-    if (top === null || y > top[1]) top = [p, y];
-  }
-  return top;
-}
-
-/**
- * The line a vehicle rides along a road, which is now simply the road.
- *
- * This used to reconstruct the slope the terraces had been cut from, because the asphalt
- * itself was a flight of half-metre treads and a car reading its height off them dropped a
- * terrace three times a second down a flank. A stretch is a plane now, so the surface and the
- * line a car rides along it are the same thing, and the car sits on the road rather than
- * hovering a quarter-metre over the middle of each tread.
- */
+/** The line a vehicle rides along a road, which is the road itself. */
 export function roadRideAt(x: number, z: number): number | null {
-  return topPieceAt(x, z)?.[1] ?? null;
+  return roadTopAt(x, z);
 }
 
 /**
- * The streets whose middle is in this region, laid as turned slabs.
+ * The road surface over a point where a stretch of street is laid, ignoring fill. What a
+ * bridge asks of the roads it comes down among, since whether fill is laid is itself decided
+ * by where the bridges are.
+ */
+function streetTopAt(x: number, z: number): number | null {
+  return onStretch(x, z) ? fieldAt(x, z) : null;
+}
+
+/** How deep the edge of the road is carried down at a kerb, where it once was a slab's side. */
+const SKIRT = 6;
+
+type Frag = Vec2[];
+
+/** The part of a convex polygon where `f` is at most zero. */
+function clipHalf(poly: Frag, f: (p: Vec2) => number): Frag {
+  const out: Frag = [];
+  for (let k = 0; k < poly.length; k++) {
+    const p = poly[k], q = poly[(k + 1) % poly.length];
+    const fp = f(p), fq = f(q);
+    if (fp <= 0) out.push(p);
+    if ((fp < 0 && fq > 0) || (fp > 0 && fq < 0)) {
+      const t = fp / (fp - fq);
+      out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+    }
+  }
+  return out;
+}
+
+/** The four sides of a lane, as functions that are positive outside each. */
+function laneSides(l: Lane): ((p: Vec2) => number)[] {
+  const u = (p: Vec2) => (p[0] - l.cx) * l.ux + (p[1] - l.cz) * l.uz;
+  const v = (p: Vec2) => (p[1] - l.cz) * l.ux - (p[0] - l.cx) * l.uz;
+  return [(p) => u(p) - l.hl, (p) => -u(p) - l.hl, (p) => v(p) - l.hw, (p) => -v(p) - l.hw];
+}
+
+/** Twice the signed area of a polygon in x and z. */
+function area2(poly: Frag): number {
+  let a = 0;
+  for (let k = 0; k < poly.length; k++) {
+    const p = poly[k], q = poly[(k + 1) % poly.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a;
+}
+
+const SLIVER = 1e-4;
+
+/** A convex polygon less a lane, as the convex pieces left outside it. */
+function subtractLane(poly: Frag, l: Lane): Frag[] {
+  const out: Frag[] = [];
+  let cur = poly;
+  for (const side of laneSides(l)) {
+    const outside = clipHalf(cur, (p) => -side(p));
+    if (outside.length >= 3 && Math.abs(area2(outside)) > SLIVER) out.push(outside);
+    cur = clipHalf(cur, side);
+    if (cur.length < 3) break;
+  }
+  return out;
+}
+
+/**
+ * The parts of a triangle that lie in a road, as convex pieces that do not overlap: each lane
+ * in turn, less every lane before it. A piece is only ever cut out of the triangle, never
+ * moved, so it lies in the triangle's plane and meets its neighbours exactly.
+ */
+function fragments(tri: Frag, lanes: Lane[]): Frag[] {
+  for (const l of lanes) if (tri.every((p) => laneCovers(l, p[0], p[1]))) return [tri];
+  const out: Frag[] = [];
+  const before: Lane[] = [];
+  for (const l of lanes) {
+    let part = tri;
+    for (const side of laneSides(l)) {
+      part = clipHalf(part, side);
+      if (part.length < 3) break;
+    }
+    if (part.length < 3 || Math.abs(area2(part)) <= SLIVER) continue;
+    let parts = [part];
+    for (const m of before) parts = parts.flatMap((q) => subtractLane(q, m));
+    before.push(l);
+    out.push(...parts);
+  }
+  return out;
+}
+
+/**
+ * The road of one region, as one sheet of triangles on the road grid, with its edges carried
+ * down at the kerb and collision boxes standing in for it underneath.
  *
- * Every stretch of a street this region owns is laid, however far the far end of it reaches
- * out of the region. Taking them from the list the ground is cut against instead looked like
- * the same thing and was not: that list is pruned to a tile beyond the region, which on level
- * ground is no loss, because a street there is one long stretch that reaches the region from
- * wherever it lies. On a slope the same street is cut into a stretch every few metres, and the
- * ones past the pruning were dropped — while the ground under them was still skipped as being
- * under a street. What that left was a hole in the road with nothing beneath it at all.
+ * Each grid cell is split into the same two triangles `fieldAt` reads, and each triangle is
+ * cut to the lanes that cover it. The cut only ever takes away: a corner introduced at a kerb
+ * is placed on the triangle's own plane, so the surface stays the one sheet whatever the
+ * outline of the road does across it. Collision goes to `solid`, which draws nothing: the
+ * runner needs the road to stand on, and a car rides the surface itself (see `rideAt`).
+ */
+function roadSurface(b: Builder, solid: Builder, x0: number, z0: number): void {
+  const t: Tint = [1, 1, 1];
+  const G = RGRID, N = Math.round(REGION / G);
+  const i0 = Math.round(x0 / G), j0 = Math.round(z0 / G);
+  const lanes: Lane[] = [
+    ...streetPieces(x0 - 2, z0 - 2, x0 + REGION + 2, z0 + REGION + 2),
+    ...fillIn(x0 - 2, z0 - 2, x0 + REGION + 2, z0 + REGION + 2),
+  ].filter(laid);
+  const buckets: Lane[][] = Array.from({ length: N * N }, () => []);
+  for (const l of lanes) {
+    const ex = Math.abs(l.ux) * l.hl + Math.abs(l.uz) * l.hw, ez = Math.abs(l.uz) * l.hl + Math.abs(l.ux) * l.hw;
+    const a0 = Math.max(0, Math.floor((l.cx - ex - x0) / G)), a1 = Math.min(N - 1, Math.floor((l.cx + ex - x0) / G));
+    const c0 = Math.max(0, Math.floor((l.cz - ez - z0) / G)), c1 = Math.min(N - 1, Math.floor((l.cz + ez - z0) / G));
+    for (let a = a0; a <= a1; a++) for (let c = c0; c <= c1; c++) buckets[a * N + c].push(l);
+  }
+  const covers = (x: number, z: number) => {
+    const a = Math.floor((x - x0) / G), c = Math.floor((z - z0) / G);
+    const near = a >= 0 && a < N && c >= 0 && c < N ? buckets[a * N + c] : lanes;
+    return near.some((l) => laneCovers(l, x, z));
+  };
+  const normal = (i: number, j: number): number[] => {
+    const gx = (nodeY(i + 1, j) - nodeY(i - 1, j)) / (2 * G);
+    const gz = (nodeY(i, j + 1) - nodeY(i, j - 1)) / (2 * G);
+    const l = Math.hypot(gx, 1, gz);
+    return [-gx / l, 1 / l, -gz / l];
+  };
+
+  // Fully covered cells are gathered into runs along z for collision, while they stay level.
+  let run: { a: number; c0: number; c1: number; lo: number; hi: number } | null = null;
+  const endRun = () => {
+    if (!run) return;
+    const x = x0 + run.a * G;
+    solid.box(x, run.lo - SKIRT, z0 + run.c0 * G, x + G, run.hi, z0 + (run.c1 + 1) * G, Mat.Asphalt, t, 0,
+      { hidden: true, detail: false });
+    run = null;
+  };
+
+  for (let a = 0; a < N; a++) {
+    for (let c = 0; c < N; c++) {
+      const near = buckets[a * N + c];
+      if (!near.length) {
+        endRun();
+        continue;
+      }
+      const i = i0 + a, j = j0 + c;
+      const X = i * G, Z = j * G;
+      const h00 = nodeY(i, j), h10 = nodeY(i + 1, j), h01 = nodeY(i, j + 1), h11 = nodeY(i + 1, j + 1);
+      const n00 = normal(i, j), n10 = normal(i + 1, j), n01 = normal(i, j + 1), n11 = normal(i + 1, j + 1);
+      // height and normal on either triangle, the same split as `fieldAt`
+      const at = (k: number, p: Vec2): number[] => {
+        const fx = (p[0] - X) / G, fz = (p[1] - Z) / G;
+        const [ha, hb, na, nb] = k === 0 ? [h10, h11, n10, n11] : [h01, h11, n01, n11];
+        const y = k === 0 ? h00 + fx * (ha - h00) + fz * (hb - ha) : h00 + fz * (ha - h00) + fx * (hb - ha);
+        const [wa, wb] = k === 0 ? [fx - fz, fz] : [fz - fx, fx];
+        const w0 = 1 - wa - wb;
+        return [y, ...[0, 1, 2].map((e) => n00[e] * w0 + na[e] * wa + nb[e] * wb)];
+      };
+      const tris: Frag[] = [[[X, Z], [X + G, Z], [X + G, Z + G]], [[X, Z], [X + G, Z + G], [X, Z + G]]];
+      const cut = tris.map((tri) => fragments(tri, near).map((f) => (area2(f) < 0 ? f.slice().reverse() : f)));
+
+      for (let k = 0; k < 2; k++)
+        for (const f of cut[k]) {
+          const v = f.map((p) => {
+            const [y, nx, ny, nz] = at(k, p);
+            return [p[0], y, p[1], nx, ny, nz, p[0], p[1]];
+          });
+          // wound to face the sky
+          for (let m = 1; m + 1 < v.length; m++) b.tri([v[0], v[m + 1], v[m]], Mat.Asphalt, t);
+          // The kerb: every edge with no road beyond it is carried straight down, cut first
+          // wherever another lane's edge crosses it, so that each piece is either all road
+          // beyond or none.
+          for (let e = 0; e < f.length; e++) {
+            const p = f[e], q = f[(e + 1) % f.length];
+            const dx = q[0] - p[0], dz = q[1] - p[1];
+            const len = Math.hypot(dx, dz);
+            if (len < 1e-4) continue;
+            const ox = dz / len, oz = -dx / len;
+            const ts = [0, 1];
+            for (const l of near)
+              for (const side of laneSides(l)) {
+                const fp = side(p), fq = side(q);
+                if ((fp < 0 && fq > 0) || (fp > 0 && fq < 0)) ts.push(fp / (fp - fq));
+              }
+            ts.sort((m, n) => m - n);
+            for (let s = 0; s + 1 < ts.length; s++) {
+              if (ts[s + 1] - ts[s] < 1e-5) continue;
+              const tm = (ts[s] + ts[s + 1]) / 2;
+              if (covers(p[0] + dx * tm + ox * 0.05, p[1] + dz * tm + oz * 0.05)) continue;
+              const A: Vec2 = [p[0] + dx * ts[s], p[1] + dz * ts[s]];
+              const B: Vec2 = [p[0] + dx * ts[s + 1], p[1] + dz * ts[s + 1]];
+              const ya = at(k, A)[0], yb = at(k, B)[0];
+              const ua = (A[0] * dx + A[1] * dz) / len, ub = (B[0] * dx + B[1] * dz) / len;
+              const corner = (P: Vec2, y: number, u: number) => [P[0], y, P[1], ox, 0, oz, u, y];
+              const at0 = corner(A, ya, ua), bt = corner(B, yb, ub);
+              const bb = corner(B, yb - SKIRT, ub), ab = corner(A, ya - SKIRT, ua);
+              b.tri([at0, bt, bb], Mat.Asphalt, t);
+              b.tri([at0, bb, ab], Mat.Asphalt, t);
+            }
+          }
+        }
+
+      // Collision. A whole cell is one box, or four where it is steep enough that one would
+      // stand proud of the surface; a cell cut at a kerb is sliced a metre at a time so that
+      // none of it reaches out over the pavement beside the road.
+      const whole = cut.every((fs, k) => fs.length === 1 && fs[0] === tris[k]);
+      if (whole) {
+        const lo = Math.min(h00, h10, h01, h11), hi = Math.max(h00, h10, h01, h11);
+        if (hi - lo <= 0.3) {
+          if (run && run.a === a && run.c1 === c - 1 && Math.abs(run.hi - hi) < 0.03) {
+            run.c1 = c;
+            run.lo = Math.min(run.lo, lo);
+            run.hi = Math.max(run.hi, hi);
+          } else {
+            endRun();
+            run = { a, c0: c, c1: c, lo, hi };
+          }
+          continue;
+        }
+        endRun();
+        const H = G / 2;
+        for (const sx of [0, 1])
+          for (const sz of [0, 1]) {
+            const ys = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([u, w]) => fieldAt(X + (sx + u) * H, Z + (sz + w) * H));
+            solid.box(X + sx * H, Math.min(...ys) - SKIRT, Z + sz * H, X + (sx + 1) * H, Math.max(...ys), Z + (sz + 1) * H,
+              Mat.Asphalt, t, 0, { hidden: true, detail: false });
+          }
+        continue;
+      }
+      endRun();
+      for (let k = 0; k < 2; k++)
+        for (const f of cut[k])
+          for (let xa = X; xa < X + G - 1e-6; xa++) {
+            const xb = xa + 1;
+            let part = clipHalf(f, (p) => xa - p[0]);
+            part = clipHalf(part, (p) => p[0] - xb);
+            if (part.length < 3 || Math.abs(area2(part)) <= SLIVER) continue;
+            const zs = part.map((p) => p[1]), ys = part.map((p) => at(k, p)[0]);
+            solid.box(xa, Math.min(...ys) - SKIRT, Math.min(...zs), xb, Math.max(...ys), Math.max(...zs),
+              Mat.Asphalt, t, 0, { hidden: true, detail: false });
+          }
+    }
+    endRun();
+  }
+}
+
+/**
+ * The furniture of the streets whose middle is in this region: paint, lamps, parked cars. The
+ * carriageway under them is `roadSurface`.
+ *
+ * Every stretch of a street this region owns is furnished, however far the far end of it
+ * reaches out of the region, so nothing is dropped at a seam.
  */
 function streets(b: Builder, x0: number, z0: number): void {
-  const t: Tint = [1, 1, 1];
   for (const st of streetsIn(x0, z0, x0 + REGION, z0 + REGION))
     for (const p of piecesOf(st)) {
-      // one tilted slab: flat underneath, and its top the plane of the gradient it carries
-      b.box(p.cx - p.hl, p.y - 6, p.cz - p.hw, p.cx + p.hl, p.y, p.cz + p.hw, Mat.Asphalt, t, 0,
-          { seed: 0, detail: false, turn: Math.atan2(p.uz, p.ux), rise: p.grade * 2 * p.hl });
       parkAlong(b, p);
       markings(b, p);
       lamps(b, p);
@@ -975,15 +1571,22 @@ function clearOf(p: Piece): [number, number] {
   return [Math.max(p.s0, clear), Math.min(p.s1, p.len - clear)];
 }
 
-/** A thin painted stripe along the street, from station s0 to s1, `off` to one side. */
+/**
+ * A thin painted stripe along the street, from station s0 to s1, `off` to one side. Paint lies
+ * on the road, so it is laid a grid's width at a time with each length's ends on the surface.
+ */
 function stripe(b: Builder, p: Piece, s0: number, s1: number, off: number, w: number): void {
   if (s1 - s0 < 0.2) return;
-  const [ax, az] = p.street.a, m = (s0 + s1) / 2;
-  const x = ax + p.ux * m - p.uz * off, z = az + p.uz * m + p.ux * off;
-  // paint lies on the road, so it takes the road's gradient with it
-  const y = pieceYAt(p, m);
-  b.box(x - (s1 - s0) / 2, y, z - w / 2, x + (s1 - s0) / 2, y + 0.02, z + w / 2, Mat.Paint, PAINT_LINE, 0,
-    { collide: false, detail: true, turn: Math.atan2(p.uz, p.ux), rise: p.grade * (s1 - s0) });
+  const [ax, az] = p.street.a;
+  const pos = (s: number): Vec2 => [ax + p.ux * s - p.uz * off, az + p.uz * s + p.ux * off];
+  const n = Math.ceil((s1 - s0) / RGRID);
+  for (let k = 0; k < n; k++) {
+    const sa = s0 + ((s1 - s0) * k) / n, sb = s0 + ((s1 - s0) * (k + 1)) / n;
+    const [x, z] = pos((sa + sb) / 2), A = pos(sa), B = pos(sb);
+    const ya = fieldAt(A[0], A[1]), yb = fieldAt(B[0], B[1]), y = (ya + yb) / 2;
+    b.box(x - (sb - sa) / 2, y + 0.01, z - w / 2, x + (sb - sa) / 2, y + 0.03, z + w / 2, Mat.Paint, PAINT_LINE, 0,
+      { collide: false, detail: true, turn: Math.atan2(p.uz, p.ux), rise: yb - ya });
+  }
 }
 
 const PAINT_LINE: Tint = [0.78, 0.77, 0.7];
@@ -1060,11 +1663,8 @@ function parkAlong(b: Builder, p: Piece): void {
       const x = ax + p.ux * s - p.uz * off, z = az + p.uz * s + p.ux * off;
       // facing the way the traffic on that side would go
       const yaw = side > 0 ? Math.atan2(p.ux, p.uz) : Math.atan2(-p.ux, -p.uz);
-      // on whatever is laid over the spot rather than on this stretch's own level: near a
-      // junction on a slope the crossing street's slab lies over this one and a car left at
-      // its own kerb height is buried to the windows in the other road
-      const own = pieceYAt(p, s);
-      const y = Math.max(own, roadTopAt(x, z) ?? own);
+      // on the road surface itself, which is not this stretch's own gradient near a junction
+      const y = roadTopAt(x, z) ?? pieceYAt(p, s);
       b.cars.push({ x, y, z, yaw, van: h % 7 === 0, color: PAINT_COLORS[(h >>> 4) % PAINT_COLORS.length] });
     }
 }
@@ -1129,6 +1729,9 @@ function rideY(x: number, z: number): number {
   // rides over it are the same thing again.
   return terrainAt(x, z);
 }
+
+/** How far under the road surface the ground is held, wherever a road is laid over it. */
+const ROAD_BED = 0.1;
 
 /**
  * How far an embankment reaches out from a road it has to meet, and the slope it comes down
@@ -1197,15 +1800,20 @@ function terrain(
   const CW = W + 1; // corners
   const node = (i: number, j: number) => i * CW + j;
   const C = new Float64Array(CW * CW);
+  // How high the ground may stand at each corner for the road surface over it, if any: a
+  // little under it, since a tile is one plane fitted through four corners and the road is
+  // two triangles, and the two only agree at the corners.
+  const under = new Float64Array(CW * CW).fill(Infinity);
 
   for (let i = 0; i <= W; i++) {
     for (let j = 0; j <= W; j++) {
       const x = x0 + (i - P) * TILE, z = z0 + (j - P) * TILE;
       let h = terrainAt(x, z), seed = -Infinity;
-      const over = pieceTopAt(lanes, x, z);
+      const over = roadTopAt(x, z);
+      if (over !== null) under[node(i, j)] = over - ROAD_BED;
       const on = covered(x, z);
       // under the carriageway over it, and coming down to meet one it stands beside
-      h = Math.min(h, roadCut(lanes, x, z));
+      h = Math.min(h, roadCut(lanes, x, z), under[node(i, j)]);
       if (on) h = Math.min(h, on.base - 0.05);
       // Inside the channel the ground is riverbed, and the bed is under the water, not level
       // with it: left at the height the land happens to be, it stands up through the surface
@@ -1237,7 +1845,7 @@ function terrain(
         if (j > 0) want = Math.max(want, C[node(i, j - 1)] - rise);
         if (j < W) want = Math.max(want, C[node(i, j + 1)] - rise);
         // never above what covers this corner — the cap came first and still holds
-        C[o] = Math.min(want, capOf(x0 + (i - P) * TILE, z0 + (j - P) * TILE, lanes, covered));
+        C[o] = Math.min(want, capOf(x0 + (i - P) * TILE, z0 + (j - P) * TILE, lanes, covered), under[o]);
       }
     }
   }
@@ -1355,18 +1963,6 @@ function capOf(
   return cap;
 }
 
-/** The highest stretch of street laid over a point, from a list already gathered. */
-function pieceTopAt(pieces: Piece[], x: number, z: number): number | null {
-  let y: number | null = null;
-  for (const p of pieces) {
-    const dx = x - p.cx, dz = z - p.cz;
-    if (Math.abs(dx * p.ux + dz * p.uz) > p.hl || Math.abs(dz * p.ux - dx * p.uz) > p.hw) continue;
-    const at = pieceYOn(p, x, z);
-    if (y === null || at > y) y = at;
-  }
-  return y;
-}
-
 /** Whether a point is in a block, how far in, and the level of that block's pavement. */
 interface Cover {
   deep: boolean;
@@ -1400,15 +1996,18 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   const reach = (APRON_TILES + CUT_TILES) * TILE;
   const lanes = streetPieces(x0 - reach, z0 - reach, x0 + REGION + reach, z0 + REGION + reach);
   terrain(ground, x0, z0, covered, lanes);
+  // collision for the road, kept apart from the ground so its hidden boxes never cull a face
+  const solid = new Builder(new Rng(hashInt(rx, rz, 6)));
+  roadSurface(ground, solid, x0, z0);
   streets(ground, x0, z0);
-  arterialFill(ground, x0, z0);
-  bridges(ground, x0, z0);
+  bridges(ground, solid, x0, z0);
   rails(ground, x0, z0);
   const stations = subway(ground, x0, z0);
   waterfront(ground, x0, z0);
   river(ground, x0, z0);
   vessels(ground, x0, z0);
   parts.push({ ci: rx * 100000, cj: rz * 100000, b: ground });
+  parts.push({ ci: rx * 100000 + 1, cj: rz * 100000, b: solid });
   for (const site of blocksIn(x0, z0, x0 + REGION, z0 + REGION)) {
     // each block belongs to the region its seed is in, so no block is built twice
     if (site.p[0] < x0 || site.p[0] >= x0 + REGION || site.p[1] < z0 || site.p[1] >= z0 + REGION) continue;
@@ -1675,6 +2274,11 @@ export function crossings(axis: 0 | 1, line: number, k: number): Crossing[] {
     // is a junction and fine.
     let e0 = a, e1 = b, a0 = foot(e0, -1, deck), a1 = foot(e1, 1, deck);
     for (let pass = 0; pass < 4; pass++) {
+      // the level deck clears any other bridge under it, unless the two are level with each other
+      for (let s = e0; s <= e1; s += 3) {
+        const other = bridgeUnder(s);
+        if (other !== null && Math.abs(other - deck) > 0.02 && deck - other < UNDER) deck = other + UNDER;
+      }
       const c: Crossing = { s0: a, s1: b, a0, a1, e0, e1, deck, water: 0 };
       const lo = blocked(c, e0, a0, -1), hi = blocked(c, e1, a1, 1);
       if (!lo && !hi) break;
@@ -1702,6 +2306,14 @@ export function crossings(axis: 0 | 1, line: number, k: number): Crossing[] {
   const blocked = (c: Crossing, from: number, to: number, dir: -1 | 1) => {
     let at: number | null = null, high = -Infinity;
     for (let s = from; dir < 0 ? s > to : s < to; s += dir * 3) {
+      // Another main road's bridge: at exactly this one's level the two cross on the flat, so
+      // the level deck carries on past it; at any other height this one goes over it. A ramp
+      // running across a level deck met it a step at a time, a third of a metre at the worst.
+      const other = bridgeUnder(s);
+      if (other !== null && Math.abs(spanY(axis, line, c, s) - other) > 0.02) {
+        at = s;
+        high = Math.max(high, Math.abs(other - c.deck) <= 0.02 ? c.deck - UNDER : other);
+      }
       const top = crossTop(axis, line, s);
       if (top === null) continue;
       const y = spanY(axis, line, c, s);
@@ -1713,10 +2325,41 @@ export function crossings(axis: 0 | 1, line: number, k: number): Crossing[] {
     }
     return at === null ? null : { s: at, top: high };
   };
-  /** Height of whatever a vehicle runs on at a station: the carriageway, else the ground. */
+  /**
+   * The highest bridge deck of another main road under this one at a station, seen across the
+   * whole width, or null where there is none.
+   *
+   * Only the roads running the other way are asked, and only by the roads running east and
+   * west. Two bridges deciding their heights by each other would each have to be worked out
+   * first; this way the north–south bridges are built as they would be anyway and the
+   * east–west ones fit themselves round them, so every region gets the same answer whichever
+   * it asks about first.
+   */
+  const bridgeUnder = (s: number): number | null => {
+    if (axis !== 0) return null;
+    const { p, dir } = arteryFrame(axis, line, s);
+    let top: number | null = null;
+    for (const off of [-ARTERY_HALF, 0, ARTERY_HALF]) {
+      const x = p[0] - dir[1] * off, z = p[1] + dir[0] * off;
+      for (const st of arteryStations(x, z, ARTERY_HALF + 2)) {
+        if (st.axis !== 1) continue;
+        for (const c of crossings(1, st.line, Math.floor(st.s / ARTERY)))
+          if (st.s > c.a0 && st.s < c.a1) {
+            const y = spanY(1, st.line, c, st.s);
+            top = top === null ? y : Math.max(top, y);
+          }
+      }
+    }
+    return top;
+  };
+  /**
+   * Height of whatever a vehicle runs on at a station: the road surface where there is a road
+   * to come down to — the very height a ramp's foot is laid at (see `spanY`), so the gradient
+   * judged here is the one built — else the ground.
+   */
   const surface = (s: number) => {
     const { p } = arteryFrame(axis, line, s);
-    return roadRideAt(p[0], p[1]) ?? terrainAt(p[0], p[1]);
+    return onCarriageway(p[0], p[1]) ? fieldAt(p[0], p[1]) : terrainAt(p[0], p[1]);
   };
   /**
    * Where an approach ramp starts: far enough out that the climb to the deck is a gradient a
@@ -1732,7 +2375,7 @@ export function crossings(axis: 0 | 1, line: number, k: number): Crossing[] {
     for (let n = 1; n * 6 <= RAMP * 8; n++) {
       const s = from + dir * n * 6;
       const { p } = arteryFrame(axis, line, s);
-      if (roadRideAt(p[0], p[1]) === null) continue;
+      if (!onCarriageway(p[0], p[1])) continue;
       last = s;
       const run = n * 6;
       if (run >= RAMP && Math.abs(deck - surface(s)) <= RAMP_GRADE * run) return s;
@@ -1775,7 +2418,7 @@ export function roadY(axis: 0 | 1, line: number, s: number, x: number, z: number
   // carriageway altogether there is nothing to ride but the ground.
   for (const c of crossings(axis, line, Math.floor(s / ARTERY))) {
     if (s <= c.a0 || s >= c.a1) continue;
-    return spanY(axis, line, c, s);
+    return deckY(axis, line, c, s, x, z);
   }
   return roadRideAt(x, z) ?? terrainAt(x, z);
 }
@@ -1808,14 +2451,11 @@ function arteryStations(x: number, z: number, reach: number): { axis: 0 | 1; lin
 /**
  * The surface a vehicle rides at a point, or null where the city lays no carriageway over it.
  *
- * Everything the city calls a road, and `roadRideAt` alone is only the middle of the three:
+ * Everything the city calls a road: the road surface, which is every stretch of street and the
+ * fill laid along a main road wherever the blocks either side ran out (see `roadTopAt`), and
+ * the bridges and the ramps that climb to them, whose deck is the road wherever it runs.
  *
- * - a bridge and the ramps that climb to it, whose deck is the road wherever it runs;
- * - the stretches of street, which is what `roadRideAt` answers;
- * - and the fill laid straight along a main road wherever the blocks either side ran out, which
- *   is a fifth of the arterial length on some seeds and has no stretches at all.
- *
- * Missing the last two is why a car on a main road with no blocks along it was told it was off
+ * Missing either is why a car on a main road with no blocks along it was told it was off
  * the road entirely: it went back to reading its height off collision, and met the first bay of
  * its own bridge ramp — two metres of cast concrete, thirty-eight across — as a block standing in
  * the carriageway. The traffic drove through it, because the traffic reads `roadY` and knew all
@@ -1830,20 +2470,9 @@ export function rideAt(x: number, z: number, below: number): number | null {
     if (y !== null && y <= below && (best === null || y > best)) best = y;
   };
   take(roadRideAt(x, z));
-  const laid = roadTopAt(x, z) !== null;
-  for (const { axis, line, s, p } of arteryStations(x, z, ARTERY_HALF + ARTERY_MARGIN)) {
-    let onSpan = false;
-    for (const c of crossings(axis, line, Math.floor(s / ARTERY))) {
-      if (s <= c.a0 || s >= c.a1) continue;
-      take(spanY(axis, line, c, s));
-      onSpan = true;
-    }
-    // The fill, at the ground's own height along the centreline — which is the number
-    // `arterialFill` lays its bays from, so the surface and the line a car rides it on are the
-    // same. Only where no stretch was laid over the spot and no bridge is carrying it, which is
-    // exactly when the fill is what got built.
-    if (!onSpan && !laid) take(terrainAt(p[0], p[1]));
-  }
+  for (const { axis, line, s } of arteryStations(x, z, ARTERY_HALF + ARTERY_MARGIN))
+    for (const c of crossings(axis, line, Math.floor(s / ARTERY)))
+      if (s > c.a0 && s < c.a1) take(deckY(axis, line, c, s, x, z));
   return best;
 }
 
@@ -1858,13 +2487,31 @@ function spanY(axis: 0 | 1, line: number, c: Crossing, s: number): number {
   if (s >= c.e0 && s <= c.e1) return c.deck;
   const foot = s < c.e0 ? c.a0 : c.a1;
   const p = arteryFrame(axis, line, foot).p;
-  const bank = roadRideAt(p[0], p[1]) ?? terrainAt(p[0], p[1]);
+  // the road surface, laid or not, so the ramp starts at exactly the height it is drawn at
+  const bank = fieldAt(p[0], p[1]);
   const t = s < c.e0 ? (s - c.a0) / (c.e0 - c.a0) : (c.a1 - s) / (c.a1 - c.e1);
   const e = Math.max(0, Math.min(1, t));
-  return bank * (1 - e) + c.deck * e;
+  // Eased in at the foot and out at the deck. A straight climb meets both at a kink, and a car
+  // going over the top of one at speed left the road for a third of a second and landed on it.
+  return bank + (c.deck - bank) * e * e * (3 - 2 * e);
 }
 
-function bridges(b: Builder, x0: number, z0: number): void {
+/**
+ * The deck's surface at a point on it, at station `s`: `spanY` across the whole width, except
+ * on a ramp, which comes down onto the road and so carries on down whatever the road does across
+ * its width. At the foot it *is* the road surface, so the two meet without a step; up at the
+ * level deck it is level across.
+ */
+function deckY(axis: 0 | 1, line: number, c: Crossing, s: number, x: number, z: number): number {
+  const y = spanY(axis, line, c, s);
+  if (s >= c.e0 && s <= c.e1) return y;
+  const foot = arteryFrame(axis, line, s < c.e0 ? c.a0 : c.a1).p;
+  const t = s < c.e0 ? (s - c.a0) / (c.e0 - c.a0) : (c.a1 - s) / (c.a1 - c.e1);
+  const e = Math.max(0, Math.min(1, t));
+  return y + (1 - e) * (fieldAt(x, z) - fieldAt(foot[0], foot[1]));
+}
+
+function bridges(b: Builder, solid: Builder, x0: number, z0: number): void {
   const t: Tint = [0.9, 0.9, 0.91];
   const pad = 260;
   for (const axis of [0, 1] as const) {
@@ -1882,7 +2529,7 @@ function bridges(b: Builder, x0: number, z0: number): void {
         for (const c of crossings(axis, line, k)) {
           if (seen.has(c.s0)) continue;
           seen.add(c.s0);
-          span(b, axis, line, c, t, x0, z0);
+          span(b, solid, axis, line, c, t, x0, z0);
         }
     }
   }
@@ -1967,9 +2614,34 @@ function bayOf(axis: 0 | 1, line: number, s0: number, s1: number, halfW: number)
  * bank at grade and can cross anything on the way, that ever answer true.
  */
 function crossedHere(axis: 0 | 1, line: number, x: number, z: number): boolean {
-  if (roadTopAt(x, z) !== null) return true;
+  if (onStretch(x, z)) return true;
   for (const st of arteryStations(x, z, ARTERY_HALF + ARTERY_MARGIN))
     if (st.axis !== axis || st.line !== line) return true;
+  return false;
+}
+
+/**
+ * The surface of whatever other road crosses this one at a point: a street, another main
+ * road's bridge, or failing both the ground.
+ *
+ * The bridge matters. Two main roads can cross over the water, and where both their decks are
+ * at the same height each one's parapets ran straight across the other's carriageway — the
+ * other road being no street, the deck was compared with the riverbed twenty metres down.
+ */
+function crossedTop(axis: 0 | 1, line: number, x: number, z: number): number {
+  let top = streetTopAt(x, z) ?? -Infinity;
+  for (const st of arteryStations(x, z, ARTERY_HALF + ARTERY_MARGIN)) {
+    if (st.axis === axis && st.line === line) continue;
+    for (const c of crossings(st.axis, st.line, Math.floor(st.s / ARTERY)))
+      if (st.s > c.a0 && st.s < c.a1) top = Math.max(top, spanY(st.axis, st.line, c, st.s));
+  }
+  return top === -Infinity ? terrainAt(x, z) : top;
+}
+
+/** Whether a pier standing at a point would be in another road's carriageway. */
+function inOtherRoad(axis: 0 | 1, line: number, p: Vec2): boolean {
+  for (const dx of [-3.4, 3.4]) for (const dz of [-3.4, 3.4])
+    if (crossedHere(axis, line, p[0] + dx, p[1] + dz)) return true;
   return false;
 }
 
@@ -1984,20 +2656,90 @@ function crossTop(axis: 0 | 1, line: number, s: number): number | null {
     const off = side * (ARTERY_HALF + 1.6);
     const x = p[0] - dir[1] * off, z = p[1] + dir[0] * off;
     if (!crossedHere(axis, line, x, z)) return null;
-    top = Math.max(top, roadTopAt(x, z) ?? terrainAt(x, z));
+    top = Math.max(top, streetTopAt(x, z) ?? terrainAt(x, z));
   }
   return top;
 }
 
 /** One bridge: deck, parapets and piers, from station `s0` to `s1` along the road. */
+/** Stations between the cross-sections of a deck sheet. */
+const DECK_STEP = 3;
+
+/**
+ * A bridge's deck as one sheet of triangles, from the foot of one ramp to the foot of the
+ * other: cross-sections every DECK_STEP metres along the road, each the deck surface at five
+ * points across it (see `deckY`), joined into triangles that share every corner with the ones
+ * either side. Carried down at both edges into the fascia, and closed underneath by the soffit.
+ *
+ * The deck used to be a row of boxes a bay long, each a plane of its own, set a few millimetres
+ * apart so their overlaps would not flicker: the road over a river was a row of slabs, with a
+ * step at every joint and one more where the last of them met the road at the foot.
+ *
+ * Each region lays the lengths whose middle is in it. The cross-sections fall on the same
+ * stations whichever region asks, so the lengths either side of a seam share their corners.
+ */
+function deckSheet(
+  b: Builder, axis: 0 | 1, line: number, c: Crossing, half: number, t: Tint, x0: number, z0: number,
+): void {
+  const DEPTH = 2.2;
+  const across = [-half, -half / 2, 0, half / 2, half];
+  const n = Math.max(1, Math.ceil((c.a1 - c.a0) / DECK_STEP));
+  const section = (k: number) => {
+    const s = c.a0 + ((c.a1 - c.a0) * k) / n;
+    const { p, dir } = arteryFrame(axis, line, s);
+    return across.map((o) => {
+      const x = p[0] - dir[1] * o, z = p[1] + dir[0] * o;
+      return [x, deckY(axis, line, c, s, x, z), z];
+    });
+  };
+  // one triangle, wound to face along `want`, with its own normal
+  const face = (A: number[], B: number[], C: number[], want: number[], mat: Mat, style: number) => {
+    const ux = B[0] - A[0], uy = B[1] - A[1], uz = B[2] - A[2];
+    const vx = C[0] - A[0], vy = C[1] - A[1], vz = C[2] - A[2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz);
+    if (l < 1e-9) return;
+    nx /= l; ny /= l; nz /= l;
+    let Q = B, R = C;
+    if (nx * want[0] + ny * want[1] + nz * want[2] < 0) {
+      Q = C; R = B;
+      nx = -nx; ny = -ny; nz = -nz;
+    }
+    const corner = (V: number[]) => [V[0], V[1], V[2], nx, ny, nz, V[0] + V[2], V[1]];
+    b.tri([corner(A), corner(Q), corner(R)], mat, t, style);
+  };
+  const quad = (A: number[], B: number[], C: number[], D: number[], want: number[], mat: Mat, style = 0) => {
+    face(A, B, C, want, mat, style);
+    face(A, C, D, want, mat, style);
+  };
+  const down = (V: number[]) => [V[0], V[1] - DEPTH, V[2]];
+  const last = across.length - 1, mid = last / 2;
+  let prev = section(0);
+  for (let k = 1; k <= n; k++) {
+    const next = section(k);
+    const mx = (prev[mid][0] + next[mid][0]) / 2, mz = (prev[mid][2] + next[mid][2]) / 2;
+    if (mx >= x0 && mx < x0 + REGION && mz >= z0 && mz < z0 + REGION) {
+      for (let i = 0; i < last; i++) quad(prev[i], prev[i + 1], next[i + 1], next[i], [0, 1, 0], Mat.Asphalt);
+      for (const i of [0, last]) {
+        // outward: from the middle of the section towards this edge
+        const out = [prev[i][0] - prev[mid][0], 0, prev[i][2] - prev[mid][2]];
+        quad(prev[i], next[i], down(next[i]), down(prev[i]), out, Mat.Board, Finish.Cast);
+      }
+      quad(down(prev[0]), down(prev[last]), down(next[last]), down(next[0]), [0, -1, 0], Mat.Board, Finish.Cast);
+    }
+    prev = next;
+  }
+}
+
 function span(
-  b: Builder, axis: 0 | 1, line: number, c: Crossing, t: Tint, x0: number, z0: number,
+  b: Builder, solid: Builder, axis: 0 | 1, line: number, c: Crossing, t: Tint, x0: number, z0: number,
 ): void {
   const { s0, s1, deck } = c;
   const HALF = ARTERY_HALF + 2;
   const STEP = 9;
+  deckSheet(b, axis, line, c, HALF, t, x0, z0);
   for (let s = c.a0; s < c.a1; s += STEP) {
-    const { p, dir, turn, len, drop, riseOf } = bayOf(axis, line, s, s + STEP, HALF);
+    const { p, dir, turn, len, riseOf } = bayOf(axis, line, s, s + STEP, HALF);
     // Only the part of the bridge this region owns, on a half-open square with no slack in
     // it. The test used to allow eight metres either side, which is not a boundary but an
     // overlap: every bay within eight metres of a seam was built by the region on each side
@@ -2009,13 +2751,29 @@ function span(
     // deck's height the whole way, as it was, the ramps stood at full height over ground the
     // road was still down on — so a car crossing them drove up through the underside of the
     // bridge and out of its surface, which is the deck being in two places at once.
-    const ya = spanY(axis, line, c, s), yb = spanY(axis, line, c, s + STEP);
-    const mid = (ya + yb) / 2, rise = riseOf(yb - ya);
-    const put = (halfW: number, y0: number, y1: number, off: number, mat: Mat, style = 0, opts = {}) => {
-      const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
-      b.box(cx - len / 2, y0 - drop, cz - halfW, cx + len / 2, y1 - drop, cz + halfW, mat, t, style, { turn, rise, ...opts });
+    // Heights at either end of the bay, `off` to the side: the deck surface itself (see
+    // `deckY`), which on a ramp is not level across.
+    const ends = (off: number) => {
+      const at = (q: number) => {
+        const f = arteryFrame(axis, line, q);
+        return deckY(axis, line, c, q, f.p[0] - f.dir[1] * off, f.p[1] + f.dir[0] * off);
+      };
+      return [at(s), at(s + STEP)];
     };
-    put(HALF, mid - 2.2, mid, 0, Mat.Board, Finish.Cast, { detail: false });
+    const put = (bb: Builder, halfW: number, y0: number, y1: number, off: number, rise: number, mat: Mat, style = 0, opts = {}) => {
+      const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
+      bb.box(cx - len / 2, y0, cz - halfW, cx + len / 2, y1, cz + halfW, mat, t, style, { turn, rise, ...opts });
+    };
+    // The deck is drawn as one sheet (see `deckSheet`); what stands for it in collision is a
+    // box a bay long, never drawn, up to the highest the sheet reaches across it.
+    const [ya, yb] = ends(0);
+    let top = 0;
+    for (const o of [-HALF, HALF]) {
+      const [ea, eb] = ends(o);
+      top = Math.max(top, ea - ya, eb - yb);
+    }
+    const mid = (ya + yb) / 2;
+    put(solid, HALF, mid - 2.2, mid + top, 0, riseOf(yb - ya), Mat.Board, Finish.Cast, { detail: false, hidden: true });
     // Parapets, except where another road crosses the deck. A bridge's approach ramp comes down
     // to the bank at grade, and on the way it can run straight across a second main road — and
     // then its parapet is a metre of panel standing right across that road's carriageway. The
@@ -2027,8 +2785,9 @@ function span(
     for (const side of [1, -1] as const) {
       const off = side * (HALF - 0.4);
       const cx = p[0] - dir[1] * off, cz = p[1] + dir[0] * off;
-      if (crossedHere(axis, line, cx, cz) && mid - (roadTopAt(cx, cz) ?? terrainAt(cx, cz)) < UNDER - 1) continue;
-      put(0.4, mid, mid + 1.15, off, Mat.Panel);
+      const [ea, eb] = ends(off);
+      if (crossedHere(axis, line, cx, cz) && (ea + eb) / 2 - crossedTop(axis, line, cx, cz) < UNDER - 1) continue;
+      put(b, 0.4, (ea + eb) / 2, (ea + eb) / 2 + 1.15, off, riseOf(eb - ea), Mat.Panel);
     }
   }
   const pier = (s: number, top: number) => {
@@ -2043,7 +2802,8 @@ function span(
     const s = s0 + ((s1 - s0) * k) / piers;
     const { p } = arteryFrame(axis, line, s);
     const r = riverNear(p[0], p[1], RIVER_HALF + 10);
-    if (r && r.dist < RIVER_HALF - 5) pier(s, deck - 2.2);
+    // never in another road: where two main roads cross over the water, the other one's deck
+    if (r && r.dist < RIVER_HALF - 5 && !inOtherRoad(axis, line, p)) pier(s, deck - 2.2);
   }
   // and on land, under the deck where it is carried high over the bank — but never in a road,
   // which is the whole reason it is up there
@@ -3354,48 +4114,6 @@ export function piecesAtDebug(x: number, z: number): { y: number; half: number; 
     out.push({ y: p.y, half: p.street.half, a: p.street.a, b: p.street.b, hl: p.hl, hw: p.hw, s0: p.s0, s1: p.s1, len: p.len });
   }
   return out;
-}
-
-/**
- * Carriageway laid straight along an arterial wherever no street was built over it.
- *
- * A street exists here only between two blocks, because that is where the network puts one —
- * so where the blocks either side run out, and they do along every waterfront and wherever
- * the plan thins, the main road simply stops. A fifth of the arterial length on some seeds
- * has no road surface at all. Nothing complained, because the traffic falls back to the
- * ground when it finds no carriageway: what that looks like is cars driving off the asphalt
- * onto the bare hillside and jumping the joints between its tiles.
- *
- * Laid at the ground's own height, which is the same number the traffic falls back to, so
- * the surface a car rides and the surface under it are the same to the centimetre. Water is
- * left alone — the bridge builder owns every station a crossing reaches, ramps included.
- */
-function arterialFill(b: Builder, x0: number, z0: number): void {
-  const t: Tint = [1, 1, 1];
-  const HALF = ARTERY_HALF + 0.4;
-  const STEP = 9;
-  const pad = 40;
-  for (const axis of [0, 1] as const) {
-    const across = axis === 0 ? z0 + REGION / 2 : x0 + REGION / 2;
-    for (const line of arteryLines(across, REGION / 2 + pad)) {
-      const from = (axis === 0 ? x0 : z0) - pad, to = (axis === 0 ? x0 + REGION : z0 + REGION) + pad;
-      for (let s = Math.floor(from / STEP) * STEP; s < to; s += STEP) {
-        const { p, dir, turn, len, drop, riseOf } = bayOf(axis, line, s, s + STEP, HALF);
-        if (p[0] < x0 || p[0] >= x0 + REGION || p[1] < z0 || p[1] >= z0 + REGION) continue;
-        // a bay the blocks already built over, or one a bridge is carrying, is not ours
-        if (roadTopAt(p[0], p[1]) !== null) continue;
-        if (crossings(axis, line, Math.floor(s / ARTERY)).some((c) => s + STEP > c.a0 && s < c.a1)) continue;
-        const r = riverNear(p[0], p[1], RIVER_HALF + 46);
-        if (r && r.dist < RIVER_HALF + 46) continue;
-        const a = arteryFrame(axis, line, s).p, c = arteryFrame(axis, line, s + STEP).p;
-        const ya = terrainAt(a[0], a[1]), yb = terrainAt(c[0], c[1]);
-        const y = (ya + yb) / 2;
-        b.box(p[0] - len / 2, y - 6 - drop, p[1] - HALF, p[0] + len / 2, y - drop, p[1] + HALF, Mat.Asphalt, t, 0,
-          { seed: 0, detail: false, turn, rise: riseOf(yb - ya) });
-        void dir;
-      }
-    }
-  }
 }
 
 /** Test hook: every stretch of street laid over a point, and where each one came from. */

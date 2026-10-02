@@ -670,7 +670,12 @@ for (const seed of [1971, 42, 777777]) {
   const wreck = [...parking.all()].find((p) => p.wreck);
   check("the car lands as a wreck that can't be entered", !!wreck && Math.abs(wreck.y) < 1e-6 && parking.nearest(wreck.x, 0, wreck.z + 1, 3) === null,
     `wreck=${wreck ? [wreck.x, wreck.y, wreck.z].map((v) => v.toFixed(1)) : "none"}`);
-  check("the wreck is still solid", parking.boxes(20, 30).length === 6);
+  // a car is boxed as a few slices along its length, so it is solid if any of them is there
+  const wreckBoxes = parking.boxes(20, 30);
+  let solidAt = false;
+  for (let i = 0; i < wreckBoxes.length; i += 6)
+    solidAt ||= wreckBoxes[i] < 20 && wreckBoxes[i + 3] > 20 && wreckBoxes[i + 2] < 30 && wreckBoxes[i + 5] > 30;
+  check("the wreck is still solid", solidAt, `${wreckBoxes.length / 6} boxes`);
 
   // A car in traffic, wherever the road network happens to put one. This used to look in a
   // box just off the origin — the avenue the grid city ran up x = 0 — and to aim at y = 0.7,
@@ -1212,8 +1217,11 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
     let inRoad = 0, solid = 0, tallest = 0, worstSpot = "";
     for (let x = 12; x < REGION; x += 2)
       for (let z = 12; z < REGION; z += 2) {
-        const y = roadRideAt(x, z);
-        if (y === null) continue;
+        if (roadRideAt(x, z) === null) continue;
+        // Measured from what a vehicle rides there, which where a main road climbs onto its own
+        // bridge is the ramp over the road and not the road under it: the deck standing over its
+        // own carriageway is the road, not something in it.
+        const y = rideAt(x, z, 1e6)!;
         // well inside a carriageway of its own, so the kerb and its pavement are not the answer
         let inside = -Infinity;
         for (const q of piecesAtDebug(x, z)) {
@@ -1363,6 +1371,35 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
     }
   }
   setFloor(0);
+  setWorldSeed(1971);
+}
+
+// Off the end of a bridge and onto the road beyond it. On 984216 the lower of two bridges
+// crossing over the water came down to the bank at one in five, ended in a bay's length of
+// nothing, and met the road a metre above where the ramp left off: three bumps in sixty metres,
+// on a road that looks straight and level. The ramp has to land on the road, at a gradient a
+// car can take, with no gap and no step anywhere along the way.
+{
+  const { rideAt } = await import("../src/city/plan");
+  setWorldSeed(984216);
+  let gaps = 0, steep = 0, worst = 0, where = "";
+  for (const [axis, line, s0, s1] of [[1, 0, 480, 1000], [0, 1, -370, 120]] as const)
+    for (const off of [-8, 0, 8]) {
+      let last: number | null = null;
+      for (let s = s0; s <= s1; s += 1) {
+        const f = arteryFrame(axis, line, s);
+        const y = rideAt(f.p[0] - f.dir[1] * off, f.p[1] + f.dir[0] * off, 9);
+        if (y === null) { gaps++; where ||= `${axis}/${line} s=${s}`; last = null; continue; }
+        if (last !== null) {
+          const g = Math.abs(y - last);
+          if (g > worst) worst = g;
+          if (g > 0.15) { steep++; where ||= `${axis}/${line} s=${s}`; }
+        }
+        last = y;
+      }
+    }
+  check("a bridge comes down onto the road beyond it (seed 984216)", gaps === 0 && steep === 0,
+    `${gaps} gaps, ${steep} metres steeper than 15%, steepest ${(worst * 100).toFixed(0)}%${where ? ` first at ${where}` : ""}`);
   setWorldSeed(1971);
 }
 
