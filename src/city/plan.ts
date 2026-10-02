@@ -2916,11 +2916,50 @@ function railDeck(axis: 0 | 1, line: number, k: number): number {
     sum += rideY(p[0], p[1]) * w;
     n += w;
   }
-  const y = sum / n + RAIL_RISE;
+  // Never lower than the clearance over any road under the bays it is smoothed with (see
+  // `railLevel`), so that the smoothing can only lift the deck off it, never bring it back down.
+  let clear = -Infinity;
+  for (let j = k - RAIL_EASE - 2; j <= k + RAIL_EASE + 2; j++) clear = Math.max(clear, railClear(axis, line, j));
+  const y = Math.max(sum / n + RAIL_RISE, clear);
   if (railCache.size > 4096) railCache.clear();
   railCache.set(key, y);
   return y;
 }
+
+const railClearCache = rememberBySeed<string, number>();
+
+/**
+ * The lowest the deck of bay `k` may be: the highest road surface anywhere under it — a street,
+ * a main road, or another road's bridge — plus a lorry's headroom and the depth of a deck.
+ *
+ * The railway takes its height from the ground averaged along its line, and that is all it
+ * used to look at. Down a river valley the average is the riverbed, so the viaduct came across
+ * the valley at the height of the bridges over it and ran straight through the deck of one,
+ * at windscreen height, wall to wall across the carriageway. A train goes over a bridge.
+ */
+function railClear(axis: 0 | 1, line: number, k: number): number {
+  const key = `${axis},${line},${k}`;
+  checkSeed();
+  const hit = railClearCache.get(key);
+  if (hit !== undefined) return hit;
+  let top = -Infinity;
+  for (const u of [0, 0.5, 1]) {
+    const f = arteryFrame(axis, line, (k + u) * RAIL_BAY);
+    for (const off of [-RAIL_REACH, 0, RAIL_REACH]) {
+      const y = rideAt(f.p[0] - f.dir[1] * off, f.p[1] + f.dir[0] * off, 1e6);
+      if (y !== null) top = Math.max(top, y);
+    }
+  }
+  const clear = top + UNDER;
+  if (railClearCache.size > 8192) railClearCache.clear();
+  railClearCache.set(key, clear);
+  return clear;
+}
+
+/** Half the width of the railway's deck, with a margin: how far to either side it looks down. */
+const RAIL_REACH = 6.5;
+/** Bays either side a bay's level is smoothed over; see `railLevel`. */
+const RAIL_EASE = 6;
 
 /** Which bay of the deck a station falls in. */
 function railBayAt(s: number): number {
@@ -2929,7 +2968,7 @@ function railBayAt(s: number): number {
 
 /** The level of bay `k` with the corners taken off, which is what actually gets built. */
 function railLevel(axis: 0 | 1, line: number, k: number): number {
-  const SPAN = 6;
+  const SPAN = RAIL_EASE;
   let sum = 0, n = 0;
   for (let d = -SPAN; d <= SPAN; d++) {
     const w = 1 - Math.abs(d) / (SPAN + 1);

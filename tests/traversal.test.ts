@@ -1403,4 +1403,32 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
   setWorldSeed(1971);
 }
 
+// A railway goes over a road, never through it. The viaduct takes its height from the ground
+// averaged along its line, and down a river valley on 20839 that put it across a bridge less
+// than a metre over the deck — a wall across the carriageway at windscreen height. Under every
+// railway there has to be a lorry's headroom over whatever road is there.
+{
+  const { hasRail, railY, rideAt } = await import("../src/city/plan");
+  for (const seed of [20839, 1971]) {
+    setWorldSeed(seed);
+    let tightest = Infinity, where = "";
+    for (const axis of [0, 1] as const)
+      for (let line = -2; line <= 2; line++) {
+        if (!hasRail(axis, line)) continue;
+        for (let s = -2000; s <= 2000; s += 2) {
+          const f = arteryFrame(axis, line, s);
+          for (const off of [-5, 0, 5]) {
+            const road = rideAt(f.p[0] - f.dir[1] * off, f.p[1] + f.dir[0] * off, 1e6);
+            if (road === null) continue;
+            const gap = railY(axis, line, s) - 1.9 - road;
+            if (gap < tightest) { tightest = gap; where = `${axis}/${line} s=${s}`; }
+          }
+        }
+      }
+    check(`a railway clears every road under it (seed ${seed})`, tightest >= 4.5,
+      `tightest headroom ${tightest.toFixed(2)} m${where ? ` at ${where}` : ""}`);
+  }
+  setWorldSeed(1971);
+}
+
 process.exit(failures ? 1 : 0);
