@@ -1791,24 +1791,25 @@ function channelCap(x: number, z: number): number {
  * tiles sharing an edge share both its corners, so they meet along it.
  */
 function terrain(
-  b: Builder, x0: number, z0: number, covered: (x: number, z: number) => Cover | null, lanes: Piece[],
+  b: Builder, solid: Builder, x0: number, z0: number, covered: (x: number, z: number) => Cover | null, lanes: Piece[],
 ): void {
   const t: Tint = [0.96, 0.96, 0.97];
   const BED: Tint = [0.30, 0.31, 0.27];
-  const N = Math.round(REGION / TILE);
+  // the road's own grid, so the ground is laid on corners fixed to the world, and a corner on
+  // a seam is the same corner to the regions either side of it
+  const G = RGRID, N = Math.round(REGION / G);
   const P = APRON_TILES;
   const W = N + 2 * P; // tiles across, with padding so the aprons of both sides of a seam agree
   const CW = W + 1; // corners
   const node = (i: number, j: number) => i * CW + j;
   const C = new Float64Array(CW * CW);
   // How high the ground may stand at each corner for the road surface over it, if any: a
-  // little under it, since a tile is one plane fitted through four corners and the road is
-  // two triangles, and the two only agree at the corners.
+  // little under it, so that where the two are laid over the same ground the road is on top.
   const under = new Float64Array(CW * CW).fill(Infinity);
 
   for (let i = 0; i <= W; i++) {
     for (let j = 0; j <= W; j++) {
-      const x = x0 + (i - P) * TILE, z = z0 + (j - P) * TILE;
+      const x = x0 + (i - P) * G, z = z0 + (j - P) * G;
       let h = terrainAt(x, z), seed = -Infinity;
       const over = roadTopAt(x, z);
       if (over !== null) under[node(i, j)] = over - ROAD_BED;
@@ -1826,13 +1827,13 @@ function terrain(
       // A road standing over the ground has to be reachable from it, but no higher than the
       // apron can carry within the padding this grid was given, or two regions sharing a
       // corner would not agree on it.
-      C[node(i, j)] = seed === -Infinity ? h : Math.min(Math.max(h, seed), h + (P - 1) * TILE * APRON_GRADE);
+      C[node(i, j)] = seed === -Infinity ? h : Math.min(Math.max(h, seed), h + (P - 1) * G * APRON_GRADE);
     }
   }
 
   // The embankment: ground climbs to whatever stands over it at a slope a runner can take,
   // spreading until it runs back into the hillside. Four sweeps carry it as far as it goes.
-  const rise = TILE * APRON_GRADE;
+  const rise = G * APRON_GRADE;
   for (const k of [0, 1, 2, 3]) {
     const iFwd = k === 0 || k === 2, jFwd = k === 0 || k === 1;
     for (let a = 0; a <= W; a++) {
@@ -1846,64 +1847,114 @@ function terrain(
         if (j > 0) want = Math.max(want, C[node(i, j - 1)] - rise);
         if (j < W) want = Math.max(want, C[node(i, j + 1)] - rise);
         // never above what covers this corner — the cap came first and still holds
-        C[o] = Math.min(want, capOf(x0 + (i - P) * TILE, z0 + (j - P) * TILE, lanes, covered), under[o]);
+        C[o] = Math.min(want, capOf(x0 + (i - P) * G, z0 + (j - P) * G, lanes, covered), under[o]);
       }
     }
   }
 
+  // The bed of a river is one depth under the water, whatever the sweeps made of it. They carry
+  // the banks down into the channel at the slope a runner can walk, and how far that reaches
+  // depends on how much bank the region can see past its own edge — so the two regions either
+  // side of a seam laid the bed at different depths, and the river floor stepped along the seam.
+  for (let i = 0; i <= W; i++)
+    for (let j = 0; j <= W; j++) {
+      const x = x0 + (i - P) * G, z = z0 + (j - P) * G;
+      const r = riverNear(x, z, RIVER_HALF + TILE_DIAG);
+      if (r && r.dist < RIVER_HALF + TILE_DIAG) C[node(i, j)] = waterLevel(r.line) - 1.5;
+    }
+
+  // The ground is laid as triangles on those corners: each tile the same two triangles the
+  // road grid uses, and every corner one height that all the tiles round it share. It used to be
+  // one box to a tile, its top the plane fitted through the tile's four corners — which four
+  // corners on a hillside are not — so no two tiles met along their common edge, and the whole
+  // of the open ground was a field of slabs with a step at every joint.
+  //
+  // Which tiles are laid: all but those well inside a block, whose own plinth is a solid
+  // extrusion that fills them, and those over a subway entrance, where the ground is the one
+  // thing in the way of getting down to it.
+  const laidTile = (i: number, j: number) => {
+    const cx = x0 + (i - P + 0.5) * G, cz = z0 + (j - P + 0.5) * G;
+    return !(covered(cx, cz)?.deep || shaftCut(cx, cz));
+  };
+  const at = (i: number, j: number) => C[node(Math.max(0, Math.min(W, i)), Math.max(0, Math.min(W, j)))];
+  const corner = (i: number, j: number): number[] => {
+    const gx = (at(i + 1, j) - at(i - 1, j)) / (2 * G), gz = (at(i, j + 1) - at(i, j - 1)) / (2 * G);
+    const l = Math.hypot(gx, 1, gz);
+    const x = x0 + (i - P) * G, z = z0 + (j - P) * G;
+    return [x, at(i, j), z, -gx / l, 1 / l, -gz / l, x, z];
+  };
+  /** The side of a laid tile facing one that is not: straight down, as the slab's side was. */
+  const side = (p: number[], q: number[], ox: number, oz: number, tint: Tint) => {
+    const DEPTH = 16;
+    const v = (V: number[], dy: number) => [V[0], V[1] - dy, V[2], ox, 0, oz, V[0] * oz - V[2] * ox, V[1] - dy];
+    // wound so that the face looks outward, the way the tile's edge does
+    const flip = (q[0] - p[0]) * oz - (q[2] - p[2]) * ox > 0;
+    const [P0, Q0] = flip ? [q, p] : [p, q];
+    b.tri([v(P0, 0), v(Q0, 0), v(Q0, DEPTH)], Mat.Asphalt, tint);
+    b.tri([v(P0, 0), v(Q0, DEPTH), v(P0, DEPTH)], Mat.Asphalt, tint);
+  };
+
+  // Collision, never drawn: a box to a tile, up to the highest of its corners, or four where it
+  // is steep enough that one would stand proud of the slope; level tiles gathered into runs.
+  let run: { i: number; j0: number; j1: number; lo: number; hi: number } | null = null;
+  const endRun = () => {
+    if (!run) return;
+    const x = x0 + (run.i - P) * G;
+    solid.box(x, run.lo - 16, z0 + (run.j0 - P) * G, x + G, run.hi, z0 + (run.j1 + 1 - P) * G, Mat.Asphalt, t, 0,
+      { hidden: true, detail: false });
+    run = null;
+  };
+
   for (let i = P; i < P + N; i++) {
-    const x = x0 + (i - P) * TILE;
-    let run: { z: number; h: number; drowned: boolean } | null = null;
-
-    const endRun = (z: number) => {
-      if (run) b.box(x, run.h - 16, run.z, x + TILE, run.h, z, Mat.Asphalt, run.drowned ? BED : t, 0, { seed: 0, detail: false, buried: true });
-      run = null;
-    };
-
     for (let j = P; j < P + N; j++) {
-      const z = z0 + (j - P) * TILE;
-      const cx = x + TILE / 2, cz = z + TILE / 2;
-      // Only a tile well inside a block is left out, where the block's own plinth is a solid
-      // extrusion that fills it. Anything else is laid and held down by its corners.
-      // Inside a block, where the block's own plinth is a solid extrusion that fills the
-      // tile; or over a subway entrance, where the ground is the one thing in the way of
-      // getting down to it.
-      if (covered(cx, cz)?.deep || shaftCut(cx, cz)) {
-        endRun(z);
+      if (!laidTile(i, j)) {
+        endRun();
         continue;
       }
-      const c00 = C[node(i, j)], c10 = C[node(i + 1, j)];
-      const c01 = C[node(i, j + 1)], c11 = C[node(i + 1, j + 1)];
-      const gx = ((c10 + c11) - (c00 + c01)) / 2;
-      const gz = ((c01 + c11) - (c00 + c10)) / 2;
-      // A tile is one plane and four corners need not lie in one, so the plane is the best fit
-      // through them, and a twisted tile overshoots: three corners high and one low puts the
-      // corner opposite the low one a quarter of the difference *above* where it was asked to
-      // be. Along the river that difference is the whole drop from the quay to the bed, six and
-      // a half metres, and every tile the cut crosses that way stood a metre and a half of
-      // ground up through the stone of the quay — the row of wedges along every bank. However
-      // it is fitted, no corner of a tile may stand above the highest corner it was given.
-      const over = Math.abs(gx) / 2 + Math.abs(gz) / 2 + (c00 + c10 + c01 + c11) / 4 - Math.max(c00, c10, c01, c11);
-      const h = (c00 + c10 + c01 + c11) / 4 - Math.max(0, over);
+      const c00 = at(i, j), c10 = at(i + 1, j), c01 = at(i, j + 1), c11 = at(i + 1, j + 1);
+      const x = x0 + (i - P) * G, z = z0 + (j - P) * G;
+      const cx = x + G / 2, cz = z + G / 2;
       const r = riverNear(cx, cz, RIVER_HALF + TILE_DIAG + 4);
       const w = r ? waterLevel(r.line) : Infinity;
       // Only ground that is actually under a river is riverbed. Comparing against a water
       // level of Infinity where there is no river said yes to every tile in the city, so
       // every stretch of open ground was laid in silt: a dark floor a little below the
       // roadway all round it, which is a hole in the road with mud at the bottom.
-      const drowned = w !== Infinity && h < w - 0.3;
-      // Only level tiles join into a run; a sloping one is its own box, since a run of them
-      // would be one plane pretending to be several.
-      if (gx || gz) {
-        endRun(z);
-        b.box(x, h - 16, z, x + TILE, h, z + TILE, Mat.Asphalt, drowned ? BED : t, 0,
-          { seed: 0, detail: false, buried: true, rise: gx, riseZ: gz });
-      } else if (!run || run.h !== h || run.drowned !== drowned) {
-        endRun(z);
-        run = { z, h, drowned };
+      const drowned = w !== Infinity && (c00 + c10 + c01 + c11) / 4 < w - 0.3;
+      const tint = drowned ? BED : t;
+      const A = corner(i, j), B = corner(i + 1, j), D = corner(i, j + 1), E = corner(i + 1, j + 1);
+      // split from the low corner to the high one, as `fieldAt` splits the road, and wound to
+      // face the sky
+      b.tri([A, E, B], Mat.Asphalt, tint);
+      b.tri([A, D, E], Mat.Asphalt, tint);
+      if (!laidTile(i - 1, j)) side(A, D, -1, 0, tint);
+      if (!laidTile(i + 1, j)) side(B, E, 1, 0, tint);
+      if (!laidTile(i, j - 1)) side(A, B, 0, -1, tint);
+      if (!laidTile(i, j + 1)) side(D, E, 0, 1, tint);
+
+      const lo = Math.min(c00, c10, c01, c11), hi = Math.max(c00, c10, c01, c11);
+      if (hi - lo <= 0.3) {
+        if (run && run.i === i && run.j1 === j - 1 && Math.abs(run.hi - hi) < 0.03) {
+          run.j1 = j;
+          run.lo = Math.min(run.lo, lo);
+          run.hi = Math.max(run.hi, hi);
+        } else {
+          endRun();
+          run = { i, j0: j, j1: j, lo, hi };
+        }
+        continue;
       }
+      endRun();
+      // the tile's own two triangles at a point of it, as fractions across
+      const y = (u: number, v: number) => u >= v ? c00 + u * (c10 - c00) + v * (c11 - c10) : c00 + v * (c01 - c00) + u * (c11 - c01);
+      for (const su of [0, 0.5])
+        for (const sv of [0, 0.5]) {
+          const ys = [y(su, sv), y(su + 0.5, sv), y(su, sv + 0.5), y(su + 0.5, sv + 0.5)];
+          solid.box(x + su * G, Math.min(...ys) - 16, z + sv * G, x + (su + 0.5) * G, Math.max(...ys), z + (sv + 0.5) * G,
+            Mat.Asphalt, t, 0, { hidden: true, detail: false });
+        }
     }
-    endRun(z0 + REGION);
+    endRun();
   }
 }
 
@@ -1996,9 +2047,10 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   // roads from it and so would not agree on its height, which is a seam in the ground.
   const reach = (APRON_TILES + CUT_TILES) * TILE;
   const lanes = streetPieces(x0 - reach, z0 - reach, x0 + REGION + reach, z0 + REGION + reach);
-  terrain(ground, x0, z0, covered, lanes);
-  // collision for the road, kept apart from the ground so its hidden boxes never cull a face
+  // collision for the ground and the road, kept apart from what is drawn so that its hidden
+  // boxes never cull a face
   const solid = new Builder(new Rng(hashInt(rx, rz, 6)));
+  terrain(ground, solid, x0, z0, covered, lanes);
   roadSurface(ground, solid, x0, z0);
   streets(ground, x0, z0);
   bridges(ground, solid, x0, z0);
