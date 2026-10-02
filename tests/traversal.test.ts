@@ -1296,22 +1296,25 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
     const at = (along: number, across: number): [number, number] =>
       [st.shaftX + s * along + c * across, st.shaftZ + c * along - s * across];
     const mezz = st.y + 6.8;
+    // `u` along the stair from the foot towards the street, which is local z one way or the other
+    const u = (along: number, across: number) => at(along * st.lean, across);
+    const hole = st.reach - 5.6;
     let ways = 0;
-    for (const [la, ac] of [[9, 0], [-9, 0], [0, 8], [0, -8]] as [number, number][]) {
-      const from = at(la, ac);
+    for (const [la, ac] of [[st.reach + 4, 0], [hole, 8], [hole, -8]] as [number, number][]) {
+      const from = u(la, ac);
       const p = new Player(from[0], st.top + 1, from[1], st.yaw);
-      // the shape of a switchback: one column to the far landing, across it, back down the
-      // other. Walked long enough to take whichever flight the stair starts with.
-      for (let i = 0; i < 22 && p.pos[1] > mezz + 1.2; i++) {
-        walk(p, colliders(p.pos[0], p.pos[2]), [at(i % 4 < 2 ? -4.4 : 4.4, (i + 1) % 4 < 2 ? 1.0 : -1.0)], 8);
+      // into the hole, then straight down the one long flight under the street to the foot
+      walk(p, colliders(p.pos[0], p.pos[2]), [u(hole, 0)], 8);
+      for (let i = 0; i < 12 && p.pos[1] > mezz + 1.2; i++) {
+        walk(p, colliders(p.pos[0], p.pos[2]), [u(Math.max(0, hole - (i + 1) * 4), 0)], 8);
       }
       if (p.pos[1] < mezz + 1.5) ways++;
     }
-    // Not all four: an entrance stands on a pavement, so something is often built behind it.
+    // Not all three: an entrance stands on a pavement, so something is often built beside it.
     // But one is not enough either — that is an entrance with a single way in and a wall
     // from every other angle, which is what a runner walking up to one usually finds.
     check(`subway: the stair goes down from more than one side (seed ${seed})`, ways >= 2,
-      `${ways} of 4 approaches reached the mezzanine`);
+      `${ways} of 3 approaches reached the mezzanine`);
 
     // On down the well to the platform, starting where the passage arrives on the concourse.
     //
@@ -1345,7 +1348,7 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
     const ride = new Metro(st.axis, st.line, 1, st.k, 0);
     const from = ride.stop?.name;
     let standing = false, got = ride.stop, rode = 0;
-    for (let t = 0.1; t <= PERIOD * 5 && !(standing && ride.slot > st.k); t += 0.1) {
+    for (let t = 0.1; t <= PERIOD * 8 && !(standing && ride.slot > st.k); t += 0.1) {
       standing = ride.update(0.1, t, 0, 0).stopped;
       got = ride.stop;
       rode = t;

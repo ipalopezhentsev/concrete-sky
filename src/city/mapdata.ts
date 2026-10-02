@@ -59,10 +59,10 @@ export function mapStations(tx: number, tz: number): Float32Array {
   const x0 = tx * MAP_TILE, z0 = tz * MAP_TILE;
   const out: number[] = [];
   // asked about the platforms, which stand within their own entrance's offset of the entrance
-  for (const st of stationsNear(x0 + MAP_TILE / 2, z0 + MAP_TILE / 2, MAP_TILE * 0.71 + 40)) {
-    if (st.shaftX < x0 || st.shaftX >= x0 + MAP_TILE) continue;
-    if (st.shaftZ < z0 || st.shaftZ >= z0 + MAP_TILE) continue;
-    out.push(st.shaftX, st.shaftZ);
+  for (const st of stationsNear(x0 + MAP_TILE / 2, z0 + MAP_TILE / 2, MAP_TILE * 0.71 + 100)) {
+    if (st.mouthX < x0 || st.mouthX >= x0 + MAP_TILE) continue;
+    if (st.mouthZ < z0 || st.mouthZ >= z0 + MAP_TILE) continue;
+    out.push(st.mouthX, st.mouthZ);
   }
   return new Float32Array(out);
 }
