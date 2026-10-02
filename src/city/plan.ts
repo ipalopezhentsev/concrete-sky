@@ -7,6 +7,7 @@ import {
   assembleRegion, Builder, CELL, LIFT_SIZE, REGION, REGION_CELLS, type Part, type RegionMesh,
 } from "./generate";
 import { Finish, Mat, Win, type Tint } from "./materials";
+import { YAW_STEP, yawStep } from "./mesh";
 import { PAINT_COLORS } from "../vehicles/models";
 import {
   ARTERY, ARTERY_HALF, arteriesNear, arteryFrame, arteryLines, arteryScale, blocksIn, cellOf, checkSeed, grain, RIVER_HALF,
@@ -3013,7 +3014,7 @@ const PLAT_HALF = 6.5;
 export const PLAT_RISE = 1.1;
 /** The mezzanine over the tracks: its floor above the track bed, and its headroom. */
 const MEZZ = SUB_RISE + 0.8;
-const MEZZ_RISE = 2.9;
+const MEZZ_RISE = 3.6;
 /** Track bed below the lowest ground anywhere near the line. */
 const SUB_DEPTH = 27;
 /** Length of tunnel built in one go, and the span its level is interpolated over. */
@@ -3038,8 +3039,12 @@ const MOUTH = 11.2;
 /** One step of the flight: how far it drops, and how far it goes. */
 const STEP_RISE = 0.47;
 const STEP_GOING = 0.75;
-/** Headroom over the nosings where the flight is roofed. */
-const HEAD = 3.3;
+/**
+ * Headroom over the nosings where the flight is roofed. Three metres and a bit is enough to
+ * walk under and read as a crawl down into a tomb from the top of the stair; a station
+ * entrance is a public hall, and this is the height of one.
+ */
+const HEAD = 4.4;
 /** How far the surround stands out round the cut, to face the ragged edge the tiles leave. */
 const SURROUND = TILE + 1.2;
 
@@ -3660,6 +3665,17 @@ function station(b: Builder, st: Station): void {
     // its light stops at the concourse wall, short of the concourse's own lights it would cross
     b.box(st.shaftX + wx0 + 0.4, mezz + MEZZ_RISE - 0.24, st.shaftZ - 0.22, st.shaftX + wx1 - 0.4,
       mezz + MEZZ_RISE - 0.04, st.shaftZ + 0.22, Mat.Strip, TILED, 0, { collide: false, detail: false });
+
+    // Lamps, for the night. The strips are lit whatever the hour, but a strip only glows: it
+    // lights nothing round it, and after dark the way down was a black hole with a pale line
+    // drawn down the middle. The renderer lights the lamps nearest the eye like the ones over
+    // the streets, so these are what light the flight, the chamber and the passage as you go.
+    const a = yawStep(-st.yaw) * YAW_STEP, cs = Math.cos(a), sn = Math.sin(a);
+    const lamp = (lx: number, y: number, lz: number) =>
+      b.lamps.push(st.shaftX + lx * cs - lz * sn, y, st.shaftZ + lx * sn + lz * cs);
+    for (let u = FOOT + 3; u < open; u += 5) lamp(0, head(u) - 0.4, lean * u);
+    lamp(0, mezz + HEAD - 0.4, 0);
+    for (let x = wallX + 3; x < Math.abs(reach) - 2; x += 6) lamp(Math.sign(reach) * x, mezz + MEZZ_RISE - 0.4, 0);
   });
   // the stair down through the well onto the platform, in the line's own frame
   b.turned(st.x, st.z, -st.yaw, () => {
