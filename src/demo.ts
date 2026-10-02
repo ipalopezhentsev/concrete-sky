@@ -375,8 +375,8 @@ export class PlanDrivePilot {
 
   /** The point in this pilot's lane abreast of a frame on the road. */
   private lane(f: { p: Vec2; dir: Vec2 }): Vec2 {
-    // traffic running with the station keeps the negative side, so this sits beyond it
-    const off = -PLAN_LANE * this.at.dir + this.shift;
+    // traffic keeps to the right of its travel, so this sits beyond it on that side
+    const off = PLAN_LANE * this.at.dir + this.shift;
     return [f.p[0] - f.dir[1] * off, f.p[1] + f.dir[0] * off];
   }
 

@@ -299,11 +299,12 @@ export class Traffic {
         if (Math.abs(s - center) > radius) continue;
         let x: number, z: number, yaw: number, vx: number, vz: number;
         if (curve !== undefined) {
-          // the station runs along the road's own spline, and the lane sits off to one side of it
+          // the station runs along the road's own spline, and the lane sits off to one side of it;
+          // a negative offset is to the right of travel along the station, as on the grid
           const { p, dir } = arteryFrame(curve, line, s);
           const back = lane.dir > 0 ? 1 : -1;
-          x = p[0] - dir[1] * lane.offset;
-          z = p[1] + dir[0] * lane.offset;
+          x = p[0] + dir[1] * lane.offset;
+          z = p[1] - dir[0] * lane.offset;
           yaw = Math.atan2(dir[0] * back, dir[1] * back);
           vx = dir[0] * lane.dir * lane.speed;
           vz = dir[1] * lane.dir * lane.speed;
