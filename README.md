@@ -46,6 +46,7 @@ Click the page to capture the mouse.
 | V | chase camera or cockpit view (in a vehicle) |
 | R | return to the last roof you stood on |
 | H | hunters on / off |
+| U | music on / off (remembered; `?music=0` starts with it off) |
 | N | skip to the next weather |
 | L | hold the current weather / let it drift again |
 | , / . | wind the clock back / forward an hour (hold to run the day past) |
@@ -208,6 +209,7 @@ reversed-Z depth.
 | `src/daylight.ts` | The clock and the sun. Real spherical astronomy at a fixed latitude and date puts the sun in the sky for a given hour, so it rises north of east, crosses high in the south and sets north of west, and the shadows swing round with it. A table keyed by sun elevation — not by the clock — gives the light and the sky for that moment, which means dawn and dusk come out of the same entries. Below −6° the moon takes over: always full, always opposite the sun, so it rises as the sun sets. |
 | `src/weather.ts` | Eight mood states (clear sky, drifting cumulus, hard light, high haze, overcast, rain, fog, storm light) that blend smoothly. A state does not set the light — it tints and dims whatever the clock is giving, as a fraction of the sky's own brightness, so one `overcast` is a white glare at noon, a dull smear at sunset and a lid over a dark city at two in the morning. |
 | `src/audio.ts` | Web Audio synthesis (including flyer engine and street rumble). |
+| `src/music.ts` | The generative score, after early-90s London ambient techno: extended minor chords on swept, detuned pads, FM bells through a ping-pong echo and a long synthetic hall, a sub on the chord roots, a wandering band of noise, and a soft broken beat at 86 bpm that drifts in for a stretch of bars and away again. Chords come at random from a daylight set and a darker phrygian one, leaning dark as gloom and night come in. Scheduled a fraction of a second ahead on the audio clock. |
 | `src/vehicles/metro.ts` | The subway timetable, and the ride. A train is a function of the clock like everything else that moves here, but this one stops: each cycle is a dwell at one station and a run to the next, the same cycle on every line, so asking which train belongs to a platform is one piece of arithmetic — and the worker that built the tunnel and the frame drawing it get the same answer. |
 | `src/vehicles/traffic.ts` | Endless traffic streams: a vehicle's position is a function of its slot and time, so nothing is simulated. Cars drive the arterials, following each one's spline; flyers use air corridors over the same arterials at 48–122 m, above every bridge; trains run the elevated railways and boats the rivers. Drawn with GPU instancing. |
 | `src/vehicles/car.ts` | Drivable car: arcade handling, box collision, kerb stepping. |

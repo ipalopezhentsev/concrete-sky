@@ -190,7 +190,12 @@ async function main(): Promise<void> {
   const dayLength = Number(params.get("daylength"));
   if (params.get("daylength") !== null && dayLength >= 0) weather.dayLength = dayLength;
   if (params.has("shot")) weather.cycle = false;
-  const audio = new Audio();
+  // the score is on unless turned off (U, or ?music=0); the choice is remembered
+  let musicPref: string | null = null;
+  try {
+    musicPref = localStorage.getItem("music");
+  } catch {}
+  const audio = new Audio(params.get("music") !== "0" && musicPref !== "off");
 
   loading("pouring concrete…", CITY_FROM);
   await world.ready(player.pos[0], player.pos[2], params.has("shot") ? 950 : 450, (f) => {
@@ -411,7 +416,7 @@ async function main(): Promise<void> {
     if (e.code === "KeyM" && !e.repeat) map.toggle();
     const zooming = map.open && ZOOM_IN.has(e.code) !== ZOOM_OUT.has(e.code);
     if (zooming && !e.repeat) map.zoomBy(ZOOM_IN.has(e.code) ? -1 : 1);
-    const looking = e.code === "F3" || e.code === "F4" || e.code === "KeyM" || zooming;
+    const looking = e.code === "F3" || e.code === "F4" || e.code === "KeyM" || e.code === "KeyU" || zooming;
     if (mode === "demo" && !e.repeat && !looking) {
       if (e.code === "Escape") setMode("title");
       else takeOver(false);
@@ -433,6 +438,13 @@ async function main(): Promise<void> {
       caption(weather.running ? `clock running — ${weather.clock}` : `clock held at ${weather.clock}`);
     }
     if (e.code === "KeyH" && mode !== "demo") setHunt(!hunt);
+    if (e.code === "KeyU") {
+      const on = audio.toggleMusic();
+      try {
+        localStorage.setItem("music", on ? "on" : "off");
+      } catch {}
+      caption(on ? "music on" : "music off");
+    }
     if (mode !== "play") return;
     if (e.code === "KeyR" && !rides.riding) player.respawn();
     if (e.code === "KeyE") interact();

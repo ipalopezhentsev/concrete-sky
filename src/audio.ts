@@ -1,10 +1,14 @@
 // Procedural ambience with Web Audio: filtered-noise wind and rain, detuned drones,
-// and synthesized footsteps. Must be started from a user gesture.
+// and synthesized footsteps, with the generative score from music.ts on top. Must be
+// started from a user gesture.
+
+import { Music } from "./music";
 
 interface Params {
   wind: number;
   gloom: number;
   rain: number;
+  night: number;
 }
 
 function noiseBuffer(ctx: AudioContext, seconds: number, brown = false): AudioBuffer {
@@ -57,6 +61,18 @@ export class Audio {
   private trafficGain!: GainNode;
   private dropTimer = 0;
   private time = 0;
+  private music: Music | null = null;
+
+  /** `musicOn` false starts with the score off; it can still be switched on later. */
+  constructor(private musicOn = true) {}
+
+  /** Switch the score on or off; returns whether it is now playing. */
+  toggleMusic(): boolean {
+    this.musicOn = !this.musicOn;
+    if (this.ctx && this.musicOn && !this.music) this.music = new Music(this.ctx, this.master);
+    this.music?.setOn(this.musicOn);
+    return this.musicOn;
+  }
 
   start(): void {
     if (this.ctx) {
@@ -178,6 +194,8 @@ export class Audio {
     this.trafficGain = ctx.createGain();
     this.trafficGain.gain.value = 0;
     rumble.connect(rf).connect(this.trafficGain).connect(this.master);
+
+    if (this.musicOn) this.music = new Music(ctx, this.master);
   }
 
   /**
@@ -259,8 +277,11 @@ export class Audio {
     const gust = 0.6 + 0.4 * Math.sin(this.time * 0.23) * Math.sin(this.time * 0.071 + 1);
     this.windGain.gain.setTargetAtTime(wind * gust, t, 0.5);
     this.windFilter.frequency.setTargetAtTime(250 + 500 * gust + 300 * speedNorm, t, 0.8);
-    this.droneBright.gain.setTargetAtTime(0.5 * (1 - p.gloom), t, 2);
-    this.droneDark.gain.setTargetAtTime(0.55 * p.gloom, t, 2);
+    // the drones step back under the score, which carries the harmony
+    const drones = this.musicOn ? 0.35 : 1;
+    this.droneBright.gain.setTargetAtTime(0.5 * (1 - p.gloom) * drones, t, 2);
+    this.droneDark.gain.setTargetAtTime(0.55 * p.gloom * drones, t, 2);
+    if (this.musicOn) this.music?.update(p);
     this.rainGain.gain.setTargetAtTime(0.35 * p.rain, t, 1);
     this.trafficGain.gain.setTargetAtTime(0.35 * Math.max(0, 1 - altitude / 60), t, 1);
 
