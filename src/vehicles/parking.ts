@@ -135,13 +135,16 @@ export class Parking {
     return best;
   }
 
-  /** Collision boxes of parked vehicles near (x, z). */
-  boxes(x: number, z: number): Float32Array {
+  /**
+   * Collision boxes of parked vehicles near (x, z). Without `cars`, only the flyers and boats:
+   * to something driving, a parked car is not a box but a car it can knock aside (see knocks.ts).
+   */
+  boxes(x: number, z: number, cars = true): Float32Array {
     if (this.boxVersion !== this.version) {
       this.boxCache.clear();
       this.boxVersion = this.version;
     }
-    const key = `${Math.round(x / 40)},${Math.round(z / 40)}`;
+    const key = `${Math.round(x / 40)},${Math.round(z / 40)},${cars}`;
     const cached = this.boxCache.get(key);
     if (cached) return cached;
     const list: number[] = [];
@@ -152,6 +155,7 @@ export class Parking {
         list.push(p.x - f.hx, p.y, p.z - f.hz, p.x + f.hx, p.y + f.h, p.z + f.hz);
         continue;
       }
+      if (!cars) continue;
       // Cut into slices along its length, each boxed on its own: the square-on box round a car
       // parked on a street running the diagonal stood out a metre and a half into the lane.
       const d = CAR_DIMS[p.kind], fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);

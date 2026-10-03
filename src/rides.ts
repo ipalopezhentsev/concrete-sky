@@ -12,6 +12,7 @@ import { Boat } from "./vehicles/boat";
 import { Metro, metroCycle, onTrack, trackOff, trainAt, TRAIN } from "./vehicles/metro";
 import { Car, type RoadSurface } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
+import { Knocks } from "./vehicles/knocks";
 import { Parking } from "./vehicles/parking";
 import { InstanceList, Traffic } from "./vehicles/traffic";
 import type { VehicleLists } from "./renderer";
@@ -19,6 +20,12 @@ import { PLAT_RISE, rideAt, type Station } from "./city/plan";
 import type { World } from "./world";
 
 const REACH = 1.6; // how close (to the body) you must be to get in
+/**
+ * How much heavier the car the player drives counts as than the one it hits. Equal masses
+ * share a crash equally, which is the truth and no fun: a car driven into traffic at speed
+ * stopped half dead. Every driving game that feels right cheats here, and so does this one.
+ */
+const HEFT = 3;
 
 export interface Controls {
   moveX: number;
@@ -59,6 +66,8 @@ export class Rides {
   readonly parking = new Parking();
   readonly particles = new Particles();
   readonly combat = new Combat(this.particles);
+  /** Cars knocked loose from the traffic or the kerb, until they come to rest. */
+  readonly knocks = new Knocks(this.traffic, this.parking);
   readonly hunters: Hunters;
   flyer: Flyer | null = null;
   car: Car | null = null;
@@ -79,6 +88,7 @@ export class Rides {
   private insideList = new InstanceList(1);
   private insideKind: "car" | "van" | "flyer" | null = null;
   private withLifts = new WeakMap<Float32Array, WeakMap<Float32Array, Float32Array>>();
+  private joined = new WeakMap<Float32Array, WeakMap<Float32Array, Float32Array>>();
 
   constructor(private world: World, private player: Player) {
     this.hunters = new Hunters(this);
@@ -99,6 +109,43 @@ export class Rides {
     }
     return out;
   };
+
+  /** Two sets of boxes as one, kept for as long as both are the same arrays. */
+  private join(a: Float32Array, b: Float32Array): Float32Array {
+    if (b.length === 0) return a;
+    let byB = this.joined.get(a);
+    if (!byB) this.joined.set(a, (byB = new WeakMap()));
+    let out = byB.get(b);
+    if (!out) {
+      out = new Float32Array(a.length + b.length);
+      out.set(a);
+      out.set(b, a.length);
+      byB.set(b, out);
+    }
+    return out;
+  }
+
+  /**
+   * What a car drives into and cannot move: the city, the lifts, parked flyers and boats. Not
+   * parked cars — those it knocks aside (see vehicles/knocks.ts).
+   */
+  readonly carColliders: Colliders = (x, z) =>
+    this.join(this.join(this.world.colliders(x, z), this.parking.boxes(x, z, false)), this.lifts.boxes(x, z));
+
+  /** The hunters' cars still on the road. */
+  private hunterCars(): Car[] {
+    const out: Car[] = [];
+    for (const h of this.hunters.list) if (h.car && !h.dead) out.push(h.car);
+    return out;
+  }
+
+  /** Into the driver's seat. */
+  private board(car: Car): Car {
+    car.mass *= HEFT;
+    car.tumbles = false;
+    this.car = car;
+    return car;
+  }
 
   /**
    * The road surface under a point, for whatever rides along it rather than standing on it.
@@ -235,7 +282,7 @@ export class Rides {
         this.flyer = new Flyer(parked.x, parked.y, parked.z, parked.yaw, parked.color);
         pl.pitch = -0.15;
       } else {
-        this.car = new Car(parked.x, parked.y, parked.z, parked.yaw, parked.kind === "van", parked.color);
+        this.board(new Car(parked.x, parked.y, parked.z, parked.yaw, parked.kind === "van", parked.color));
       }
       pl.yaw = parked.yaw;
       this.carLookYaw = this.carLookPitch = 0;
@@ -244,7 +291,7 @@ export class Rides {
     const moving = this.traffic.nearestCar(p[0], p[1], p[2], REACH + 1);
     if (moving) {
       this.traffic.removed.add(moving.key);
-      this.car = new Car(moving.pos[0], moving.pos[1], moving.pos[2], moving.yaw, moving.van, moving.color);
+      this.board(new Car(moving.pos[0], moving.pos[1], moving.pos[2], moving.yaw, moving.van, moving.color));
       pl.yaw = moving.yaw;
       this.carLookYaw = this.carLookPitch = 0;
       return null;
@@ -272,8 +319,7 @@ export class Rides {
   /** Start in a car where the player stands (test hook, demo). */
   spawnCar(color: Vec3 = [0.55, 0.16, 0.12], van = false): Car {
     const p = this.player.pos;
-    this.car = new Car(p[0], p[1], p[2], this.player.yaw, van, color);
-    return this.car;
+    return this.board(new Car(p[0], p[1], p[2], this.player.yaw, van, color));
   }
 
   /** Start in a boat where the player stands (test hook, demo). */
@@ -305,18 +351,17 @@ export class Rides {
     }
     if (this.flyer) {
       pl.look(c.mouseDX, c.mouseDY);
+      const was: Vec3 = [...this.flyer.pos];
       this.flyer.update(dt, {
         moveX: c.moveX, moveZ: c.moveZ, up: c.climb ?? (c.up ? 1 : 0) - (c.down ? 1 : 0), boost: c.sprint,
       }, pl.yaw, pl.pitch, this.colliders);
+      this.ram(was, this.flyer);
       pl.pos = [...this.flyer.pos];
     } else if (this.car) {
       const car = this.car;
-      const traffic = this.traffic.carBoxes(car.pos[0], car.pos[2], 30);
-      const hunters = this.hunters.carBoxes();
-      const obstacles = new Float32Array(traffic.length + hunters.length);
-      obstacles.set(traffic);
-      obstacles.set(hunters, traffic.length);
-      car.update(dt, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, this.colliders, obstacles, this.road);
+      const bodies = this.knocks.near(car, this.hunterCars());
+      car.update(dt, { throttle: c.moveZ, steer: c.moveX, handbrake: c.up, boost: c.sprint }, this.carColliders, undefined, this.road, bodies);
+      if (car.impact > 6 && car.contact) this.bang(car.contact, car.impact);
       // mouse looks around; the view drifts back behind the car when left alone
       this.carLookYaw -= c.mouseDX * 0.0022;
       this.carLookPitch = Math.max(-0.6, Math.min(0.5, this.carLookPitch - c.mouseDY * 0.0022));
@@ -344,6 +389,28 @@ export class Rides {
       const rx = Math.cos(boat.yaw), rz = -Math.sin(boat.yaw);
       pl.pos = [boat.pos[0] + rx * 0.5, boat.pos[1] + 2.35, boat.pos[2] + rz * 0.5];
     }
+    // whatever was knocked loose goes on sliding, whoever is or is not at the wheel
+    this.knocks.update(dt, this.carColliders, this.road, [this.car, ...this.hunterCars()], this.focus);
+    for (const b of this.knocks.bangs) this.bang(b.at, b.impact);
+  }
+
+  /** Metal meeting metal: sparks, and a crunch once it is hard enough to hear over the engine. */
+  private bang(at: Vec3, impact: number): void {
+    this.particles.sparks(at, Math.min(30, Math.round(impact)));
+    if (impact > 12) this.combat.events.hits.push(at);
+  }
+
+  /**
+   * A flyer flown into one of the air traffic's, between `was` and where it is now: the other
+   * goes down, and the one that hit it loses a good part of its way.
+   */
+  private ram(was: Vec3, f: Flyer): void {
+    const hit = this.traffic.flyerAlong(was, f.pos, 2.6);
+    if (!hit) return;
+    this.traffic.removed.add(hit.key);
+    const v = f.vel;
+    this.combat.wreckFlyer(hit.pos, [hit.vel[0] + v[0] * 0.7, hit.vel[1] + v[1] * 0.7, hit.vel[2] + v[2] * 0.7], hit.yaw, hit.color, false);
+    for (let k = 0; k < 3; k++) v[k] = v[k] * 0.55 + hit.vel[k] * 0.15;
   }
 
   /** What the hunters are after. */
@@ -351,7 +418,8 @@ export class Rides {
     if (this.flyer) return { pos: this.flyer.pos, vel: this.flyer.vel, mode: "flyer", yaw: this.flyer.yaw };
     if (this.car) {
       const c = this.car;
-      return { pos: c.pos, vel: [Math.sin(c.yaw) * c.speed, c.vy, Math.cos(c.yaw) * c.speed], mode: "car", yaw: c.yaw, van: c.van };
+      const [vx, vz] = c.velocity();
+      return { pos: c.pos, vel: [vx, c.vy, vz], mode: "car", yaw: c.yaw, van: c.van };
     }
     if (this.boat) {
       const b = this.boat;
@@ -484,6 +552,7 @@ export class Rides {
       const list = this.cockpit ? this.insideList : c.van ? t.vans : t.cars;
       list.push(c.pos[0], c.pos[1], c.pos[2], c.yaw, c.pitch, c.roll, c.color);
     }
+    this.knocks.draw(t.cars, t.vans);
     this.combat.drawWrecks(t.flyers, t.cars, t.vans);
     this.hunters.draw(t.flyers, t.cars, t.vans);
     this.lifts.instances(this.liftList, eye, 400);

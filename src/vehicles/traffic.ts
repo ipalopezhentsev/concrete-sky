@@ -15,8 +15,6 @@ import { CARS, onTrack, trackOff, trackScale, trainAt } from "./metro";
 export const INSTANCE_LAYOUT = [3, 3, 4]; // position, rotation (yaw, pitch, roll), colour (rgb, lights)
 export const INSTANCE_STRIDE = 10;
 const STRIDE = INSTANCE_STRIDE;
-/** Boxes a moving vehicle is cut into for collision, along its length; see `carBoxes`. */
-const SLICES = 4;
 
 export class InstanceList {
   data: Float32Array;
@@ -452,29 +450,5 @@ export class Traffic {
       }
     }
     return out;
-  }
-
-  /** Collision boxes of moving cars near (x, z), for the player's car. */
-  carBoxes(x: number, z: number, radius: number): Float32Array {
-    const out: number[] = [];
-    for (const [list, hx, hz, h] of [[this.cars, 0.98, 2.23, 1.5], [this.vans, 1.02, 2.83, 2.1]] as const) {
-      for (let i = 0; i < list.count; i++) {
-        const o = i * STRIDE, d = list.data;
-        if (list.keys[i] < 0 || Math.abs(d[o] - x) > radius || Math.abs(d[o + 2] - z) > radius) continue;
-        // Cut into slices along its length, each boxed on its own. One box squared to whichever
-        // axis the car was nearer stood a metre and more clear of a car going the diagonal —
-        // which on the network city is most of them — and crossing traffic at a junction met
-        // a run of bumpers nobody could see.
-        const fx = Math.sin(d[o + 3]), fz = Math.cos(d[o + 3]);
-        const slice = hz / SLICES;
-        const ex = Math.abs(fx) * slice + Math.abs(fz) * hx, ez = Math.abs(fz) * slice + Math.abs(fx) * hx;
-        for (let k = 0; k < SLICES; k++) {
-          const t = -hz + slice * (2 * k + 1);
-          const cx = d[o] + fx * t, cz = d[o + 2] + fz * t;
-          out.push(cx - ex, d[o + 1], cz - ez, cx + ex, d[o + 1] + h, cz + ez);
-        }
-      }
-    }
-    return Float32Array.from(out);
   }
 }

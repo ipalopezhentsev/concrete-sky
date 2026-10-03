@@ -9,6 +9,7 @@ import { hashInt, Rng, setWorldSeed } from "../src/math";
 import { Player, type Input } from "../src/player";
 import { Flyer, type FlyInput } from "../src/vehicles/flyer";
 import { Car } from "../src/vehicles/car";
+import { Knocks } from "../src/vehicles/knocks";
 import { footprint, Parking } from "../src/vehicles/parking";
 import { Traffic } from "../src/vehicles/traffic";
 import { Combat } from "../src/effects/combat";
@@ -604,6 +605,60 @@ for (const seed of [1971, 42, 777777]) {
   // ... while the half-metre kerb a pavement on a flank puts at the roadside is ridden over
   check("a car rides over a half-metre kerb on a road", drive([-30, -0.2, 38, 30, 0.55, 42]) > 60,
     `reached z=${drive([-30, -0.2, 38, 30, 0.55, 42]).toFixed(0)}`);
+}
+
+// 8b. knocks: a car driven into another at speed knocks it flying and drives on; a wall met at
+// an angle is slid along rather than stopped at
+{
+  const flat = Float32Array.from([-200, -1, -200, 200, 0, 200]);
+  const asphalt = () => 0;
+  const go = { throttle: 1, steer: 0, handbrake: false, boost: false };
+
+  // into a car parked in the lane, through Knocks the way the game does it
+  const parking = new Parking();
+  parking.drop("car", [0, 0, 40], 0.3, [0.5, 0.5, 0.5]);
+  const knocks = new Knocks(new Traffic(), parking);
+  const car = new Car(0, 0, 0, 0, false, [1, 0, 0]);
+  car.mass *= 3;
+  car.tumbles = false;
+  car.speed = 30;
+  let hitAt = -1, from = 0;
+  for (let t = 0; t < 6 * 60; t++) {
+    const before = car.speed;
+    car.update(1 / 60, go, () => flat, undefined, asphalt, knocks.near(car, []));
+    knocks.update(1 / 60, () => flat, asphalt, [car], car.pos);
+    if (car.impact > 0 && hitAt < 0) {
+      hitAt = t;
+      from = before;
+    }
+    if (hitAt >= 0 && t === hitAt + 1) {
+      check("a car hit at speed keeps most of its way", car.speed > 18 && car.pos[2] > 30,
+        `speed ${from.toFixed(1)} -> ${car.speed.toFixed(1)}`);
+      const loose = knocks.cars;
+      check("the car it hit is knocked loose and flung ahead", loose.length === 1 && loose[0].speed > 20,
+        `loose=${loose.length} speed=${loose[0]?.speed.toFixed(1)} slip=${loose[0]?.slip.toFixed(1)} vy=${loose[0]?.vy.toFixed(1)}`);
+    }
+  }
+  const rested = [...parking.all()];
+  check("a knocked car comes to rest and is parked where it stopped",
+    hitAt >= 0 && knocks.cars.length === 0 && rested.length === 1 && rested[0].z > 60,
+    `hit=${hitAt} loose=${knocks.cars.length} parked=${rested.map((r) => `${r.x.toFixed(1)},${r.z.toFixed(1)}`)} player z=${car.pos[2].toFixed(1)}`);
+
+  // a glancing blow on a wall: a wall along the street at x = 5, the car angled into it
+  const walled = Float32Array.from([...flat, 5, 0, -200, 6, 10, 200]);
+  const grazer = new Car(0, 0, 0, 0.35, false, [1, 0, 0]);
+  grazer.speed = 25;
+  for (let t = 0; t < 2 * 60; t++) grazer.update(1 / 60, go, () => walled, undefined, asphalt);
+  check("a wall met at an angle is slid along", grazer.pos[2] > 35 && grazer.pos[0] < 5 && Math.hypot(grazer.speed, grazer.slip) > 12,
+    `pos=${grazer.pos.map((v) => v.toFixed(1))} speed=${grazer.speed.toFixed(1)} slip=${grazer.slip.toFixed(1)}`);
+
+  // a car hit in the back half from the side spins; one hit square-on does not
+  const spun = new Car(0, 0, 10, Math.PI / 2, false, [1, 0, 0]); // broadside across the lane
+  const ram = new Car(-1.5, 0, 6.5, 0, false, [1, 0, 0]);
+  ram.mass *= 3;
+  ram.speed = 25;
+  for (let t = 0; t < 20; t++) ram.update(1 / 60, go, () => flat, undefined, asphalt, [spun]);
+  check("a car hit off its middle is spun", Math.abs(spun.spin) > 0.5, `spin=${spun.spin.toFixed(2)}`);
 }
 
 // 9. shooting down a flyer from the traffic streams

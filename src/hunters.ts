@@ -55,6 +55,8 @@ export interface HuntWorld {
   parking: Parking;
   combat: Combat;
   particles: Particles;
+  /** The car the quarry is driving, if any: rammed, it is shoved rather than run into like a wall. */
+  car?: Car | null;
 }
 
 export interface View {
@@ -114,7 +116,8 @@ export class Hunter {
     if (this.flyer) return this.flyer.vel;
     if (this.car) {
       const c = this.car;
-      return [Math.sin(c.yaw) * c.speed, c.vy, Math.cos(c.yaw) * c.speed];
+      const [vx, vz] = c.velocity();
+      return [vx, c.vy, vz];
     }
     return this.body.vel;
   }
@@ -220,6 +223,11 @@ export class Hunters implements BoltTargets {
 
     for (const h of this.list) {
       if (h.dead) continue;
+      // rolled onto its roof by a knock, a hunter's car is finished, and so is the hunter in it
+      if (h.car?.flipped) {
+        this.kill(h, h.vel);
+        continue;
+      }
       this.see(h, dt, q);
       if (h.flyer) this.fly(h, dt, q);
       else if (h.car) this.drive(h, dt, q);
@@ -710,12 +718,13 @@ export class Hunters implements BoltTargets {
       o.box(this.scratch);
       obstacles.push(...this.scratch);
     }
-    if (q.mode === "car") {
+    const target = q.mode === "car" ? this.w.car ?? null : null;
+    if (q.mode === "car" && !target) {
       boxOf(q, this.scratch);
       obstacles.push(...this.scratch);
     }
     const boost = flat > 90 && Math.abs(wrap(heading - car.yaw)) < 0.3;
-    car.update(dt, { throttle, steer, handbrake: false, boost }, this.w.colliders, Float32Array.from(obstacles), this.w.road);
+    car.update(dt, { throttle, steer, handbrake: false, boost }, this.w.colliders, Float32Array.from(obstacles), this.w.road, target ? [target] : undefined);
 
     // traffic gets shoved off the road
     const f = footprint(car.kind, car.yaw);
@@ -944,7 +953,7 @@ export class Hunters implements BoltTargets {
         flyers.push(f.pos[0], f.pos[1], f.pos[2], f.yaw, f.pitch, f.roll, f.color, 1);
       } else if (h.car) {
         const c = h.car;
-        (c.van ? vans : cars).push(c.pos[0], c.pos[1], c.pos[2], c.yaw, c.pitch, c.roll, c.color, 1);
+        (c.van ? vans : cars).push(c.pos[0], c.pos[1] + c.bodyLift, c.pos[2], c.yaw, c.pitch, c.bodyRoll, c.color, 1);
       } else {
         const b = h.body;
         const phase = Math.sin(h.stride);
@@ -954,16 +963,5 @@ export class Hunters implements BoltTargets {
         this.figures[pose].push(b.pos[0], b.pos[1] + bob, b.pos[2], b.yaw, lean, 0, COAT, 1);
       }
     }
-  }
-
-  /** Collision boxes of the hunters' cars (for the player's car). */
-  carBoxes(): Float32Array {
-    const out: number[] = [];
-    for (const h of this.list) {
-      if (!h.car || h.dead) continue;
-      h.box(this.scratch);
-      out.push(...this.scratch);
-    }
-    return Float32Array.from(out);
   }
 }
