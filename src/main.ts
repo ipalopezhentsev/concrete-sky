@@ -483,9 +483,16 @@ async function main(): Promise<void> {
     );
   };
 
+  // Ctrl+W can't be cancelled, only questioned: descending while flying forward is ctrl+W
+  window.addEventListener("beforeunload", (e) => {
+    if (mode === "play") e.preventDefault();
+  });
+
   window.addEventListener("keydown", (e) => {
     idle = 0;
     if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
+    // ctrl is a game key, so ctrl+letter is not a browser shortcut while playing (where the page may say so)
+    if (mode === "play" && (e.ctrlKey || e.metaKey) && e.code.startsWith("Key")) e.preventDefault();
     if (e.code === "F3") {
       statsEl.hidden = !statsEl.hidden;
       e.preventDefault();
