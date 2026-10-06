@@ -1566,12 +1566,6 @@ function streets(b: Builder, x0: number, z0: number): void {
     }
 }
 
-/** Stations of a stretch of street that are clear of the junctions at either end. */
-function clearOf(p: Piece): [number, number] {
-  const clear = p.street.half * 1.6 + 2;
-  return [Math.max(p.s0, clear), Math.min(p.s1, p.len - clear)];
-}
-
 /**
  * A thin painted stripe along the street, from station s0 to s1, `off` to one side. Paint lies
  * on the road, so it is laid a grid's width at a time with each length's ends on the surface.
@@ -1624,11 +1618,21 @@ function markings(b: Builder, p: Piece): void {
  * road. The column stands down into the pavement's plinth, whichever is lower.
  */
 function lamps(b: Builder, p: Piece): void {
-  const [from, to] = clearOf(p);
   const st = p.street, [ax, az] = st.a;
-  const SPACING = 32, H = 8.5;
-  for (let s = Math.ceil(from / SPACING) * SPACING; s < to; s += SPACING) {
-    const side = Math.round(s / SPACING) % 2 === 0 ? 1 : -1;
+  const SPACING = 26, H = 8.5;
+  // Spread evenly over the street's clear span, so a short street still gets its lamp: most
+  // streets are a block or less, and a fixed pitch from the corner left many of them unlit.
+  // One squeezed between junctions stands at the middle, as long as that is off the crossing.
+  // An arterial's joins are mostly not junctions at all (see `markings`), and its lamps run on.
+  const arterial = st.half >= ARTERY_HALF - 0.5;
+  const clear = arterial ? 0 : st.half * 1.6 + 2;
+  const span = p.len - 2 * clear;
+  if (span < 0 && p.len / 2 < JUNCTION) return;
+  const n = Math.max(1, Math.round(span / SPACING));
+  for (let k = 0; k < n; k++) {
+    const s = span < 0 ? p.len / 2 : clear + ((k + 0.5) * span) / n;
+    if (s < p.s0 || s >= p.s1) continue;
+    const side = k % 2 === 0 ? 1 : -1;
     const off = side * (st.half + 0.8);
     const x = ax + p.ux * s - p.uz * off, z = az + p.uz * s + p.ux * off;
     const kerb = pieceYAt(p, s);

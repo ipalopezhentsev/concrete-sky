@@ -485,10 +485,13 @@ vec3 lampLight(vec3 p, vec3 n) {
   for (int i = 0; i < 24; i++) {
     vec3 toL = uLampPos[i] - p;
     float dist2 = dot(toL, toL);
-    if (dist2 > 900.0) continue;
+    if (dist2 > 1600.0) continue;
     vec3 l = toL * inversesqrt(dist2);
-    float cone = smoothstep(0.35, 0.8, l.y);
-    acc += max(dot(n, l), 0.0) * cone * 60.0 / (dist2 + 4.0);
+    // a wide head, so the pools run into each other between lamps rather than standing as
+    // spots in the dark; the range fades out before the cutoff, not at it
+    float cone = smoothstep(0.1, 0.65, l.y);
+    float range = 1.0 - dist2 / 1600.0;
+    acc += max(dot(n, l), 0.0) * cone * range * range * 200.0 / (dist2 + 30.0);
   }
   return acc * LAMP_COL * uNight;
 }
@@ -744,6 +747,8 @@ void main() {
   vec3 skyAmb = skyTone * uAmbient * 1.1 + uNight * vec3(0.012, 0.014, 0.022);
   vec3 groundAmb = (uGroundCol * 0.6 + uSunColor * 0.08) * uAmbient + uNight * vec3(0.06, 0.045, 0.03);
   vec3 hemi = mix(groundAmb, skyAmb, Nd.y * 0.5 + 0.5);
+  // the glow of every lamp too far off to have a slot of its own, down among the streets
+  hemi += uNight * vec3(0.045, 0.034, 0.023) * (0.8 + 1.7 * max(Nd.y, 0.0)) * (1.0 - smoothstep(4.0, 30.0, vPos.y - uGroundRef));
   float cs = uCheap > 1.5 ? 1.0 : cloudShadowTex(vPos);
   sh *= cs;
   // sunlight bounced off lit walls and paving: it fills shade from the side away from the sun and from below
@@ -940,7 +945,9 @@ void main() {
   col = aces(col * uExposure);
   float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
   col = mix(vec3(lum), col, uSaturation) * uGrade;
-  col = clamp((col - 0.5) * uContrast + 0.5, 0.0, 1.0);
+  // A power about the mid-grey rather than a straight line through it: the line clamped
+  // everything under about a twentieth to black, which by night was most of the street.
+  col = clamp(0.5 * pow(col * 2.0, vec3(uContrast)), 0.0, 1.0);
 
   float vig = smoothstep(0.95, 0.25, length(c * vec2(uResolution.x / uResolution.y, 1.0)) * 0.9);
   col *= mix(0.55, 1.0, vig);
