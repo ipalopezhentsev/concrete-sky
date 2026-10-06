@@ -329,7 +329,7 @@ layout(location = 3) in vec2 aSize;
 layout(location = 4) in float aTint;
 layout(location = 5) in vec2 aInfo;
 layout(location = 6) in vec3 iPos;
-layout(location = 7) in vec3 iRot; // yaw, pitch (nose down), roll
+layout(location = 7) in vec3 iRot; // yaw, pitch (nose down), roll (left side down, as the camera banks)
 layout(location = 8) in vec4 iColor;
 uniform mat4 uViewProj;
 invariant gl_Position;
@@ -344,7 +344,7 @@ mat3 rotation(vec3 r) {
   float cy = cos(r.x), sy = sin(r.x), cp = cos(r.y), sp = sin(r.y), cr = cos(r.z), sr = sin(r.z);
   mat3 ry = mat3(cy, 0.0, -sy, 0.0, 1.0, 0.0, sy, 0.0, cy);
   mat3 rx = mat3(1.0, 0.0, 0.0, 0.0, cp, sp, 0.0, -sp, cp);
-  mat3 rz = mat3(cr, sr, 0.0, -sr, cr, 0.0, 0.0, 0.0, 1.0);
+  mat3 rz = mat3(cr, -sr, 0.0, sr, cr, 0.0, 0.0, 0.0, 1.0);
   return ry * rx * rz;
 }
 

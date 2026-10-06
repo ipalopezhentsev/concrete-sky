@@ -224,7 +224,7 @@ export class Car {
       this.grounded = false;
       if (this.tumbles) {
         const across = dvx * Math.cos(this.yaw) - dvz * Math.sin(this.yaw);
-        this.tumbleRate = Math.max(-8, Math.min(8, this.tumbleRate - across * 0.25));
+        this.tumbleRate = Math.max(-8, Math.min(8, this.tumbleRate + across * 0.25));
       }
     }
   }
