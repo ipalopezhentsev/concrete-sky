@@ -328,6 +328,145 @@ canvas#view {
 
 #map .zoom button:hover { border-color: rgba(233, 231, 226, 0.7); }
 
+/* --- radar: always there while playing, unless turned off in the settings */
+
+#radar {
+  position: fixed;
+  left: calc(18px + env(safe-area-inset-left));
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  width: 168px;
+  height: 168px;
+  border-radius: 50%;
+  background: rgba(10, 11, 13, 0.55);
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.5);
+  opacity: 0.92;
+  pointer-events: none;
+}
+
+#radar[hidden] { display: none; }
+
+#radar canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* the left thumb has the bottom corner on a touch screen */
+body.touchplay #radar {
+  top: calc(12px + env(safe-area-inset-top));
+  bottom: auto;
+  width: 120px;
+  height: 120px;
+}
+
+/* --- settings */
+
+#start .buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+#start .buttons .watch { margin: -0.4rem 0 0; }
+
+#start .keys kbd {
+  font: inherit;
+  color: var(--ink);
+}
+
+#settings {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 11, 13, 0.94);
+  border: 1px solid rgba(233, 231, 226, 0.22);
+  z-index: 3;
+  font-size: 0.85rem;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#settings[hidden] { display: none; }
+
+#settings header, #settings footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+#settings header { border-bottom: 1px solid rgba(233, 231, 226, 0.12); }
+#settings footer { border-top: 1px solid rgba(233, 231, 226, 0.12); color: var(--dim); font-size: 0.75rem; }
+
+#settings h2 {
+  margin: 0;
+  font-weight: 300;
+  font-size: 1rem;
+  letter-spacing: 0.4em;
+  text-transform: uppercase;
+}
+
+#settings .body {
+  overflow-y: auto;
+  padding: 4px 16px 16px;
+  touch-action: pan-y;
+}
+
+#settings h3 {
+  margin: 18px 0 6px;
+  font-weight: 400;
+  font-size: 0.7rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+#settings .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 34px;
+}
+
+#settings .row small {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--dim);
+}
+
+#settings .hint { margin: 0 0 6px; font-size: 0.72rem; color: var(--dim); }
+
+#settings button, #settings select {
+  font: inherit;
+  color: var(--ink);
+  background: rgba(233, 231, 226, 0.06);
+  border: 1px solid rgba(233, 231, 226, 0.25);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+#settings select option { background: #15171a; }
+#settings button:hover, #settings select:hover { border-color: rgba(233, 231, 226, 0.6); }
+#settings input[type="checkbox"] { width: 18px; height: 18px; accent-color: #c8c5be; cursor: pointer; }
+
+#settings .slider { display: flex; align-items: center; gap: 10px; }
+#settings .slider input { width: min(180px, 36vw); accent-color: #c8c5be; }
+#settings .slider output { min-width: 3.4em; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+#settings .keys { display: flex; gap: 6px; }
+#settings .keys button { min-width: 84px; }
+#settings .keys button.empty { color: var(--dim); }
+#settings .keys button.listening { border-color: #e6a03a; color: #e6a03a; }
+
 #stats {
   position: fixed;
   left: 12px;

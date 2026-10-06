@@ -19,15 +19,13 @@
       <p class="seed" id="seed"></p>
       <p class="status" id="status">generating textures…</p>
       <p class="hint" id="begin" hidden>click to run</p>
-      <button class="watch" id="watch" type="button" hidden>watch the demo</button>
+      <span class="buttons">
+        <button class="watch" id="watch" type="button" hidden>watch the demo</button>
+        <button class="watch" id="opensettings" type="button" hidden>settings</button>
+      </span>
       <p class="gpu" id="gpu" hidden></p>
-      <p class="keys mouse-only">
-        mouse look · WASD run · shift sprint · ctrl walk · space jump / climb<br />
-        E get in / out of cars, flyers and subway trains · click shoot · V cockpit view<br />
-        M map (+ / − to zoom) · H hunters on / off · R back to last roof · U music<br />
-        N next weather · L hold weather · , / . wind the clock · K hold the clock<br />
-        F3 stats · F4 copy stats · esc pause
-      </p>
+      <!-- filled in from the key bindings, which can be changed in the settings -->
+      <p class="keys mouse-only" id="keys"></p>
       <p class="keys touch-only">
         left thumb run (push further to sprint) · right thumb look<br />
         tap the prompt to get in or out · jump climbs ledges · hunt turns the hunters on / off<br />
@@ -72,6 +70,18 @@
         <button id="mapout" type="button" aria-label="zoom out">−</button>
         <button id="mapin" type="button" aria-label="zoom in">+</button>
       </div>
+    </div>
+    <div id="radar" hidden><canvas id="radarview"></canvas></div>
+    <div id="settings" hidden role="dialog" aria-label="settings">
+      <header>
+        <h2>settings</h2>
+        <button class="close" type="button" aria-label="close">✕</button>
+      </header>
+      <div class="body"></div>
+      <footer>
+        <button class="reset" type="button">default keys</button>
+        <span>saved in this browser</span>
+      </footer>
     </div>
     <div id="stats" hidden></div>
     <script type="module" src="/src/main.ts"></script>

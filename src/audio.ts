@@ -62,16 +62,34 @@ export class Audio {
   private dropTimer = 0;
   private time = 0;
   private music: Music | null = null;
+  /** The score has a fader of its own, beside `master`, which carries everything else. */
+  private musicBus!: GainNode;
+  private sfxVolume = 1;
+  private musicVolume = 1;
 
   /** `musicOn` false starts with the score off; it can still be switched on later. */
   constructor(private musicOn = true) {}
 
-  /** Switch the score on or off; returns whether it is now playing. */
-  toggleMusic(): boolean {
-    this.musicOn = !this.musicOn;
-    if (this.ctx && this.musicOn && !this.music) this.music = new Music(this.ctx, this.master);
+  /** Whether sound is coming out; null before `start` has been called at all. */
+  get running(): boolean | null {
+    return this.ctx ? this.ctx.state === "running" : null;
+  }
+
+  /** Switch the score on or off. */
+  setMusic(on: boolean): void {
+    this.musicOn = on;
+    if (this.ctx && this.musicOn && !this.music) this.music = new Music(this.ctx, this.musicBus);
     this.music?.setOn(this.musicOn);
-    return this.musicOn;
+  }
+
+  /** Effects and score levels, 0..1 each. */
+  setVolumes(sfx: number, music: number): void {
+    this.sfxVolume = sfx;
+    this.musicVolume = music;
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this.master.gain.setTargetAtTime(sfx, t, 0.05);
+    this.musicBus.gain.setTargetAtTime(music, t, 0.05);
   }
 
   start(): void {
@@ -81,11 +99,18 @@ export class Audio {
     }
     const ctx = new AudioContext();
     this.ctx = ctx;
-    this.master = ctx.createGain();
-    this.master.gain.value = 0;
-    this.master.gain.linearRampToValueAtTime(0.9, ctx.currentTime + 3);
+    // everything fades up together from silence
+    const fadeIn = ctx.createGain();
+    fadeIn.gain.value = 0;
+    fadeIn.gain.linearRampToValueAtTime(0.9, ctx.currentTime + 3);
     const comp = ctx.createDynamicsCompressor();
-    this.master.connect(comp).connect(ctx.destination);
+    fadeIn.connect(comp).connect(ctx.destination);
+    this.master = ctx.createGain();
+    this.master.gain.value = this.sfxVolume;
+    this.master.connect(fadeIn);
+    this.musicBus = ctx.createGain();
+    this.musicBus.gain.value = this.musicVolume;
+    this.musicBus.connect(fadeIn);
 
     // wind: brown noise through a wandering band-pass
     const windSrc = loopSource(ctx, noiseBuffer(ctx, 12, true));
@@ -195,7 +220,7 @@ export class Audio {
     this.trafficGain.gain.value = 0;
     rumble.connect(rf).connect(this.trafficGain).connect(this.master);
 
-    if (this.musicOn) this.music = new Music(ctx, this.master);
+    if (this.musicOn) this.music = new Music(ctx, this.musicBus);
   }
 
   /**

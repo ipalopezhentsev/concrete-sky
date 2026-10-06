@@ -5,18 +5,25 @@ import { groundAt, spawnSearch } from "./city/plan";
 import { setFloor } from "./player";
 import { Demo } from "./demo";
 import { MAX_HEALTH } from "./hunters";
-import { MapView } from "./mapview";
+import { MapView, RADAR_ZOOMS } from "./mapview";
 import { add, cross, dot, normalize, scale, setWorldSeed, sub, type Vec3 } from "./math";
 import { openSpot, Player, type Input } from "./player";
 import { Renderer, type Camera, LAMP_SLOTS } from "./renderer";
 import { Rides, type Controls } from "./rides";
+import { actionOf, held, keyFor, settings, saveSettings, SettingsDialog, type Action } from "./settings";
 import { TouchControls } from "./touch";
 import { MOMENTS, START_HOUR, STATES, Weather } from "./weather";
 import { World } from "./world";
 
 const params = new URLSearchParams(location.search);
-const ZOOM_IN = new Set(["Equal", "NumpadAdd", "BracketRight"]);
-const ZOOM_OUT = new Set(["Minus", "NumpadSubtract", "BracketLeft"]);
+/** What counts as the page being used, which is what a browser waits for before playing sound. */
+const WAKE_EVENTS = ["pointerdown", "keydown", "touchend", "click"];
+/** What the quality setting means to the renderer; "auto" is missing, and leaves it to the GPU. */
+const QUALITY: Record<string, { msaa: number; shadowSize: number; detailDist: number } | undefined> = {
+  low: { msaa: 1, shadowSize: 1024, detailDist: 150 },
+  medium: { msaa: 2, shadowSize: 2048, detailDist: 250 },
+  high: { msaa: 4, shadowSize: 4096, detailDist: 400 },
+};
 const canvas = document.getElementById("view") as HTMLCanvasElement;
 const startEl = document.getElementById("start")!;
 const statusEl = document.getElementById("status")!;
@@ -127,20 +134,26 @@ async function main(): Promise<void> {
   seedEl.textContent = `city no. ${seed}`;
   seedEl.title = `add ?seed=${seed} to the address to come back to this city`;
   const world = new World(gl, seed);
-  if (Number(params.get("geolod")) > 0) world.detailScale = Number(params.get("geolod"));
-  if (Number(params.get("farlod")) > 0) world.farScale = Number(params.get("farlod"));
+  // draw distance from the settings, unless the address asks for something particular
+  const applyDetail = () => {
+    world.detailScale = Number(params.get("geolod")) || settings.detail;
+    world.farScale = Number(params.get("farlod")) || settings.detail;
+  };
+  applyDetail();
   if (params.get("facecull") === "0") world.faceCull = false;
   loading("generating textures…", 0);
   const textures = await world.textures((f) => loading("generating textures…", f * TEXTURE_SHARE));
   let renderer: Renderer;
   try {
     const num = (k: string) => (params.has(k) ? Number(params.get(k)) : undefined);
+    // the quality preset fills in whatever the address leaves out; "auto" leaves it to the GPU
+    const preset = QUALITY[settings.quality];
     renderer = new Renderer(gl, textures, {
-      msaa: num("msaa"),
-      shadowSize: num("shadowsize"),
+      msaa: num("msaa") ?? preset?.msaa,
+      shadowSize: num("shadowsize") ?? preset?.shadowSize,
       prepass: params.has("prepass") ? params.get("prepass") !== "0" : undefined,
       fxaa: params.has("fxaa") ? params.get("fxaa") !== "0" : undefined,
-      detailDist: num("detail"),
+      detailDist: num("detail") ?? preset?.detailDist,
       aniso: num("aniso"),
       cheap: num("cheap"),
       cloudSize: num("cloudsize"),
@@ -162,7 +175,9 @@ async function main(): Promise<void> {
     gpu.hidden = false;
   }
   const scaleParam = Number(params.get("scale"));
-  if (scaleParam > 0) renderer.scale = scaleParam;
+  /** A fixed internal resolution, from the address or the settings; 0 lets it adapt. */
+  const fixedScale = () => (scaleParam > 0 ? scaleParam : settings.resolution);
+  renderer.scale = fixedScale() || 1;
   // render at CSS-pixel resolution by default: 4x fewer pixels on high-DPI screens
   renderer.maxPixelRatio = Number(params.get("dpr")) || 1;
   const resize = () => renderer.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1);
@@ -190,12 +205,9 @@ async function main(): Promise<void> {
   const dayLength = Number(params.get("daylength"));
   if (params.get("daylength") !== null && dayLength >= 0) weather.dayLength = dayLength;
   if (params.has("shot")) weather.cycle = false;
-  // the score is on unless turned off (U, or ?music=0); the choice is remembered
-  let musicPref: string | null = null;
-  try {
-    musicPref = localStorage.getItem("music");
-  } catch {}
-  const audio = new Audio(params.get("music") !== "0" && musicPref !== "off");
+  // the score is on unless turned off (U, the settings, or ?music=0)
+  const audio = new Audio(params.get("music") !== "0" && settings.music);
+  audio.setVolumes(settings.sfxVolume, settings.musicVolume);
 
   loading("pouring concrete…", CITY_FROM);
   await world.ready(player.pos[0], player.pos[2], params.has("shot") ? 950 : 450, (f) => {
@@ -210,8 +222,27 @@ async function main(): Promise<void> {
   beginEl.textContent = `${verb} to run`;
   beginEl.hidden = false;
   watchEl.hidden = false;
+  document.getElementById("opensettings")!.hidden = false;
   if (params.has("shot")) startEl.classList.add("hidden");
   debug.ready = true;
+
+  // The sound comes up with the city, not with the run. A browser holds audio back until the
+  // page has been clicked or typed into, though, so when it was not by the time loading
+  // finished, the first touch of any kind — the settings, a key, anywhere — wakes it.
+  if (!params.has("shot")) {
+    const wake = () => {
+      audio.start();
+      if (!audio.running) return;
+      for (const type of WAKE_EVENTS) window.removeEventListener(type, wake, true);
+    };
+    for (const type of WAKE_EVENTS) window.addEventListener(type, wake, true);
+    wake();
+    // and it goes quiet with the tab
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) audio.stop();
+      else if (audio.running !== null) audio.start();
+    });
+  }
 
   const rides = new Rides(world, player);
   rides.sync();
@@ -263,14 +294,26 @@ async function main(): Promise<void> {
   let firing = false;
   let notice = "";
   let noticeTime = 0;
-  // hunters chase the player unless turned off (H, or ?hunters=0)
-  let hunt = params.get("hunters") !== "0" && !["shot", "autorun", "autofly"].some((k) => params.has(k));
+  // hunters chase the player unless turned off (H, the settings, or ?hunters=0)
+  let hunt = settings.hunters && params.get("hunters") !== "0" &&
+    !["shot", "autorun", "autofly"].some((k) => params.has(k));
   touchEl.toggleAttribute("data-hunt", hunt);
-  const setHunt = (on: boolean) => {
+  rides.hunters.difficulty = settings.difficulty;
+  const setHunt = (on: boolean, remember = true) => {
+    if (on === hunt) return;
     hunt = on;
     touchEl.toggleAttribute("data-hunt", on);
     if (!on) rides.hunters.clear();
     caption(on ? "hunters on" : "hunters off");
+    if (remember) {
+      settings.hunters = on;
+      saveSettings();
+    }
+  };
+  const setMusic = (on: boolean) => {
+    audio.setMusic(on);
+    settings.music = on;
+    saveSettings();
   };
 
   const interact = () => {
@@ -294,6 +337,47 @@ async function main(): Promise<void> {
   window.addEventListener("wheel", (e) => {
     if (map.open) map.zoomBy(Math.sign(e.deltaY));
   }, { passive: true });
+  // The radar: the same plan again, small and round, in a corner for as long as you play.
+  const radar = new MapView(document.getElementById("radarview") as HTMLCanvasElement, world, {
+    radar: true, zooms: RADAR_ZOOMS,
+  });
+
+  // --- settings
+  const keysEl = document.getElementById("keys")!;
+  /** The key list on the title screen, from the bindings as they stand. */
+  const showKeys = () => {
+    const k = (a: Action) => `<kbd>${keyFor(a) || "—"}</kbd>`;
+    const both = (a: Action, b: Action) => `${k(a)} / ${k(b)}`;
+    keysEl.innerHTML = [
+      `mouse look · ${k("forward")}${k("left")}${k("back")}${k("right")} run · ${k("sprint")} sprint · ` +
+        `${k("walk")} walk · ${k("jump")} jump / climb`,
+      `${k("interact")} get in / out of cars, flyers and subway trains · click shoot · ${k("view")} cockpit view`,
+      `${k("map")} map (${both("zoomIn", "zoomOut")} to zoom) · ${k("hunters")} hunters on / off · ` +
+        `${k("roof")} back to last roof · ${k("music")} music`,
+      `${k("weather")} next weather · ${k("holdWeather")} hold weather · ${both("clockBack", "clockOn")} wind the clock · ` +
+        `${k("holdClock")} hold the clock`,
+      "F3 stats · F4 copy stats · esc pause",
+    ].join("<br />");
+  };
+  showKeys();
+  const settingsDialog = new SettingsDialog((what) => {
+    if (what === "sfxVolume" || what === "musicVolume") audio.setVolumes(settings.sfxVolume, settings.musicVolume);
+    else if (what === "music") audio.setMusic(settings.music);
+    else if (what === "hunters") setHunt(settings.hunters, false);
+    else if (what === "difficulty") rides.hunters.difficulty = settings.difficulty;
+    else if (what === "detail") applyDetail();
+    else if (what === "resolution") {
+      renderer.scale = fixedScale() || 1;
+      slowFrames = 0;
+      resize();
+    } else if (what === "keys") showKeys();
+  });
+  const settingsBtn = document.getElementById("opensettings")!;
+  settingsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    settingsDialog.setOpen(true);
+  });
+  settingsBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
 
   const touch = new TouchControls(touchEl, (action) => {
     if (action === "pause") setMode("title");
@@ -323,7 +407,6 @@ async function main(): Promise<void> {
       played = true;
       beginEl.textContent = `${verb} to continue`;
     }
-    if (m === "title") audio.stop();
     idle = 0;
   }
 
@@ -411,44 +494,43 @@ async function main(): Promise<void> {
       e.preventDefault();
       if (!e.repeat) copyStats();
     }
+    // what the key is bound to in the settings
+    const act = actionOf(e.code);
     // The map is a look at the place, not a move in it: like the stats panel it opens from
     // anywhere, and neither it nor its zoom counts as taking over the demo.
-    if (e.code === "KeyM" && !e.repeat) map.toggle();
-    const zooming = map.open && ZOOM_IN.has(e.code) !== ZOOM_OUT.has(e.code);
-    if (zooming && !e.repeat) map.zoomBy(ZOOM_IN.has(e.code) ? -1 : 1);
-    const looking = e.code === "F3" || e.code === "F4" || e.code === "KeyM" || e.code === "KeyU" || zooming;
+    if (act === "map" && !e.repeat) map.toggle();
+    const zooming = map.open && (act === "zoomIn" || act === "zoomOut");
+    if (zooming && !e.repeat) map.zoomBy(act === "zoomIn" ? -1 : 1);
+    const looking = e.code === "F3" || e.code === "F4" || act === "map" || act === "music" || zooming;
     if (mode === "demo" && !e.repeat && !looking) {
       if (e.code === "Escape") setMode("title");
       else takeOver(false);
     }
     keys.add(e.code);
-    // , and . wind the clock an hour at a time, and keep winding while they are held
-    if (e.code === "Comma" || e.code === "Period") {
-      weather.skip(e.code === "Period" ? 1 : -1);
+    // the clock goes an hour at a time, and keeps winding while the key is held
+    if (act === "clockBack" || act === "clockOn") {
+      weather.skip(act === "clockOn" ? 1 : -1);
       caption(weather.clock);
     }
     if (e.repeat) return;
-    if (e.code === "KeyN") weather.next(6);
-    if (e.code === "KeyL") {
+    if (act === "weather") weather.next(6);
+    if (act === "holdWeather") {
       weather.cycle = !weather.cycle;
       caption(weather.cycle ? "weather drifting" : "weather held");
     }
-    if (e.code === "KeyK") {
+    if (act === "holdClock") {
       weather.running = !weather.running;
       caption(weather.running ? `clock running — ${weather.clock}` : `clock held at ${weather.clock}`);
     }
-    if (e.code === "KeyH" && mode !== "demo") setHunt(!hunt);
-    if (e.code === "KeyU") {
-      const on = audio.toggleMusic();
-      try {
-        localStorage.setItem("music", on ? "on" : "off");
-      } catch {}
-      caption(on ? "music on" : "music off");
+    if (act === "hunters" && mode !== "demo") setHunt(!hunt);
+    if (act === "music") {
+      setMusic(!settings.music);
+      caption(settings.music ? "music on" : "music off");
     }
     if (mode !== "play") return;
-    if (e.code === "KeyR" && !rides.riding) player.respawn();
-    if (e.code === "KeyE") interact();
-    if (e.code === "KeyV" && rides.riding) rides.cockpit = !rides.cockpit;
+    if (act === "roof" && !rides.riding) player.respawn();
+    if (act === "interact") interact();
+    if (act === "view" && rides.riding) rides.cockpit = !rides.cockpit;
   });
   window.addEventListener("keyup", (e) => keys.delete(e.code));
   window.addEventListener("blur", () => {
@@ -487,7 +569,11 @@ async function main(): Promise<void> {
   startEl.addEventListener("pointerdown", (e) => {
     startPointer = e.pointerType;
   });
-  startEl.addEventListener("click", () => play(startPointer === "touch"));
+  startEl.addEventListener("click", () => {
+    // a click beside the settings dialog puts it away rather than starting the run under it
+    if (settingsDialog.open) settingsDialog.setOpen(false);
+    else play(startPointer === "touch");
+  });
   watchEl.addEventListener("click", (e) => {
     e.stopPropagation();
     audio.start();
@@ -524,19 +610,20 @@ async function main(): Promise<void> {
     time += dt;
     rides.lifts.update(time);
 
-    const down = (...codes: string[]) => codes.some((c) => keys.has(c));
+    const down = (a: Action) => held(keys, a);
     // a light push on the stick walks, a full one sprints (it's the throttle in a car)
     const stick = touch.stick;
+    const look = settings.sensitivity;
     const controls: Controls = {
-      moveX: (down("KeyD", "ArrowRight") ? 1 : 0) - (down("KeyA", "ArrowLeft") ? 1 : 0) || touch.moveX,
-      moveZ: (down("KeyW", "ArrowUp") ? 1 : 0) - (down("KeyS", "ArrowDown") ? 1 : 0) || touch.moveZ,
-      up: down("Space") || touch.held.has("jump"),
-      down: down("ControlLeft", "ControlRight", "KeyC") || touch.held.has("down") ||
+      moveX: (down("right") ? 1 : 0) - (down("left") ? 1 : 0) || touch.moveX,
+      moveZ: (down("forward") ? 1 : 0) - (down("back") ? 1 : 0) || touch.moveZ,
+      up: down("jump") || touch.held.has("jump"),
+      down: down("walk") || touch.held.has("down") ||
         (!rides.riding && stick > 0 && stick < 0.45),
-      sprint: down("ShiftLeft", "ShiftRight") || stick > 0.92,
-      fire: firing || down("KeyF") || touch.held.has("fire"),
-      mouseDX: mouseDX + touch.lookDX,
-      mouseDY: mouseDY + touch.lookDY,
+      sprint: down("sprint") || stick > 0.92,
+      fire: firing || down("fire") || touch.held.has("fire"),
+      mouseDX: (mouseDX + touch.lookDX) * look,
+      mouseDY: (mouseDY + touch.lookDY) * look * (settings.invertY ? -1 : 1),
     };
     touch.lookDX = touch.lookDY = 0;
     if (mode === "demo") demo.update(dt, controls);
@@ -595,7 +682,9 @@ async function main(): Promise<void> {
     ];
     const vel: Vec3 = [0, 1, 2].map((i) => (eye[i] - prevEye[i]) / Math.max(dt, 1e-4)) as Vec3;
     prevEye = eye;
-    const fovDeg = rideCam?.fov ?? player.fov;
+    // the settings move the whole range: on foot at a standstill is 76° unless changed there
+    const fovShift = params.has("fov") || params.has("shot") ? 0 : settings.fov - 76;
+    const fovDeg = (rideCam?.fov ?? player.fov) + fovShift;
     const cam: Camera = { eye, fwd, right, up, fov: (fovDeg * Math.PI) / 180, vel };
 
     // vehicles, hunters, weapons, effects
@@ -632,7 +721,9 @@ async function main(): Promise<void> {
     noticeTime -= dt;
     const promptNow = !running ? "" : noticeTime > 0 ? notice : rides.promptText();
     // touch players tap the prompt itself, so drop the key name
-    prompt(touchPlay ? promptNow.replace(/^E\s+/, "") : promptNow);
+    // and everyone else sees whichever key does it now
+    const useKey = keyFor("interact").toUpperCase();
+    prompt(promptNow.replace(/^E\s+/, touchPlay ? "" : useKey ? `${useKey}  ` : ""));
     if (running && touchPlay) touch.setMode(rides.flyer ? "flyer" : rides.car ? "car" : "foot");
     const armed = rides.flyer !== null || (!rides.riding && hunt);
     crosshairEl.classList.toggle("show", running && armed && !params.has("shot"));
@@ -693,13 +784,22 @@ async function main(): Promise<void> {
     debug.frames++;
     // where the runner is, and which way they are pointed — the camera's heading, so it is
     // the car's or the flyer's when they are in one
-    map.draw(focus[0], focus[2], Math.atan2(fwd[0], fwd[2]));
+    const heading = Math.atan2(fwd[0], fwd[2]);
+    map.draw(focus[0], focus[2], heading);
+    // the radar, while playing — not over the big map, which already shows the same thing
+    const radarOn = running && settings.radar && !map.open && params.get("hud") !== "0" && !params.has("shot");
+    if (radarOn !== radar.open) radar.setOpen(radarOn);
+    if (radarOn) {
+      radar.zoomTo(rides.riding ? 1 : 0);
+      const blips = hunted ? hunters.list.filter((x) => !x.dead).map((x) => [x.center[0], x.center[2]]) : [];
+      radar.draw(focus[0], focus[2], heading, blips);
+    }
 
     // Adaptive resolution, aimed at the display's frame budget: drop the internal
     // scale while frames run long and give it back once there is room to spare.
     // Both directions need a full second of agreement, so the scale cannot oscillate.
     frameAvg += (dt * 1000 - frameAvg) * 0.05;
-    if (!scaleParam && time > 4) {
+    if (!fixedScale() && time > 4) {
       const budget = 16.7; // one 60 Hz frame
       // Frame time only shows trouble: once vsync locks it at the budget it says nothing
       // about the headroom left. GPU pass timings do, so they decide when to go back up.

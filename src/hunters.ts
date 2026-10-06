@@ -19,8 +19,15 @@ import { InstanceList, type Traffic } from "./vehicles/traffic";
 export const MAX_HEALTH = 100;
 const REGEN_DELAY = 5; // seconds without a hit before health comes back
 const REGEN = 10; // per second
-const MAX_HUNTERS = 5;
 const GRACE = 10; // seconds before the first hunter shows up
+
+/** How hard the hunt is: how many come at most, how fast they build up, what a bolt does. */
+export const DIFFICULTY = {
+  easy: { most: 3, every: 75, damage: 0.55, regen: 1.5 },
+  normal: { most: 5, every: 45, damage: 1, regen: 1 },
+  hard: { most: 7, every: 30, damage: 1.4, regen: 0.7 },
+};
+export type Difficulty = keyof typeof DIFFICULTY;
 const COAT: Vec3 = [0.07, 0.07, 0.08];
 const BLACK: Vec3 = [0.05, 0.05, 0.06]; // the hunters' own vehicles
 const RANGE = { foot: 55, car: 70, flyer: 130 };
@@ -159,6 +166,7 @@ export class Hunters implements BoltTargets {
   /** Bring in new hunters as the pressure builds (tests turn this off). */
   auto = true;
   health = MAX_HEALTH;
+  difficulty: Difficulty = "normal";
   /** 0..1, flashes when you're hit. */
   hurt = 0;
   /** Hits taken so far (for sound). */
@@ -183,7 +191,8 @@ export class Hunters implements BoltTargets {
 
   /** How many hunters may be out at once. */
   get pressure(): number {
-    return Math.min(MAX_HUNTERS, 2 + Math.floor(this.clock / 45));
+    const d = DIFFICULTY[this.difficulty];
+    return Math.min(d.most, 2 + Math.floor(this.clock / d.every));
   }
 
   /** Call everyone off (demo, toggled off). */
@@ -211,7 +220,7 @@ export class Hunters implements BoltTargets {
     this.clock += dt;
     this.sinceHit += dt;
     this.hurt = Math.max(0, this.hurt - dt * 1.2);
-    if (this.sinceHit > REGEN_DELAY) this.health = Math.min(MAX_HEALTH, this.health + REGEN * dt);
+    if (this.sinceHit > REGEN_DELAY) this.health = Math.min(MAX_HEALTH, this.health + REGEN * DIFFICULTY[this.difficulty].regen * dt);
 
     if (this.auto) {
       this.spawnTimer -= dt;
@@ -445,6 +454,7 @@ export class Hunters implements BoltTargets {
 
   private damage(n: number): void {
     if (this.health <= 0) return;
+    n *= DIFFICULTY[this.difficulty].damage;
     this.health -= n;
     this.hurt = Math.min(1, this.hurt + n / 20);
     this.sinceHit = 0;

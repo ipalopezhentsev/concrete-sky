@@ -17,6 +17,8 @@ import type { MapTile, World } from "./world";
 
 /** How wide a view of the city the panel shows, in metres. */
 const ZOOMS = [500, 1000, 2000, 4000];
+/** The radar's: close in on foot, further out in something fast. */
+export const RADAR_ZOOMS = [360, 800];
 /** How far past the panel the off-screen plan reaches, in CSS pixels. */
 const MARGIN = 110;
 /** Width of a railway deck, which rides over the arterial it follows. */
@@ -30,7 +32,17 @@ const INK = {
   tube: "#5fb8a6",
   water: "#2d5673",
   you: "#f2efe9",
+  hunter: "#e64030",
 };
+
+export interface MapOptions {
+  zooms?: number[];
+  /**
+   * The radar: a round window turned so the way the runner faces is always up, with the
+   * hunters on it, and none of the big map's furniture.
+   */
+  radar?: boolean;
+}
 
 export class MapView {
   open = false;
@@ -44,14 +56,19 @@ export class MapView {
   private planVersion = -1;
   private planSize = 0;
   private waiting = 0;
+  private zooms: number[];
+  private radar: boolean;
 
-  constructor(private canvas: HTMLCanvasElement, private world: World) {
+  constructor(private canvas: HTMLCanvasElement, private world: World, opts: MapOptions = {}) {
     this.ctx = canvas.getContext("2d")!;
+    this.zooms = opts.zooms ?? ZOOMS;
+    this.radar = opts.radar ?? false;
+    if (this.radar) this.zoom = 0;
   }
 
   /** Metres across the panel at the current zoom. */
   get across(): number {
-    return ZOOMS[this.zoom];
+    return this.zooms[this.zoom];
   }
 
   /** Tiles of the view still being worked out. Zero once the plan on screen is complete. */
@@ -71,7 +88,12 @@ export class MapView {
 
   /** One step in (`-1`) or out (`+1`). */
   zoomBy(step: number): void {
-    const z = Math.max(0, Math.min(ZOOMS.length - 1, this.zoom + step));
+    this.zoomTo(this.zoom + step);
+  }
+
+  /** Straight to a zoom level, by index. */
+  zoomTo(level: number): void {
+    const z = Math.max(0, Math.min(this.zooms.length - 1, level));
     if (z !== this.zoom) {
       this.zoom = z;
       this.planZoom = -1;
@@ -84,7 +106,7 @@ export class MapView {
    * Cheap to call every frame: it works out whether the plan underneath is still good for
    * where the runner is standing and only redraws it when it is not.
    */
-  draw(x: number, z: number, yaw: number): void {
+  draw(x: number, z: number, yaw: number, blips: readonly (readonly number[])[] = []): void {
     const side = this.canvas.clientWidth;
     if (!this.open || side < 8) return;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -99,6 +121,10 @@ export class MapView {
     const ctx = this.ctx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, side, side);
+    if (this.radar) {
+      this.sweep(ctx, x, z, yaw, side, scale, blips);
+      return;
+    }
     // the plan, shifted by however far the runner has walked since it was drawn
     const ox = (x - this.planAt[0]) * scale, oz = (z - this.planAt[1]) * scale;
     ctx.drawImage(this.plan, -MARGIN - ox, -MARGIN - oz, this.planSize, this.planSize);
@@ -107,10 +133,82 @@ export class MapView {
     this.furniture(ctx, side, scale);
   }
 
+  /**
+   * The radar's frame: the same plan, cut round and turned so straight ahead is up, the
+   * hunters as blips — pinned to the rim when they are further out than it reaches — and a
+   * tick on the rim for north, since the map no longer keeps it at the top.
+   */
+  private sweep(
+    ctx: CanvasRenderingContext2D, x: number, z: number, yaw: number, side: number, scale: number,
+    blips: readonly (readonly number[])[],
+  ): void {
+    const c = side / 2, rim = c - 1;
+    // world -> radar: centre on the runner, then turn their forward, (sin yaw, cos yaw), to up
+    const turn = yaw - Math.PI;
+    const cos = Math.cos(turn), sin = Math.sin(turn);
+    const toScreen = (wx: number, wz: number): [number, number] => {
+      const dx = (wx - x) * scale, dz = (wz - z) * scale;
+      return [c + dx * cos - dz * sin, c + dx * sin + dz * cos];
+    };
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(c, c, rim, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.translate(c, c);
+    ctx.rotate(turn);
+    const ox = (x - this.planAt[0]) * scale, oz = (z - this.planAt[1]) * scale;
+    const half = this.planSize / 2;
+    ctx.drawImage(this.plan, -half - ox, -half - oz, this.planSize, this.planSize);
+    ctx.restore();
+
+    // the cone of view, and the runner, both facing up
+    this.marker(ctx, c, c, Math.PI, scale);
+
+    for (const b of blips) {
+      let [bx, by] = toScreen(b[0], b[1]);
+      const dx = bx - c, dy = by - c, d = Math.hypot(dx, dy);
+      const edge = rim - 5;
+      const out = d > edge;
+      if (out) [bx, by] = [c + (dx / d) * edge, c + (dy / d) * edge];
+      ctx.fillStyle = INK.hunter;
+      ctx.strokeStyle = "rgba(12, 13, 15, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = out ? 0.6 : 1;
+      ctx.beginPath();
+      ctx.arc(bx, by, out ? 3 : 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = "rgba(233, 231, 226, 0.35)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(c, c, rim, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // north: (0, -1) in the world
+    const [nx, ny] = toScreen(x, z - 1e3 / scale);
+    const nd = Math.hypot(nx - c, ny - c);
+    const ux = (nx - c) / nd, uy = (ny - c) / nd;
+    ctx.font = "bold 10px ui-monospace, Consolas, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(12, 13, 15, 0.8)";
+    ctx.beginPath();
+    ctx.arc(c + ux * (rim - 9), c + uy * (rim - 9), 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(242, 239, 233, 0.9)";
+    ctx.fillText("N", c + ux * (rim - 9), c + uy * (rim - 9) + 0.5);
+  }
+
   /** Redraw the off-screen plan if the panel has outgrown it, or what it holds has changed. */
   private ensurePlan(x: number, z: number, side: number, scale: number, dpr: number): void {
     const size = side + MARGIN * 2;
-    const moved = Math.max(Math.abs(x - this.planAt[0]), Math.abs(z - this.planAt[1])) * scale;
+    // as the crow flies, not along an axis: the radar turns the plan, so a diagonal step
+    // brings a corner of the panel nearer the plan's edge than either axis alone would say
+    const moved = Math.hypot(x - this.planAt[0], z - this.planAt[1]) * scale;
     if (this.planZoom === this.zoom && this.planVersion === this.world.mapVersion &&
         this.planSize === size && moved < MARGIN - 1) return;
     if (this.plan.width !== Math.round(size * dpr)) this.plan.width = this.plan.height = Math.round(size * dpr);
