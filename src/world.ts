@@ -2,7 +2,7 @@
 // meshes are uploaded as they arrive, and collision boxes are served per cell.
 
 import { buildPlanRegion } from "./city/plan";
-import { CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Lift, type Pad, type ParkedCar, type RegionMesh } from "./city/generate";
+import { CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Lift, type Pad, type ParkedCar, type RegionMesh, type Roof } from "./city/generate";
 import { Mesh, type GL } from "./gl";
 import { aabbVisible, type Vec3 } from "./math";
 import { TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
@@ -41,6 +41,7 @@ interface Region {
   cars: (ParkedCar & { id: string })[];
   lifts: Lift[];
   boats: (Pad & { id: string })[];
+  roofs: Roof[];
   stations: Station[];
   groundCount: number;
   cells: CellRange[];
@@ -112,6 +113,10 @@ export class World {
 
   *boats(): Iterable<Pad & { id: string }> {
     for (const r of this.regions.values()) yield* r.boats;
+  }
+
+  *roofs(): Iterable<Roof> {
+    for (const r of this.regions.values()) yield* r.roofs;
   }
 
   /**
@@ -260,6 +265,7 @@ export class World {
       cars: m.cars,
       lifts: m.lifts,
       boats: m.boats,
+      roofs: m.roofs,
       stations: m.stations as Station[],
       groundCount: m.groundCount,
       cells: m.cells,

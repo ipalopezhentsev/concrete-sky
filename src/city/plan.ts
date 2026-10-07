@@ -2,7 +2,7 @@
 // so the pieces that used to be four axis-aligned boxes are now walls of turned boxes wrapped
 // round an outline, with the inside filled by strips that nobody ever sees.
 
-import { hashInt, Rng } from "../math";
+import { hashInt, Rng, type Vec3 } from "../math";
 import {
   assembleRegion, Builder, CELL, LIFT_SIZE, REGION, REGION_CELLS, type Part, type RegionMesh,
 } from "./generate";
@@ -433,6 +433,7 @@ function buildBlock(site: Site, b: Builder): void {
       parapet(b, cap, top, 1.0, tint);
     } else {
       slab(b, shrink(cap, 1.2), top, top + r.uniform(2, 4.5), Mat.Board, tint);
+      b.roofs.push({ y: top, poly: cap });
       const c = centroid(cap);
       if (top - E > 220) {
         // a mast and a light on the ones that stand above everything
@@ -3659,6 +3660,44 @@ export function inEntrance(st: Station, x: number, z: number, pad: number): bool
   return u > -FOOT - pad && u < st.reach + pad && Math.abs(dx * c - dz * sn) < SHAFT_X + pad;
 }
 
+/**
+ * The way down into a station, for anyone walking it: x, y, z from the pavement off the end of
+ * the opening, down the flight to the chamber at its foot, along the passage to the concourse
+ * and down the stair in the well, to the platform just past its foot. With it, a point on the
+ * platform `m` metres along the line from the middle of the station and `off` across it,
+ * how far the platform runs either way, and where the stair from the concourse comes down.
+ */
+export function stationWay(st: Station): {
+  way: Vec3[]; platform: (m: number, off: number) => Vec3; hall: number; well: [number, number]; half: number;
+} {
+  const mezz = st.y + MEZZ, plat = st.y + PLAT_RISE, end = st.reach;
+  // the same frames `station` builds in: the entrance's, with +x towards the line and the stair
+  // climbing along `lean`, and the line's own, with +z along it
+  const frame = (x: number, z: number, yaw: number) => {
+    const a = yawStep(-yaw) * YAW_STEP, cs = Math.cos(a), sn = Math.sin(a);
+    return (lx: number, lz: number, y: number): Vec3 => [x + lx * cs - lz * sn, y, z + lx * sn + lz * cs];
+  };
+  const E = frame(st.shaftX, st.shaftZ, st.yaw), L = frame(st.x, st.z, st.yaw);
+  const at = (lx: number, u: number, y: number) => E(lx, st.lean * u, y);
+  const scale = arteryScale(st.axis, st.line, st.s);
+  const platform = (m: number, off: number): Vec3 => {
+    const { p, dir } = arteryFrame(st.axis, st.line, st.s + m / scale);
+    return [p[0] - dir[1] * off, plat, p[1] + dir[0] * off];
+  };
+  const street = at(0, end + SURROUND + 1.5, st.top);
+  street[1] = paveAt(street[0], street[2]);
+  return {
+    way: [
+      street, at(0, end + 0.6, st.top), at(0, end - LAND, st.top), at(0, FOOT, mezz), at(0, 0, mezz),
+      L(0, 0, mezz), L(0, -4, mezz), L(0, -WELL - 4, plat), L(0, -WELL - 6.5, plat),
+    ],
+    platform,
+    hall: FLAT_BAYS * SUB_BAY * scale - 0.3,
+    well: [-WELL - 4, -4],
+    half: PASS_HALF,
+  };
+}
+
 /** The well the stair comes down through, over the middle of the platform. */
 const WELL = 12;
 /** Half-width of the passage from the entrance to the well. */
@@ -4194,11 +4233,13 @@ function flight(
  * through each other and hanging out over the kerb.
  */
 function perimeterStair(
-  b: Builder, poly: Vec2[], top: number, tint: Tint,
-): { treads: Vec2[]; arrived: boolean; arrival?: Vec2 } {
+  b: Builder | null, poly: Vec2[], top: number, tint: Tint,
+): { treads: Vec2[]; arrived: boolean; arrival?: Vec2; way: Vec3[] } {
   const RISE = 0.4, RUN = 1.15, WIDE = 3.4, SLAB = 0.42;
   const treads: Vec2[] = [];
-  const gave = (arrived: boolean, arrival?: Vec2) => ({ treads, arrived, arrival });
+  /** The line up the middle of it, for anyone walking it: see `stairOf`. */
+  const way: Vec3[] = [];
+  const gave = (arrived: boolean, arrival?: Vec2) => ({ treads, arrived, arrival, way });
   // As close in to the building as it can run without going under the deck: the deck oversails
   // the facade by nearly a metre, and a stair tucked under that edge drives its top flights
   // straight through the deck slab. Out in the middle of the pavement, which is where it used
@@ -4228,6 +4269,10 @@ function perimeterStair(
   // from the pavement where it starts, which follows the street and not the podium
   let y = paveAt(path[start][0], path[start][1]);
   let last: { m: Vec2; leg: ReturnType<typeof legOf> } | null = null;
+  {
+    const { a, ux, uz } = legOf(0);
+    way.push([a[0] - ux * 1.5, paveAt(a[0] - ux * 1.5, a[1] - uz * 1.5), a[1] - uz * 1.5], [a[0], y, a[1]]);
+  }
   for (let k = 0; k < n * 3 && y < top; k++) {
     const leg = legOf(k);
     // steps stop half a stair's width short of the corner, which is exactly the near edge of
@@ -4247,19 +4292,20 @@ function perimeterStair(
       // the plane through the nosings, dropped a little so the steps stand proud of it
       const crown = (stepY(0) + stepY(steps - 1)) / 2 - 0.06;
       const rise = stepY(steps - 1) - stepY(0) + RISE;
-      b.box(mx - span / 2, crown - SLAB, mz - WIDE / 2, mx + span / 2, crown, mz + WIDE / 2,
+      b?.box(mx - span / 2, crown - SLAB, mz - WIDE / 2, mx + span / 2, crown, mz + WIDE / 2,
         Mat.Board, tint, Finish.Cast, { turn: leg.turn, rise, detail: false });
       // the parapet, raking alongside in one piece
       const edge = WIDE / 2 - 0.11;
       const px = mx + leg.nx * edge, pz = mz + leg.nz * edge;
-      b.box(px - span / 2, crown, pz - 0.11, px + span / 2, crown + 1.05, pz + 0.11,
+      b?.box(px - span / 2, crown, pz - 0.11, px + span / 2, crown + 1.05, pz + 0.11,
         Mat.Panel, tint, 0, { turn: leg.turn, rise, collide: false });
       for (let i = 0; i < steps; i++) {
         const sy = stepY(i), s = i * run + run / 2;
         const tx = leg.a[0] + leg.ux * s, tz = leg.a[1] + leg.uz * s;
         treads.push([tx, tz]);
+        way.push([tx, sy, tz]);
         last = { m: [tx, tz], leg };
-        b.box(tx - run / 2, sy - 0.55, tz - WIDE / 2, tx + run / 2, sy, tz + WIDE / 2,
+        b?.box(tx - run / 2, sy - 0.55, tz - WIDE / 2, tx + run / 2, sy, tz + WIDE / 2,
           Mat.Board, tint, Finish.Boards, { turn: leg.turn, detail: false });
       }
       y = stepY(steps - 1);
@@ -4271,14 +4317,15 @@ function perimeterStair(
     // opens a wedge at one side of it — which is the second hole. The flight leaving starts at
     // the corner itself and climbs off the landing, so there is no joint on that side at all.
     const v = leg.c;
-    b.box(v[0] - WIDE / 2, y - SLAB, v[1] - WIDE / 2, v[0] + WIDE / 2, y, v[1] + WIDE / 2,
+    b?.box(v[0] - WIDE / 2, y - SLAB, v[1] - WIDE / 2, v[0] + WIDE / 2, y, v[1] + WIDE / 2,
       Mat.Board, tint, Finish.Cast, { turn: leg.turn, detail: false });
     // the parapet carried round the landing as far as the corner, so the hand never leaves it
     const lx = v[0] - leg.ux * (WIDE / 4) + leg.nx * (WIDE / 2 - 0.11);
     const lz = v[1] - leg.uz * (WIDE / 4) + leg.nz * (WIDE / 2 - 0.11);
-    b.box(lx - WIDE / 4, y, lz - 0.11, lx + WIDE / 4, y + 1.05, lz + 0.11,
+    b?.box(lx - WIDE / 4, y, lz - 0.11, lx + WIDE / 4, y + 1.05, lz + 0.11,
       Mat.Panel, tint, 0, { turn: leg.turn, collide: false });
     treads.push([v[0], v[1]]);
+    way.push([v[0], y, v[1]]);
   }
 
   // Where it arrives, a landing reaching in from the stair to the edge of the deck. Laid at
@@ -4289,8 +4336,9 @@ function perimeterStair(
   // pushed in far enough to get right over the deck edge and a little way on to it, and set
   // three centimetres under the deck so the two do not argue over the strip they share
   const cx = m[0] - leg.nx * 1.2, cz = m[1] - leg.nz * 1.2;
-  b.box(cx - WIDE / 2, top - 1.4, cz - (WIDE / 2 + 0.6), cx + WIDE / 2, top - 0.03, cz + (WIDE / 2 + 0.6),
+  b?.box(cx - WIDE / 2, top - 1.4, cz - (WIDE / 2 + 0.6), cx + WIDE / 2, top - 0.03, cz + (WIDE / 2 + 0.6),
     Mat.Deck, tint, 0, { turn: leg.turn, detail: false });
+  way.push([cx, top, cz], [cx - leg.nx * 2.3, top, cz - leg.nz * 2.3]);
   return gave(true, [cx, cz]);
 }
 
@@ -4527,6 +4575,18 @@ export function deckOf(site: Site): number {
   const poly = cellOf(site);
   return (poly && poly.length >= 3 ? blockBase(poly) : groundAt(site.p[0], site.p[1]))
     + DECKS[hashInt(Math.round(site.p[0]), Math.round(site.p[1]), 301) % DECKS.length];
+}
+
+/**
+ * The way up a block's stair, for anyone walking it: x, y, z from the pavement a step short of
+ * its foot, up the middle of every flight and across every landing, and on over the arrival
+ * onto the deck. Null where the block has no stair, or one that never gets there.
+ */
+export function stairOf(site: Site): Vec3[] | null {
+  const poly = pavementOf(site);
+  if (!poly) return null;
+  const stair = perimeterStair(null, poly, deckOf(site), [1, 1, 1]);
+  return stair.arrived ? stair.way : null;
 }
 
 /**

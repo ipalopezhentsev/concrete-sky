@@ -10,8 +10,10 @@ skyways 36 or 42 m up, some railed, some covered and some just a bare
 concrete beam. Where a bridge has fallen, its broken stubs are still there to
 jump at a sprint.
 Cars stream along the avenues and flyers cross the air above the streets.
-People walk the pavements round the blocks, busiest at the rush hours and
-thinning out at night and in the rain, and they step out of your way.
+People walk the pavements round the blocks and the decks above them, climb
+the stairs, stroll round the roofs and go down into the subway to wait on the
+platforms. They are busiest at the rush hours, thin out at night and in the
+rain, and step out of your way.
 Take a parked flyer from a landing pad, fly to another roof and step out,
 shoot other flyers out of the sky, or take a car and drive. Hunters come after
 you on foot, in cars and in flyers, and there's nothing to do but stay ahead

@@ -134,6 +134,12 @@ export interface Pad {
   yaw: number;
 }
 
+/** A tower's flat roof, where people can stand: its level and its outline. */
+export interface Roof {
+  y: number;
+  poly: [number, number][];
+}
+
 export class Builder {
   data: number[] = [];
   count = 0;
@@ -144,6 +150,7 @@ export class Builder {
   /** Small craft tied up along a quay, which can be boarded. */
   boats: Pad[] = [];
   lifts: Lift[] = [];
+  roofs: Roof[] = [];
   /** Boxes whose underside is buried in solid ground and can never be seen; see `buried`. */
   bottomless = new Set<number>();
   /** Concrete finish given to Mat.Board boxes that don't ask for one. */
@@ -1922,6 +1929,7 @@ export interface RegionMesh {
   cars: (ParkedCar & { id: string })[];
   lifts: (Lift & { id: string })[];
   boats: (Pad & { id: string })[];
+  roofs: Roof[];
   /** Subway stations whose platform is in this region; see src/city/plan.ts. */
   stations: unknown[];
   maxHeight: number;
@@ -2273,6 +2281,7 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
   return {
     rx, rz, vertices, positions: positionsOf(vertices, v), indices: indices.slice(0, idx),
     groundCount, cells: ranges, pads, cars, lifts, boats, stations: [], maxHeight, colliders,
+    roofs: cells.flatMap(({ b }) => b.roofs),
     lamps: cells.flatMap(({ b }) => b.lamps),
   };
 }

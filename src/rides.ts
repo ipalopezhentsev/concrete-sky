@@ -193,7 +193,7 @@ export class Rides {
     this.parking.sync(this.world.pads(), this.world.parkedCars(), this.world.boats());
     this.stations = [...this.world.stations()];
     this.lifts.sync(this.world.lifts());
-    this.pedestrians.sync(this.world.lifts(), this.stations);
+    this.pedestrians.sync(this.world.lifts(), this.stations, this.world.pads(), this.world.roofs());
   }
 
   /**
@@ -437,12 +437,12 @@ export class Rides {
   /** Whoever people on the pavement step out of the way of: the runner, and anything driven at them. */
   private inTheWay(): Avoid[] {
     const out: Avoid[] = [];
-    if (this.car) out.push({ x: this.car.pos[0], z: this.car.pos[2], r: this.car.van ? 3.4 : 2.9 });
-    else if (!this.riding) out.push({ x: this.player.pos[0], z: this.player.pos[2], r: 0.8 });
+    if (this.car) out.push({ x: this.car.pos[0], y: this.car.pos[1], z: this.car.pos[2], r: this.car.van ? 3.4 : 2.9 });
+    else if (!this.riding) out.push({ x: this.player.pos[0], y: this.player.pos[1], z: this.player.pos[2], r: 0.8 });
     for (const h of this.hunters.list) {
       if (h.dead || h.flyer) continue;
       const p = h.pos;
-      out.push({ x: p[0], z: p[2], r: h.car ? 2.9 : 0.8 });
+      out.push({ x: p[0], y: p[1], z: p[2], r: h.car ? 2.9 : 0.8 });
     }
     return out;
   }
