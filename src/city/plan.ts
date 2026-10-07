@@ -337,17 +337,18 @@ function buildBlock(site: Site, b: Builder): void {
   const tint = r.pick(TINTS);
   b.finish = r.pick([Finish.Boards, Finish.Boards, Finish.Ribbed, Finish.Cast]);
 
-  // The block is a terrace cut into the hill: flat at its own level, with the difference to
-  // the ground round it made up by the wall its pavement stands on. Every block gets this,
-  // slivers included — the ground is not laid under blocks, so one left bare is a hole.
+  // The pavement is the ground's (see `terrain`): the street's own surface carried in to the
+  // foot of the podium, so it is level with the road all round. A sliver left between streets
+  // is nothing else.
+  if (!podiumOf(poly)) return;
+  const face = shrink(poly, WALK);
+  // The podium is flat, at the level of the street round it; where the street falls away below
+  // that it stands on a plinth, and where it climbs above, the pavement runs up its wall.
   const base = blockBase(poly);
   let lowest = base;
-  for (const [px, pz] of poly) lowest = Math.min(lowest, groundAt(px, pz));
-  extrude(b, poly, lowest - 16, base, Mat.Board, tint, Finish.Cast, { wall: 4, strip: 14, detail: false });
-  slab(b, poly, base, base + 0.18, Mat.Paving, [1, 1, 1]);
-  if (spanOf(poly) < 16) return; // a sliver left between streets; leave it as pavement
-  const face = shrink(poly, WALK);
-  if (face.length < 3 || spanOf(face) < 12) return;
+  for (const [px, pz] of face) lowest = Math.min(lowest, paveAt(px, pz));
+  extrude(b, face, lowest - 16, base, Mat.Board, tint, Finish.Cast, { wall: 4, strip: 14, detail: false });
+  slab(b, face, base, base + 0.18, Mat.Paving, [1, 1, 1]);
 
   const E = base + DECKS[hashInt(Math.round(site.p[0]), Math.round(site.p[1]), 301) % DECKS.length];
   const dens = grain(site.p[0], site.p[1]);
@@ -369,11 +370,11 @@ function buildBlock(site: Site, b: Builder): void {
     r.pick([Win.Ribbon, Win.Grid, Win.Punched, Win.Crate]), { wall: 3.2, strip: 13 });
   const deck = shrink(poly, WALK - 0.9);
   slab(b, deck, E - 1.4, E, Mat.Deck, tint);
-  const stair = perimeterStair(b, poly, base + 0.18, E, tint);
+  const stair = perimeterStair(b, poly, E, tint);
   parapet(b, deck, E, 1.05, tint, stair.arrival ? [stair.arrival] : []);
   // a block whose perimeter is too short to climb has to have the lift, or its deck — and the
   // flyer standing on it — is somewhere nothing can reach
-  blockLifts(b, poly, base, E, tint, stair.treads, !stair.arrived);
+  blockLifts(b, poly, E, tint, stair.treads, !stair.arrived);
   deckBridges(b, site, E, tint);
   deckPads(b, poly, E);
 
@@ -1358,11 +1359,27 @@ function area2(poly: Frag): number {
 
 const SLIVER = 1e-4;
 
+/** The sides of a convex outline, either way round, as functions that are positive outside each. */
+function polySides(poly: Vec2[]): ((p: Vec2) => number)[] {
+  const turn = area2(poly) > 0 ? 1 : -1;
+  return poly.map((a, k) => {
+    const b = poly[(k + 1) % poly.length];
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const nx = (b[1] - a[1]) / l * turn, nz = -(b[0] - a[0]) / l * turn;
+    return (p: Vec2) => (p[0] - a[0]) * nx + (p[1] - a[1]) * nz;
+  });
+}
+
 /** A convex polygon less a lane, as the convex pieces left outside it. */
 function subtractLane(poly: Frag, l: Lane): Frag[] {
+  return subtractSides(poly, laneSides(l));
+}
+
+/** A convex polygon less the convex region inside all of `sides`, as the convex pieces left. */
+function subtractSides(poly: Frag, sides: ((p: Vec2) => number)[]): Frag[] {
   const out: Frag[] = [];
   let cur = poly;
-  for (const side of laneSides(l)) {
+  for (const side of sides) {
     const outside = clipHalf(cur, (p) => -side(p));
     if (outside.length >= 3 && Math.abs(area2(outside)) > SLIVER) out.push(outside);
     cur = clipHalf(cur, side);
@@ -1795,7 +1812,8 @@ function channelCap(x: number, z: number): number {
  * tiles sharing an edge share both its corners, so they meet along it.
  */
 function terrain(
-  b: Builder, solid: Builder, x0: number, z0: number, covered: (x: number, z: number) => Cover | null, lanes: Piece[],
+  b: Builder, solid: Builder, x0: number, z0: number, covered: (x: number, z: number) => Cover | null,
+  blocks: Cover[], lanes: Piece[],
 ): void {
   const t: Tint = [0.96, 0.96, 0.97];
   const BED: Tint = [0.30, 0.31, 0.27];
@@ -1810,6 +1828,8 @@ function terrain(
   // How high the ground may stand at each corner for the road surface over it, if any: a
   // little under it, so that where the two are laid over the same ground the road is on top.
   const under = new Float64Array(CW * CW).fill(Infinity);
+  // the pavement's height at each corner inside a block, which nothing afterwards may move
+  const paved = new Float64Array(CW * CW).fill(NaN);
 
   for (let i = 0; i <= W; i++) {
     for (let j = 0; j <= W; j++) {
@@ -1817,17 +1837,24 @@ function terrain(
       let h = terrainAt(x, z), seed = -Infinity;
       const over = roadTopAt(x, z);
       if (over !== null) under[node(i, j)] = over - ROAD_BED;
-      const on = covered(x, z);
+      // Inside a block the ground is its pavement, and the pavement is the road's own surface
+      // carried on past the kerb (see `paveAt`): level with the street at every point of it,
+      // and so with every corner of the ground round it. It used to be held at the block's
+      // level, the ground under its middle, which on a hillside is metres under the street on
+      // the uphill side — every tile across the outline a plane from the street down to it, a
+      // row of wedges, and with those cut away a trench along the kerb.
+      if (covered(x, z)) {
+        paved[node(i, j)] = C[node(i, j)] = paveAt(x, z);
+        continue;
+      }
       // under the carriageway over it, and coming down to meet one it stands beside
       h = Math.min(h, roadCut(lanes, x, z), under[node(i, j)]);
-      if (on) h = Math.min(h, on.base - 0.05);
       // Inside the channel the ground is riverbed, and the bed is under the water, not level
       // with it: left at the height the land happens to be, it stands up through the surface
       // wherever it is a few centimetres high. How far back that cut runs, and what happens
       // between it and the quay, is `channelCap`.
       h = Math.min(h, channelCap(x, z));
       if (over !== null) seed = Math.max(seed, over);
-      if (on) seed = Math.max(seed, on.base);
       // A road standing over the ground has to be reachable from it, but no higher than the
       // apron can carry within the padding this grid was given, or two regions sharing a
       // corner would not agree on it.
@@ -1845,13 +1872,14 @@ function terrain(
       for (let c = 0; c <= W; c++) {
         const j = jFwd ? c : W - c;
         const o = node(i, j);
+        if (!Number.isNaN(paved[o])) continue;
         let want = C[o];
         if (i > 0) want = Math.max(want, C[node(i - 1, j)] - rise);
         if (i < W) want = Math.max(want, C[node(i + 1, j)] - rise);
         if (j > 0) want = Math.max(want, C[node(i, j - 1)] - rise);
         if (j < W) want = Math.max(want, C[node(i, j + 1)] - rise);
         // never above what covers this corner — the cap came first and still holds
-        C[o] = Math.min(want, capOf(x0 + (i - P) * G, z0 + (j - P) * G, lanes, covered), under[o]);
+        C[o] = Math.min(want, capOf(x0 + (i - P) * G, z0 + (j - P) * G, lanes), under[o]);
       }
     }
   }
@@ -1873,13 +1901,22 @@ function terrain(
   // corners on a hillside are not — so no two tiles met along their common edge, and the whole
   // of the open ground was a field of slabs with a step at every joint.
   //
-  // Which tiles are laid: all but those well inside a block, whose own plinth is a solid
-  // extrusion that fills them, and those over a subway entrance, where the ground is the one
-  // thing in the way of getting down to it.
+  // Which tiles are laid: all but those over a subway entrance, where the ground is the one
+  // thing in the way of getting down to it. Inside a block the same triangles are its pavement,
+  // cut at the foot of its podium as the road is cut at its kerbs — still in the triangle's own
+  // plane, so the pavement, the ground and the street are one sheet. The podium stands in the
+  // hole that leaves.
   const laidTile = (i: number, j: number) => {
     const cx = x0 + (i - P + 0.5) * G, cz = z0 + (j - P + 0.5) * G;
-    return !(covered(cx, cz)?.deep || shaftCut(cx, cz));
+    return !shaftCut(cx, cz);
   };
+  const sides = blocks.map((c) => polySides(c.p));
+  const podiumSides = blocks.map((c) => (c.podium ? polySides(c.podium) : null));
+  const WHITE: Tint = [1, 1, 1];
+  const boxes = blocks.map((c) => {
+    const xs = c.p.map((p) => p[0]), zs = c.p.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...zs), Math.max(...xs), Math.max(...zs)];
+  });
   const at = (i: number, j: number) => C[node(Math.max(0, Math.min(W, i)), Math.max(0, Math.min(W, j)))];
   const corner = (i: number, j: number): number[] => {
     const gx = (at(i + 1, j) - at(i - 1, j)) / (2 * G), gz = (at(i, j + 1) - at(i, j - 1)) / (2 * G);
@@ -1927,14 +1964,81 @@ function terrain(
       const drowned = w !== Infinity && (c00 + c10 + c01 + c11) / 4 < w - 0.3;
       const tint = drowned ? BED : t;
       const A = corner(i, j), B = corner(i + 1, j), D = corner(i, j + 1), E = corner(i + 1, j + 1);
-      // split from the low corner to the high one, as `fieldAt` splits the road, and wound to
-      // face the sky
-      b.tri([A, E, B], Mat.Asphalt, tint);
-      b.tri([A, D, E], Mat.Asphalt, tint);
+      // height and normal on either triangle, the same split as the road's (see `roadSurface`)
+      const atP = (k: number, p: Vec2): number[] => {
+        const fx = (p[0] - x) / G, fz = (p[1] - z) / G;
+        const [ha, hb, na, nb] = k === 0 ? [c10, c11, B, E] : [c01, c11, D, E];
+        const yy = k === 0 ? c00 + fx * (ha - c00) + fz * (hb - ha) : c00 + fz * (ha - c00) + fx * (hb - ha);
+        const [wa, wb] = k === 0 ? [fx - fz, fz] : [fz - fx, fx];
+        const w0 = 1 - wa - wb;
+        return [yy, ...[3, 4, 5].map((e) => A[e] * w0 + na[e] * wa + nb[e] * wb)];
+      };
+      // the blocks this tile reaches into
+      const near: number[] = [];
+      for (let k = 0; k < blocks.length; k++) {
+        const bb = boxes[k];
+        if (bb[0] < x + G && bb[2] > x && bb[1] < z + G && bb[3] > z) near.push(k);
+      }
+      // split from the low corner to the high one, as `fieldAt` splits the road
+      const tris: Frag[] = [[[x, z], [x + G, z], [x + G, z + G]], [[x, z], [x + G, z + G], [x, z + G]]];
+      const wound = (f: Frag) => (area2(f) < 0 ? f.slice().reverse() : f);
+      // a block wholly beyond one of its own sides from the triangle takes nothing from it
+      const misses = (s: ((p: Vec2) => number)[], tri: Frag) => s.some((side) => tri.every((p) => side(p) >= 0));
+      // each triangle in two: the open ground outside every block, and the pavement inside one
+      // up to the foot of its podium
+      const cut = tris.map((tri) => {
+        let parts = [tri];
+        for (const k of near) if (!misses(sides[k], tri)) parts = parts.flatMap((q) => subtractSides(q, sides[k]));
+        return parts.map(wound);
+      });
+      const pave = tris.map((tri) => {
+        const out: Frag[] = [];
+        for (const k of near) {
+          if (misses(sides[k], tri)) continue;
+          let part = tri;
+          for (const side of sides[k]) {
+            part = clipHalf(part, side);
+            if (part.length < 3) break;
+          }
+          if (part.length < 3 || Math.abs(area2(part)) <= SLIVER) continue;
+          const pod = podiumSides[k];
+          let parts = [part];
+          if (pod && !misses(pod, part)) parts = subtractSides(part, pod);
+          out.push(...parts.map(wound));
+        }
+        return out;
+      });
+      for (let k = 0; k < 2; k++)
+        for (const [frags, mat, tn] of [[cut[k], Mat.Asphalt, tint], [pave[k], Mat.Paving, WHITE]] as const)
+          for (const f of frags) {
+            const v = f.map((p) => {
+              const [yy, nx, ny, nz] = atP(k, p);
+              return [p[0], yy, p[1], nx, ny, nz, p[0], p[1]];
+            });
+            // wound to face the sky
+            for (let m = 1; m + 1 < v.length; m++) b.tri([v[0], v[m + 1], v[m]], mat, tn);
+          }
       if (!laidTile(i - 1, j)) side(A, D, -1, 0, tint);
       if (!laidTile(i + 1, j)) side(B, E, 1, 0, tint);
       if (!laidTile(i, j - 1)) side(A, B, 0, -1, tint);
       if (!laidTile(i, j + 1)) side(D, E, 0, 1, tint);
+
+      // A tile cut at a podium is sliced a metre at a time for collision, as a cut cell of road
+      // is, so that none of it reaches in through the podium's wall.
+      if (!cut.every((fs, k) => fs.length === 1 && fs[0] === tris[k])) {
+        endRun();
+        for (let k = 0; k < 2; k++)
+          for (const f of [...cut[k], ...pave[k]])
+            for (let xa = x; xa < x + G - 1e-6; xa++) {
+              let part = clipHalf(f, (p) => xa - p[0]);
+              part = clipHalf(part, (p) => p[0] - (xa + 1));
+              if (part.length < 3 || Math.abs(area2(part)) <= SLIVER) continue;
+              const zs = part.map((p) => p[1]), ys = part.map((p) => atP(k, p)[0]);
+              solid.box(xa, Math.min(...ys) - 16, Math.min(...zs), xa + 1, Math.max(...ys), Math.max(...zs),
+                Mat.Asphalt, t, 0, { hidden: true, detail: false });
+            }
+        continue;
+      }
 
       const lo = Math.min(c00, c10, c01, c11), hi = Math.max(c00, c10, c01, c11);
       if (hi - lo <= 0.3) {
@@ -2004,13 +2108,14 @@ function roadCut(pieces: Piece[], x: number, z: number): number {
   return cap;
 }
 
-/** The lowest thing laid over a point that the ground there has to stay under. */
-function capOf(
-  x: number, z: number, lanes: Piece[], covered: (x: number, z: number) => Cover | null,
-): number {
+/**
+ * The lowest thing laid over a point that the ground there has to stay under.
+ *
+ * Not a block: the ground is cut off at a block's outline (see `terrain`), so nothing of it is
+ * ever laid inside one to stand through the pavement, whatever height its corners there are.
+ */
+function capOf(x: number, z: number, lanes: Piece[]): number {
   let cap = roadCut(lanes, x, z);
-  const on = covered(x, z);
-  if (on) cap = Math.min(cap, on.base - 0.05);
   // The channel is a cap like any other. Cutting the bed when the corner heights are first
   // taken and leaving it out of this let the embankment sweeps raise it straight back up
   // again, since they are allowed to climb to whatever the cap says — and the bed came back
@@ -2019,16 +2124,66 @@ function capOf(
   return cap;
 }
 
-/** Whether a point is in a block, how far in, and the level of that block's pavement. */
+/**
+ * A block as the ground sees it: its outline, and the footprint of its podium — the hole the
+ * ground is cut to, null for a sliver that is all pavement.
+ */
 interface Cover {
-  deep: boolean;
-  base: number;
+  p: Vec2[];
+  podium: Vec2[] | null;
 }
 
-/** The level a block is built at: the ground under its middle. */
+/** How far the pavement is held under the road field, so the two never share a plane. */
+const PAVE_DROP = 0.03;
+
+/**
+ * The pavement at a point: the road's own surface carried on past the kerb (see `fieldAt`),
+ * so that the walk is level with the carriageway beside it, however the street climbs.
+ */
+function paveAt(x: number, z: number): number {
+  return fieldAt(x, z) - PAVE_DROP;
+}
+
+/**
+ * The podium's footprint, as its walls stand: the outline pulled in by the walk and blunted at
+ * the corners as `extrude` blunts it. Null where the block is too small to carry one, which
+ * `buildBlock` leaves as pavement.
+ */
+function podiumOf(poly: Vec2[]): Vec2[] | null {
+  if (spanOf(poly) < 16) return null;
+  const face = shrink(poly, WALK);
+  if (face.length < 3 || spanOf(face) < 12) return null;
+  return blunt(face);
+}
+
+const baseCache = rememberBySeed<string, number>();
+
+/**
+ * The level a block is built at: the street round it, which is the pavement at its outline,
+ * taken on average along it. It used to be the ground under the block's middle, which on a
+ * hillside is metres under the street on the uphill side — a block sunk in a pit, with the
+ * pavement at the bottom of it.
+ */
 function blockBase(poly: Vec2[]): number {
-  const c = centroid(poly);
-  return groundAt(c[0], c[1]);
+  const key = poly.map((p) => `${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(";");
+  checkSeed();
+  const hit = baseCache.get(key);
+  if (hit !== undefined) return hit;
+  let sum = 0, len = 0;
+  for (let k = 0; k < poly.length; k++) {
+    const a = poly[k], c = poly[(k + 1) % poly.length];
+    const l = Math.hypot(c[0] - a[0], c[1] - a[1]);
+    const n = Math.max(1, Math.ceil(l / 4));
+    for (let m = 0; m < n; m++) {
+      const t = (m + 0.5) / n;
+      sum += paveAt(a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t) * (l / n);
+    }
+    len += l;
+  }
+  const base = len > 0 ? sum / len : groundAt(poly[0][0], poly[0][1]);
+  if (baseCache.size > 8192) baseCache.clear();
+  baseCache.set(key, base);
+  return base;
 }
 
 /** A region of the city, built on the road network instead of the grid. */
@@ -2039,10 +2194,9 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   const shapes = blocksIn(x0 - 200, z0 - 200, x0 + REGION + 200, z0 + REGION + 200)
     .map((s) => cellOf(s))
     .filter((p): p is Vec2[] => !!p && p.length >= 3);
-  const covers = shapes.map((p) => ({ p, inner: shrink(p, 3.5), base: blockBase(p) }));
+  const covers: Cover[] = shapes.map((p) => ({ p, podium: podiumOf(p) }));
   const covered = (x: number, z: number): Cover | null => {
-    for (const c of covers)
-      if (inPoly(c.p, x, z)) return { deep: c.inner.length >= 3 && inPoly(c.inner, x, z), base: c.base };
+    for (const c of covers) if (inPoly(c.p, x, z)) return c;
     return null;
   };
   const ground = new Builder(new Rng(hashInt(rx, rz, 5)));
@@ -2054,7 +2208,7 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   // collision for the ground and the road, kept apart from what is drawn so that its hidden
   // boxes never cull a face
   const solid = new Builder(new Rng(hashInt(rx, rz, 6)));
-  terrain(ground, solid, x0, z0, covered, lanes);
+  terrain(ground, solid, x0, z0, covered, covers, lanes);
   roadSurface(ground, solid, x0, z0);
   streets(ground, x0, z0);
   bridges(ground, solid, x0, z0);
@@ -3838,7 +3992,7 @@ function flight(
  * through each other and hanging out over the kerb.
  */
 function perimeterStair(
-  b: Builder, poly: Vec2[], base: number, top: number, tint: Tint,
+  b: Builder, poly: Vec2[], top: number, tint: Tint,
 ): { treads: Vec2[]; arrived: boolean; arrival?: Vec2 } {
   const RISE = 0.4, RUN = 1.15, WIDE = 3.4, SLAB = 0.42;
   const treads: Vec2[] = [];
@@ -3869,7 +4023,8 @@ function perimeterStair(
     return { a, c, len, ux, uz, nx, nz, turn: Math.atan2(vz, vx) };
   };
 
-  let y = base;
+  // from the pavement where it starts, which follows the street and not the podium
+  let y = paveAt(path[start][0], path[start][1]);
   let last: { m: Vec2; leg: ReturnType<typeof legOf> } | null = null;
   for (let k = 0; k < n * 3 && y < top; k++) {
     const leg = legOf(k);
@@ -3963,7 +4118,7 @@ function simplify(poly: Vec2[], minLen: number): Vec2[] {
  * top of the deck's parapet, so the rider steps off over it rather than climbing it.
  */
 function blockLifts(
-  b: Builder, poly: Vec2[], base: number, E: number, tint: Tint, avoid: Vec2[], must = false,
+  b: Builder, poly: Vec2[], E: number, tint: Tint, avoid: Vec2[], must = false,
 ): void {
   const c = centroid(poly);
   const sides = poly.map((a, k) => [a, poly[(k + 1) % poly.length]] as const)
@@ -3993,13 +4148,18 @@ function blockLifts(
     if (!pass && (d - reach < 0.95 || d + reach > WALK - 1.8)) continue;
     const x = mx + nx * d, z = mz + nz * d;
     if (!pass && avoid.some(([px, pz]) => Math.hypot(px - x, pz - z) < 5)) continue;
-    b.lift(x - h, z - h, x + h, z + h, base + 0.18, top);
+    // standing on the pavement, which on a slope is not the podium's level: the highest of it
+    // under the platform, so no corner of the pavement stands up through the floor
+    let foot = -Infinity;
+    for (const dx of [-h, h]) for (const dz of [-h, h]) foot = Math.max(foot, paveAt(x + dx, z + dz));
+    b.lift(x - h, z - h, x + h, z + h, foot, top);
     // the mast stands on the kerb beside the platform, not in front of it
     const side = h * (Math.abs(ux) + Math.abs(uz)) + 0.5;
     const kx = mx + nx * 0.4 + ux * side, kz = mz + nz * 0.4 + uz * side;
-    b.box(kx - 0.18, base + 0.18, kz - 0.18, kx + 0.18, top + 3.4, kz + 0.18, Mat.Metal, tint, 0, { detail: false });
+    const kerb = paveAt(kx, kz);
+    b.box(kx - 0.18, kerb - 0.3, kz - 0.18, kx + 0.18, top + 3.4, kz + 0.18, Mat.Metal, tint, 0, { detail: false });
     b.box(kx - 0.24, top + 3.4, kz - 0.24, kx + 0.24, top + 3.8, kz + 0.24, Mat.Beacon, tint, 0, { collide: false });
-    b.box(kx - 0.2, base + 2.6, kz - 0.2, kx + 0.2, base + 3.2, kz + 0.2, Mat.Glow, tint, 0, { collide: false });
+    b.box(kx - 0.2, kerb + 2.4, kz - 0.2, kx + 0.2, kerb + 3.0, kz + 0.2, Mat.Glow, tint, 0, { collide: false });
     avoid.push([x, z]);
     placed++;
   }
@@ -4162,7 +4322,8 @@ function vessels(b: Builder, x0: number, z0: number): void {
 
 /** The deck height of whatever block stands at this seed. */
 export function deckOf(site: Site): number {
-  return groundAt(site.p[0], site.p[1])
+  const poly = cellOf(site);
+  return (poly && poly.length >= 3 ? blockBase(poly) : groundAt(site.p[0], site.p[1]))
     + DECKS[hashInt(Math.round(site.p[0]), Math.round(site.p[1]), 301) % DECKS.length];
 }
 
