@@ -352,3 +352,20 @@ export function carriageInsideBoxes(): ModelBox[] {
   out.push(box(-HX, CEIL + 0.02, HALF - 0.4, HX, 3.9, HALF + 0.4, Mat.Paint, true));
   return out;
 }
+
+/**
+ * The end of the train from the inside, at local +z: put on the leading and trailing cars of the
+ * one being ridden, whose shells are open at both ends so that the cars run into each other. At
+ * the two ends of the train there is no next car, and the open end looked straight out into the
+ * tunnel. The cab window is the dark glass the outside uses, so it reads as a window.
+ */
+export function carriageEndBoxes(): ModelBox[] {
+  const HX = 1.55, HALF = CARRIAGE / 2, FLOOR = 1.06, CEIL = 3.74, T = 0.16;
+  return [
+    box(-HX, FLOOR, HALF - T, HX, WIN_SILL, HALF, Mat.Paint, true),
+    box(-HX, WIN_HEAD, HALF - T, HX, CEIL, HALF, Mat.Paint, true),
+    box(-HX, WIN_SILL, HALF - T, -0.9, WIN_HEAD, HALF, Mat.Paint, true),
+    box(0.9, WIN_SILL, HALF - T, HX, WIN_HEAD, HALF, Mat.Paint, true),
+    box(-0.9, WIN_SILL, HALF - T * 0.5, 0.9, WIN_HEAD, HALF, Mat.VGlass),
+  ];
+}

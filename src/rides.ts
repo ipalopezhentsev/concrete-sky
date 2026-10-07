@@ -562,7 +562,7 @@ export class Rides {
   get vehicleLists(): VehicleLists {
     const t = this.traffic;
     return {
-      cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, cabins: t.cabins,
+      cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, cabins: t.cabins, cabinEnds: t.cabinEnds,
       figures: this.hunters.figures, lifts: this.liftList,
       inside: this.insideKind ? { kind: this.insideKind, list: this.insideList } : undefined,
     };

@@ -124,6 +124,8 @@ export class Traffic {
   trains = new InstanceList(64);
   /** The cars of the train the runner is riding, which are drawn as interiors instead. */
   cabins = new InstanceList(8);
+  /** The front and back of that train, which its open-ended cars leave open. */
+  cabinEnds = new InstanceList(2);
   /** Which train that is, set by the ride before the traffic of the frame is worked out. */
   ridden: { axis: 0 | 1; line: number; dir: 1 | -1; slot: number } | null = null;
   /** Slots whose vehicle was taken or destroyed; they stay empty. */
@@ -149,6 +151,7 @@ export class Traffic {
     this.boats.clear();
     this.trains.clear();
     this.cabins.clear();
+    this.cabinEnds.clear();
     this.velocities.clear();
     const ahead = (x: number, y: number, z: number, margin: number) =>
       (x - eye[0]) * fwd[0] + (y - eye[1]) * fwd[1] + (z - eye[2]) * fwd[2] > -margin;
@@ -199,16 +202,24 @@ export class Traffic {
               const s = mid + ((c - (CARS - 1) / 2) * CARRIAGE * dir) / scale;
               const at = onTrack(axis, line, s, trackOff(dir));
               const yaw = at.yaw + (dir > 0 ? 0 : Math.PI);
+              // Leaning with the line: the level of the track under its two bogies, eight
+              // metres either side of the middle. Held flat, a car on a gradient had one end
+              // sunk in the track bed and the other standing off it.
+              const bogie = (8 * dir) / scale;
+              const pitch = Math.atan2(subwayY(axis, line, s - bogie) - subwayY(axis, line, s + bogie), 16);
               // The train the runner is in is drawn as an interior, on the track bed rather
               // than lifted onto its rails so that its floor meets their feet; and it is never
               // behind them — they are standing in the middle of it.
               if (inside) {
-                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, 0, 0, color);
+                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
+                // the end wall is modelled at a car's front, so the last car takes it turned round
+                if (c === CARS - 1) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
+                if (c === 0) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw + Math.PI, -pitch, 0, color);
                 continue;
               }
               const y = at.pos[1] + 0.16;
               if (!ahead(at.pos[0], y, at.pos[2], 40)) continue;
-              this.trains.push(at.pos[0], y, at.pos[2], yaw, 0, 0, color);
+              this.trains.push(at.pos[0], y, at.pos[2], yaw, pitch, 0, color);
             }
           }
         }

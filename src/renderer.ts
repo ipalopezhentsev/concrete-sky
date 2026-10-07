@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { boatBoxes, carriageBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, liftBoxes, modelData } from "./vehicles/models";
+import { boatBoxes, carriageBoxes, carriageEndBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, liftBoxes, modelData } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
@@ -54,6 +54,8 @@ export interface VehicleLists {
   trains?: InstanceList;
   /** The cars of the train being ridden, drawn from the inside. */
   cabins?: InstanceList;
+  /** The two ends of that train, which close off its open-ended cars. */
+  cabinEnds?: InstanceList;
   /** The vehicle being ridden in cockpit view, drawn from the inside. */
   inside?: { kind: "car" | "van" | "flyer"; list: InstanceList };
   /** People on foot, by pose: standing, left stride, right stride. */
@@ -159,7 +161,7 @@ export class Renderer {
   private cloudProg: Program;
   private vehicleProg: Program;
   private vehicleMeshes: {
-    car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh; cabin: InstancedMesh;
+    car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh; cabin: InstancedMesh; cabinEnd: InstancedMesh;
     inside: Record<"car" | "van" | "flyer", InstancedMesh>;
     carFar: InstancedMesh; vanFar: InstancedMesh; flyerFar: InstancedMesh;
     figures: InstancedMesh[]; lift: InstancedMesh;
@@ -230,6 +232,7 @@ export class Renderer {
       boat: instanced(modelData(boatBoxes())),
       train: instanced(modelData(carriageBoxes())),
       cabin: instanced(modelData(carriageInsideBoxes())),
+      cabinEnd: instanced(modelData(carriageEndBoxes())),
       inside: {
         car: instanced(modelData(carInsideBoxes(false))),
         van: instanced(modelData(carInsideBoxes(true))),
@@ -449,6 +452,7 @@ export class Renderer {
       gl.disable(gl.CULL_FACE);
       if (vehicles.trains) drawCulled(m.train, null, vehicles.trains, 10.2);
       if (vehicles.cabins?.count) drawCulled(m.cabin, null, vehicles.cabins, 14);
+      if (vehicles.cabinEnds?.count) drawCulled(m.cabinEnd, null, vehicles.cabinEnds, 14);
       gl.enable(gl.CULL_FACE);
     }
     // The seat the camera is in: the same, for the same reason — a driver is inside the shell.

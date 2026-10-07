@@ -3250,8 +3250,6 @@ function rails(b: Builder, x0: number, z0: number): void {
 
 /** Metres between stations along a line; a whole number of bays, so stations sit on nodes. */
 export const SUB_SPACING = 360;
-/** Length of the island platform. */
-export const PLATFORM = 72;
 /** Centre of each running track, off the tunnel centreline. */
 export const TRACK_OFF = 8.5;
 /** Interior of the running tunnel: half-width, and track bed to soffit. */
@@ -3354,11 +3352,24 @@ function subNode(axis: 0 | 1, line: number, k: number): number {
   return y;
 }
 
-/** Track bed level anywhere along a line. */
+/**
+ * Track bed level anywhere along a line.
+ *
+ * A smooth curve through the nodes rather than straight lines between them. Straight, the
+ * gradient changed at every node, and a train running over thirty-metre chords of a hill
+ * pitched at each one like a car going over a kerb. The slope at a node is the harmonic mean
+ * of the two either side — and nothing where they disagree in sign or one of them is level —
+ * so the curve never overshoots a node, and a station's flat stretch stays dead flat.
+ */
 export function subwayY(axis: 0 | 1, line: number, s: number): number {
   const k = Math.floor(s / SUB_BAY);
   const t = s / SUB_BAY - k;
-  return subNode(axis, line, k) * (1 - t) + subNode(axis, line, k + 1) * t;
+  const y0 = subNode(axis, line, k - 1), y1 = subNode(axis, line, k);
+  const y2 = subNode(axis, line, k + 1), y3 = subNode(axis, line, k + 2);
+  const slope = (a: number, b: number) => (a * b <= 0 ? 0 : (2 * a * b) / (a + b));
+  const m1 = slope(y1 - y0, y2 - y1), m2 = slope(y2 - y1, y3 - y2);
+  const t2 = t * t, t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * y1 + (t3 - 2 * t2 + t) * m1 + (3 * t2 - 2 * t3) * y2 + (t3 - t2) * m2;
 }
 
 export interface Station {
@@ -3508,6 +3519,14 @@ function shaftSpot(axis: 0 | 1, line: number, s: number): { x: number; z: number
 }
 
 const stations = rememberBySeed<string, Station | null>();
+const sites = rememberBySeed<string, Station | null>();
+
+/**
+ * Closest two stations on a line may stand. Each one slides up to five bays to find an
+ * entrance, so two neighbours sliding towards each other used to end up a stone's throw
+ * apart — two halls with a few metres of tube between them.
+ */
+const STATION_GAP = 220;
 
 /**
  * Station `k` along a line, or null where no entrance to it would fit anywhere.
@@ -3516,12 +3535,33 @@ const stations = rememberBySeed<string, Station | null>();
  * before it can lay them flat, and for a while that was a second cache holding a second
  * view of the same search — which is two things that can fall out of step, and did.
  * Nothing here asks what level the line is at, so this and `subNode` are not circular.
+ *
+ * Where two neighbours came out too close, the odd one gives way. Its own neighbours are both
+ * even, so the question never chains: no station's fate hangs on one further off than the next.
  */
 export function stationAt(axis: 0 | 1, line: number, k: number): Station | null {
   if (!hasSubway(axis, line)) return null;
   const key = `${axis},${line},${k}`;
   checkSeed();
   const hit = stations.get(key);
+  if (hit !== undefined) return hit;
+  let out = stationSite(axis, line, k);
+  if (out && k & 1) {
+    const s = out.s;
+    for (const n of [k - 1, k + 1]) {
+      const other = stationSite(axis, line, n);
+      if (other && Math.abs(other.s - s) < STATION_GAP) out = null;
+    }
+  }
+  if (stations.size > 2048) stations.clear();
+  stations.set(key, out);
+  return out;
+}
+
+/** Where station `k` would stand if it had the line to itself. */
+function stationSite(axis: 0 | 1, line: number, k: number): Station | null {
+  const key = `${axis},${line},${k}`;
+  const hit = sites.get(key);
   if (hit !== undefined) return hit;
   let out: Station | null = null;
   // A station can slide along the line to find an entrance, by whole bays so that it still
@@ -3553,8 +3593,8 @@ export function stationAt(axis: 0 | 1, line: number, k: number): Station | null 
     };
     break;
   }
-  if (stations.size > 2048) stations.clear();
-  stations.set(key, out);
+  if (sites.size > 2048) sites.clear();
+  sites.set(key, out);
   return out;
 }
 
@@ -3634,7 +3674,12 @@ const STEEL: Tint = [0.32, 0.33, 0.34];
  */
 function subway(b: Builder, x0: number, z0: number): Station[] {
   const own: Station[] = [];
-  const pad = 140;
+  // How far past the region to look for bays and stations that land in it. A station on the
+  // spline is not a coordinate along the axis — where the road wanders the two drift a couple
+  // of hundred metres apart — and the hundred and forty this used to be left stretches of
+  // tunnel that no region thought were its own: a tube that stopped short of the station, and
+  // daylight beyond.
+  const pad = 140 + WANDER;
   for (const axis of [0, 1] as const) {
     const across = axis === 0 ? z0 + REGION / 2 : x0 + REGION / 2;
     for (const line of arteryLines(across, REGION / 2 + pad)) {
@@ -3658,7 +3703,74 @@ function subway(b: Builder, x0: number, z0: number): Station[] {
   return own;
 }
 
-/** A run of plain tunnel: invert, walls, roof, four rails and a line of light. */
+/**
+ * The running tunnels between stations: one bored tube to each track, which is what a train
+ * leaves a station hall through — two round holes in its end wall.
+ *
+ * Radius, and the height of the axis over the track bed: a carriage is 3.1 m wide and stands
+ * 4.5 m off the bed, and this clears it all round by a few tens of centimetres. The lowest part
+ * of the circle is under the bed and is never laid.
+ */
+const TUBE_R = 2.9;
+const TUBE_Y = 2.4;
+const TUBE_SIDES = 16;
+/** Lengths each bay of tube is laid in, so the tube follows the line round a bend. */
+const TUBE_STEPS = 6;
+
+/**
+ * One triangle of a curved surface, wound to face the way its corners' normals point — so a
+ * caller can lay a ring of them without caring which way round it is going.
+ */
+function smoothTri(b: Builder, A: number[], B: number[], C: number[], mat: Mat, tint: Tint, style = 0): void {
+  const ux = B[0] - A[0], uy = B[1] - A[1], uz = B[2] - A[2];
+  const vx = C[0] - A[0], vy = C[1] - A[1], vz = C[2] - A[2];
+  const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+  if (Math.hypot(nx, ny, nz) < 1e-6) return;
+  const want = nx * (A[3] + B[3] + C[3]) + ny * (A[4] + B[4] + C[4]) + nz * (A[5] + B[5] + C[5]);
+  b.tri(want >= 0 ? [A, B, C] : [A, C, B], mat, tint, style);
+}
+
+/** A point of a cross-section: `w` across the line, `h` over the track bed, and its normal (nw, nh). */
+type SectionPoint = [number, number, number, number];
+
+/**
+ * Sweeps a cross-section along one bay of the line, as one continuous surface: every point
+ * rides the line's own curve and level, and each bay asks for the same section at its two ends
+ * as its neighbours do, so there is no joint anywhere — no slab, no step, no gap.
+ */
+function sweep(b: Builder, axis: 0 | 1, line: number, s0: number, pts: SectionPoint[], mat: Mat, tint: Tint, style = 0): void {
+  const across = (s: number) => {
+    const { p, dir } = arteryFrame(axis, line, s);
+    const y = subwayY(axis, line, s);
+    const nx = -dir[1], nz = dir[0];
+    let v = 0;
+    return pts.map(([w, h, nw, nh], i) => {
+      if (i > 0) v += Math.hypot(w - pts[i - 1][0], h - pts[i - 1][1]);
+      return [p[0] + nx * w, y + h, p[1] + nz * w, nx * nw, nh, nz * nw, s, v];
+    });
+  };
+  let a = across(s0);
+  for (let i = 1; i <= TUBE_STEPS; i++) {
+    const c = across(s0 + (i / TUBE_STEPS) * SUB_BAY);
+    for (let j = 0; j + 1 < pts.length; j++) {
+      smoothTri(b, a[j], a[j + 1], c[j + 1], mat, tint, style);
+      smoothTri(b, a[j], c[j + 1], c[j], mat, tint, style);
+    }
+    a = c;
+  }
+}
+
+/** The round of a tube centred `off` across the line, from `lo` to `hi` radians, at radius `r`. */
+function arc(off: number, r: number, lo: number, hi: number, n: number): SectionPoint[] {
+  const out: SectionPoint[] = [];
+  for (let i = 0; i <= n; i++) {
+    const a = lo + (i / n) * (hi - lo);
+    out.push([off + r * Math.cos(a), TUBE_Y + r * Math.sin(a), -Math.cos(a), -Math.sin(a)]);
+  }
+  return out;
+}
+
+/** A run of tunnel: in a station hall the open box, between them the two tubes. */
 function tunnelBay(b: Builder, axis: 0 | 1, line: number, k: number, bay: Bay): void {
   const { p, dir, turn, len, drop, riseOf } = bay;
   const ya = subNode(axis, line, k), yb = subNode(axis, line, k + 1);
@@ -3668,18 +3780,83 @@ function tunnelBay(b: Builder, axis: 0 | 1, line: number, k: number, bay: Bay): 
     b.box(cx - len / 2, y0 - drop, cz - halfW, cx + len / 2, y1 - drop, cz + halfW, mat, tint, style,
       { turn, rise, detail: false, collide });
   };
-  const outer = SUB_HALF + SUB_WALL;
-  put(outer, y - 1.2, y, 0, Mat.Board, CONCRETE, Finish.Cast); // invert
-  put(SUB_WALL / 2, y, y + SUB_RISE, SUB_HALF + SUB_WALL / 2, Mat.Board, TILED, Finish.Cast);
-  put(SUB_WALL / 2, y, y + SUB_RISE, -SUB_HALF - SUB_WALL / 2, Mat.Board, TILED, Finish.Cast);
-  // over a station the mezzanine floor is the roof, and it is laid with the station
-  if (!roofedBy(axis, line, k)) {
-    put(outer, y + SUB_RISE, y + MEZZ, 0, Mat.Board, CONCRETE, Finish.Cast);
-    put(0.22, y + SUB_RISE - 0.28, y + SUB_RISE - 0.06, 0, Mat.Strip, TILED, 0, false);
+  // Over a station the mezzanine floor is the roof, and it is laid with the station; so is the
+  // wall across each end of the hall, with the mouths of the tubes in it. A hall is dead level,
+  // so boxes lie true in it.
+  if (roofedBy(axis, line, k)) {
+    const outer = SUB_HALF + SUB_WALL;
+    put(outer, y - 1.2, y, 0, Mat.Board, CONCRETE, Finish.Cast); // invert
+    put(SUB_WALL / 2, y, y + SUB_RISE, SUB_HALF + SUB_WALL / 2, Mat.Board, TILED, Finish.Cast);
+    put(SUB_WALL / 2, y, y + SUB_RISE, -SUB_HALF - SUB_WALL / 2, Mat.Board, TILED, Finish.Cast);
+    for (const off of [-TRACK_OFF - 0.72, -TRACK_OFF + 0.72, TRACK_OFF - 0.72, TRACK_OFF + 0.72]) {
+      put(0.09, y, y + 0.16, off, Mat.Metal, STEEL);
+    }
+    return;
   }
-  for (const off of [-TRACK_OFF - 0.72, -TRACK_OFF + 0.72, TRACK_OFF - 0.72, TRACK_OFF + 0.72]) {
-    put(0.09, y, y + 0.16, off, Mat.Metal, STEEL);
+  // Out in the tubes the line climbs and falls, and everything a train runs over is swept along
+  // it as one surface, the way the roads are: laid as boxes, each bay was a straight slab on the
+  // chord of the curve, and a train riding the curve sank into one and rose out of the next.
+  // Nothing collides with any of it; nobody gets in here but the trains.
+  const s0 = k * SUB_BAY;
+  const lo = Math.asin(-(TUBE_Y + 0.05) / TUBE_R); // a few centimetres under the bed
+  const crown = Math.PI / 2, lit = 0.2 / TUBE_R;
+  for (const off of [-TRACK_OFF, TRACK_OFF]) {
+    sweep(b, axis, line, s0, arc(off, TUBE_R, lo, Math.PI - lo, TUBE_SIDES), Mat.Board, CONCRETE, Finish.Cast);
+    // the line of light along the crown, a few centimetres proud of it
+    sweep(b, axis, line, s0, arc(off, TUBE_R - 0.04, crown - lit, crown + lit, 1), Mat.Strip, TILED);
+    // A hair over the bed, because the hall's invert runs on a little past the end wall and
+    // its top is the same plane.
+    const W = Math.sqrt(TUBE_R * TUBE_R - (TUBE_Y + 0.05) ** 2);
+    sweep(b, axis, line, s0, [[off - W, 0.01, 0, 1], [off + W, 0.01, 0, 1]], Mat.Board, CONCRETE, Finish.Cast);
+    for (const c of [off - 0.72, off + 0.72]) {
+      const l = c - 0.09, r = c + 0.09, top = 0.16;
+      sweep(b, axis, line, s0, [[l, 0, -1, 0], [l, top, -1, 0]], Mat.Metal, STEEL);
+      sweep(b, axis, line, s0, [[l, top, 0, 1], [r, top, 0, 1]], Mat.Metal, STEEL);
+      sweep(b, axis, line, s0, [[r, top, 1, 0], [r, 0, 1, 0]], Mat.Metal, STEEL);
+    }
   }
+}
+
+/**
+ * The wall across one end of a station hall, at `s`, facing back into it along `face`
+ * (+1 towards rising `s`): flat tiling from wall to wall and track bed to roof, with the
+ * mouth of each tube cut out of it. Behind it, never drawn, a slab across the whole width
+ * for the runner to walk into — the holes are for the trains.
+ */
+function hallEnd(b: Builder, axis: 0 | 1, line: number, s: number, y: number, face: 1 | -1): void {
+  const { p, dir } = arteryFrame(axis, line, s);
+  const nx = -dir[1], nz = dir[0];
+  const fx = dir[0] * face, fz = dir[1] * face;
+  /** A point on the wall `w` across the line and `h` over the track bed. */
+  const at = (w: number, h: number) => [p[0] + nx * w, y + h, p[1] + nz * w, fx, 0, fz, w, h];
+  for (const side of [1, -1]) {
+    // Each half of the wall round its own hole, in local u measured out from the centreline.
+    // Laid as rays from the middle of the hole: each one runs from the rim (or the bed, below
+    // it) out to the edge of the wall, and two neighbours bound a strip. The corners are rays
+    // of their own, or the strips would cut across them.
+    const cu = TRACK_OFF, ch = TUBE_Y;
+    const angles: number[] = [];
+    for (let i = 0; i < TUBE_SIDES * 2; i++) angles.push((i / (TUBE_SIDES * 2)) * Math.PI * 2);
+    for (const [u, h] of [[0, 0], [SUB_HALF, 0], [SUB_HALF, SUB_RISE], [0, SUB_RISE]]) {
+      angles.push((Math.atan2(h - ch, u - cu) + Math.PI * 2) % (Math.PI * 2));
+    }
+    angles.sort((m, n) => m - n);
+    const ray = (a: number) => {
+      const dx = Math.cos(a), dy = Math.sin(a);
+      const tu = dx > 1e-9 ? (SUB_HALF - cu) / dx : dx < -1e-9 ? -cu / dx : Infinity;
+      const th = dy > 1e-9 ? (SUB_RISE - ch) / dy : dy < -1e-9 ? -ch / dy : Infinity;
+      const t = Math.min(tu, th), r = Math.min(t, TUBE_R);
+      return [at(side * (cu + dx * r), ch + dy * r), at(side * (cu + dx * t), ch + dy * t)];
+    };
+    for (let i = 0; i < angles.length; i++) {
+      const [ia, oa] = ray(angles[i]), [ib, ob] = ray(angles[(i + 1) % angles.length]);
+      smoothTri(b, ia, oa, ob, Mat.Board, TILED, Finish.Cast);
+      smoothTri(b, ia, ob, ib, Mat.Board, TILED, Finish.Cast);
+    }
+  }
+  const T = 0.5, cx = p[0] - fx * T / 2, cz = p[1] - fz * T / 2;
+  b.box(cx - T / 2, y, cz - SUB_HALF, cx + T / 2, y + SUB_RISE, cz + SUB_HALF, Mat.Board, TILED, 0,
+    { turn: Math.atan2(dir[1], dir[0]), detail: false, hidden: true });
 }
 
 /** Everything that makes a station: the platform, the roof over it, the passage and the shaft. */
@@ -3790,14 +3967,23 @@ function station(b: Builder, st: Station): void {
   }
 
   // Platform: an island between the two tracks, with a tactile edge down each side and a
-  // line of light over it.
-  for (let a = st.s - PLATFORM / 2; a < st.s + PLATFORM / 2; a += 6) {
-    along(a, a + 6, PLAT_HALF, y, plat, 0, Mat.Board, TILED, Finish.Cast);
+  // line of light over it. It runs the whole hall, wall to wall, with the mouths of the tubes
+  // either side of it at each end — it used to stop short in the middle of the box, and the
+  // tunnel beyond was the same box carrying on into the dark with nothing to say you were not
+  // meant to walk down it.
+  // Its ends are drawn in by what a length runs past its own ends, so the platform stops at the
+  // wall rather than poking through into the mouth of a tube.
+  const start = (K - FLAT_BAYS) * SUB_BAY, inset = 0.3 / scale;
+  for (let a = start + inset; a < end - inset - 1e-3; a += 6) {
+    const to = Math.min(a + 6, end - inset);
+    along(a, to, PLAT_HALF, y, plat, 0, Mat.Board, TILED, Finish.Cast);
     for (const side of [1, -1]) {
-      along(a, a + 6, 0.45, plat, plat + 0.02, side * (PLAT_HALF - 0.45), Mat.Paint, [0.78, 0.62, 0.12], 0, false);
-      along(a, a + 6, 0.22, y + SUB_RISE - 0.28, y + SUB_RISE - 0.06, side * 4.6, Mat.Strip, TILED, 0, false);
+      along(a, to, 0.45, plat, plat + 0.02, side * (PLAT_HALF - 0.45), Mat.Paint, [0.78, 0.62, 0.12], 0, false);
+      along(a, to, 0.22, y + SUB_RISE - 0.28, y + SUB_RISE - 0.06, side * 4.6, Mat.Strip, TILED, 0, false);
     }
   }
+  hallEnd(b, axis, line, start, y, 1);
+  hallEnd(b, axis, line, end, y, -1);
   // the name, on the wall behind each track
   for (const side of [1, -1]) {
     along(st.s - 5, st.s + 5, 0.1, plat + 1.5, plat + 2.6, side * (SUB_HALF - 0.05), Mat.Strip, [0.5, 0.62, 0.8], 0, false);
