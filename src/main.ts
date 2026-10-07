@@ -63,6 +63,10 @@ const debug = {
   toCar: () => false,
   /** Test hook: put a hunter (foot, car or flyer) `ahead` metres in front of the player. */
   hunter: (_kind: string, _ahead: number) => false,
+  /** Test hook: put a health kit on the ground `ahead` metres in front of the player (or level with them, `air`). */
+  kit: (_ahead: number, _air?: boolean) => false,
+  /** Test hook: take `n` health off the runner. */
+  hurt: (_n: number) => {},
 };
 (window as unknown as { __cs: typeof debug }).__cs = debug;
 
@@ -271,6 +275,21 @@ async function main(): Promise<void> {
     else if (kind === "car") h.addCar(at, yaw);
     else h.addRunner(at, yaw);
     return true;
+  };
+  debug.kit = (ahead, air = false) => {
+    const h = rides.hunters, p = rides.focus;
+    const x = p[0] + Math.sin(player.yaw) * ahead, z = p[2] + Math.cos(player.yaw) * ahead;
+    if (air) {
+      h.kits.add([x, p[1], z], true);
+      return true;
+    }
+    const y = h.standAt(x, z, p[1]);
+    if (y === null) return false;
+    h.kits.add([x, y, z]);
+    return true;
+  };
+  debug.hurt = (n) => {
+    rides.hunters.health = Math.max(1, rides.hunters.health - n);
   };
   if (params.get("vehicle") === "car") rides.spawnCar();
   else if (params.get("vehicle") === "van") rides.spawnCar(undefined, true);
@@ -609,6 +628,7 @@ async function main(): Promise<void> {
   let prevEye = player.eye();
   let shownScore = "";
   let shownHits = 0;
+  let shownKits = 0;
   const markers: HTMLElement[] = [];
 
   const frame = (now: number) => {
@@ -714,6 +734,14 @@ async function main(): Promise<void> {
       shownHits = hunters.hits;
       audio.hurt();
     }
+    if (hunters.kits.taken !== shownKits) {
+      shownKits = hunters.kits.taken;
+      audio.heal();
+      // restart the flash on the health bar
+      healthEl.classList.remove("heal");
+      void healthEl.offsetWidth;
+      healthEl.classList.add("heal");
+    }
     for (const p of [...events.hits, ...events.explosions]) {
       audio.boom(Math.hypot(p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]), events.hits.includes(p) ? 0.6 : 1);
     }
@@ -800,7 +828,10 @@ async function main(): Promise<void> {
     if (radarOn !== radar.open) radar.setOpen(radarOn);
     if (radarOn) {
       radar.zoomTo(rides.riding ? 1 : 0);
-      const blips = hunted ? hunters.list.filter((x) => !x.dead).map((x) => [x.center[0], x.center[2]]) : [];
+      const blips = hunted ? [
+        ...hunters.list.filter((x) => !x.dead).map((x) => [x.center[0], x.center[2]]),
+        ...hunters.kits.where().map((p) => [p[0], p[2], 1]), // a third value of 1 marks a kit
+      ] : [];
       radar.draw(focus[0], focus[2], heading, blips);
     }
 
@@ -843,7 +874,7 @@ async function main(): Promise<void> {
         flyerGrounded: rides.flyer?.grounded, carSpeed: rides.car?.speed,
         vehicles: t.cars.count + t.vans.count + t.flyers.count, kills: rides.combat.kills, carKills: rides.combat.carKills, seed,
         particles: rides.particles.glow.count + rides.particles.smoke.count,
-        hunters: hunters.list.map((x) => x.mode).join(","), health: hunters.health, hunterKills: hunters.kills, caught: hunters.caught,
+        hunters: hunters.list.map((x) => x.mode).join(","), health: hunters.health, kits: hunters.kits.count, hunterKills: hunters.kills, caught: hunters.caught,
         mode, demo: demo.kind, touch: touchPlay,
         map: map.open ? map.across : 0, mapPending: map.pending,
         clock: weather.clock, sunElev: weather.sky.elev,

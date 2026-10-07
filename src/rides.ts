@@ -467,6 +467,7 @@ export class Rides {
     }
     this.hunters.update(dt, this.quarry(), cam);
     this.combat.update(dt, this.traffic, this.parking, this.colliders, this.hunters);
+    this.hunters.kits.update(dt, this.quarry(), cam);
     if (this.hunters.knock && !this.riding) {
       const k = this.hunters.knock;
       for (let i = 0; i < 3; i++) this.player.vel[i] += k[i];
@@ -574,6 +575,7 @@ export class Rides {
     this.knocks.draw(t.cars, t.vans);
     this.combat.drawWrecks(t.flyers, t.cars, t.vans);
     this.hunters.draw(t.flyers, t.cars, t.vans);
+    this.hunters.kits.draw(eye);
     this.lifts.instances(this.liftList, eye, 400);
   }
 
@@ -582,7 +584,7 @@ export class Rides {
     const t = this.traffic;
     return {
       cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, cabins: t.cabins, cabinEnds: t.cabinEnds,
-      figures: this.hunters.figures, walkers: this.pedestrians.lists, lifts: this.liftList,
+      figures: this.hunters.figures, walkers: this.pedestrians.lists, lifts: this.liftList, kits: this.hunters.kits.list,
       inside: this.insideKind ? { kind: this.insideKind, list: this.insideList } : undefined,
     };
   }

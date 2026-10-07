@@ -15,6 +15,7 @@ import { Car, type RoadSurface } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { footprint, type Parked, type Parking } from "./vehicles/parking";
 import { InstanceList, type Traffic } from "./vehicles/traffic";
+import { Kits } from "./pickups";
 
 export const MAX_HEALTH = 100;
 const REGEN_DELAY = 5; // seconds without a hit before health comes back
@@ -177,6 +178,10 @@ export class Hunters implements BoltTargets {
   gotYou = false;
   /** A shove for the runner (from a car), to be applied by the caller. */
   knock: Vec3 | null = null;
+  /** Where hunters went down since the last update (where kits may be left); `air` for a flyer's. */
+  readonly fallen: { pos: Vec3; air: boolean }[] = [];
+  /** Health kits lying about. */
+  readonly kits: Kits;
   private clock = 0;
   private spawnTimer = GRACE;
   private sinceHit = 99;
@@ -187,7 +192,9 @@ export class Hunters implements BoltTargets {
   private rings = new Map<string, Ring>();
   private tops = new Map<number, number>(); // tallest thing around points on a 3 m grid
 
-  constructor(private w: HuntWorld, private rand = Math.random) {}
+  constructor(private w: HuntWorld, private rand = Math.random) {
+    this.kits = new Kits(this, w.particles, rand);
+  }
 
   /** How many hunters may be out at once. */
   get pressure(): number {
@@ -198,6 +205,7 @@ export class Hunters implements BoltTargets {
   /** Call everyone off (demo, toggled off). */
   clear(): void {
     this.list.length = 0;
+    this.kits.clear();
     this.health = MAX_HEALTH;
     this.hurt = 0;
     this.clock = 0;
@@ -215,6 +223,7 @@ export class Hunters implements BoltTargets {
   update(dt: number, q: Quarry, view: View): void {
     this.gotYou = false;
     this.knock = null;
+    this.fallen.length = 0;
     this.quarry = q;
     if (!this.active) return;
     this.clock += dt;
@@ -330,7 +339,7 @@ export class Hunters implements BoltTargets {
   }
 
   /** Feet height of a free standing spot at (x, z) within a metre of level y, or null. */
-  private standAt(x: number, z: number, y: number): number | null {
+  standAt(x: number, z: number, y: number): number | null {
     const boxes = this.w.colliders(x, z);
     const R = 0.6;
     let ground = FLOOR;
@@ -450,6 +459,13 @@ export class Hunters implements BoltTargets {
       h.shots = 0;
       h.cooldown = pause * (0.8 + this.rand() * 0.6);
     } else h.cooldown = gap;
+  }
+
+  /** Patch the runner up by n; false (and nothing taken) when they are already whole. */
+  heal(n: number): boolean {
+    if (this.health >= MAX_HEALTH || this.health <= 0) return false;
+    this.health = Math.min(MAX_HEALTH, this.health + n);
+    return true;
   }
 
   private damage(n: number): void {
@@ -909,6 +925,7 @@ export class Hunters implements BoltTargets {
     this.kills++;
     const p = h.pos;
     const { combat, particles } = this.w;
+    this.fallen.push({ pos: [...p], air: !!h.flyer });
     if (h.flyer) combat.wreckFlyer(p, h.flyer.vel, h.flyer.yaw, h.flyer.color, false);
     else if (h.car) combat.wreckCar(p, h.car.yaw, h.car.van, h.car.color, h.vel, false);
     else {

@@ -224,6 +224,13 @@ canvas#view {
 
 #health.low i { background: #e0473a; }
 
+/* a health kit taken */
+#health.heal i { animation: heal 0.9s ease-out; }
+
+@keyframes heal {
+  from { background: #8fdc96; box-shadow: 0 0 8px #8fdc96; }
+}
+
 #markers {
   position: fixed;
   inset: 0;

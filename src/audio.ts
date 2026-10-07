@@ -394,6 +394,26 @@ export class Audio {
     o.stop(t + 0.24);
   }
 
+  /** A health kit taken: two soft rising notes. */
+  heal(): void {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    const t = ctx.currentTime;
+    for (const [at, freq] of [[0, 520], [0.09, 780]]) {
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(freq, t + at);
+      o.frequency.exponentialRampToValueAtTime(freq * 1.06, t + at + 0.25);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t + at);
+      g.gain.exponentialRampToValueAtTime(0.22, t + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + at + 0.35);
+      o.connect(g).connect(this.master);
+      o.start(t + at);
+      o.stop(t + at + 0.4);
+    }
+  }
+
   landing(strength: number): void {
     const ctx = this.ctx;
     if (!ctx || ctx.state !== "running") return;

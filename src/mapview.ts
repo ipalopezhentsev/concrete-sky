@@ -33,6 +33,7 @@ const INK = {
   water: "#2d5673",
   you: "#f2efe9",
   hunter: "#e64030",
+  kit: "#8fdc96", // health kits on the radar
 };
 
 export interface MapOptions {
@@ -135,8 +136,8 @@ export class MapView {
 
   /**
    * The radar's frame: the same plan, cut round and turned so straight ahead is up, the
-   * hunters as blips — pinned to the rim when they are further out than it reaches — and a
-   * tick on the rim for north, since the map no longer keeps it at the top.
+   * hunters as blips — pinned to the rim when they are further out than it reaches — health
+   * kits as small crosses, and a tick on the rim for north, since the map no longer keeps it at the top.
    */
   private sweep(
     ctx: CanvasRenderingContext2D, x: number, z: number, yaw: number, side: number, scale: number,
@@ -170,6 +171,14 @@ export class MapView {
       const dx = bx - c, dy = by - c, d = Math.hypot(dx, dy);
       const edge = rim - 5;
       const out = d > edge;
+      if (b[2] === 1) {
+        // a health kit: a small cross, and only once it is within the radar's reach
+        if (out) continue;
+        ctx.fillStyle = INK.kit;
+        ctx.fillRect(bx - 3.5, by - 1.2, 7, 2.4);
+        ctx.fillRect(bx - 1.2, by - 3.5, 2.4, 7);
+        continue;
+      }
       if (out) [bx, by] = [c + (dx / d) * edge, c + (dy / d) * edge];
       ctx.fillStyle = INK.hunter;
       ctx.strokeStyle = "rgba(12, 13, 15, 0.85)";

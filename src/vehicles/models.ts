@@ -266,6 +266,27 @@ export function walkerBoxes(stride: number): ModelBox[] {
   ];
 }
 
+/** A health kit (origin at the bottom centre): a pale case with a red cross on the lid and every side. */
+export function kitBoxes(): ModelBox[] {
+  const crossX = (x: number, out: number) => [
+    box(Math.min(x, x + out), 0.13, -0.12, Math.max(x, x + out), 0.23, 0.12, Mat.Tail),
+    box(Math.min(x, x + out), 0.06, -0.05, Math.max(x, x + out), 0.3, 0.05, Mat.Tail),
+  ];
+  const crossZ = (z: number, out: number) => [
+    box(-0.12, 0.13, Math.min(z, z + out), 0.12, 0.23, Math.max(z, z + out), Mat.Tail),
+    box(-0.05, 0.06, Math.min(z, z + out), 0.05, 0.3, Math.max(z, z + out), Mat.Tail),
+  ];
+  return [
+    box(-0.3, 0, -0.22, 0.3, 0.36, 0.22, Mat.Paint, true),
+    // the lid's cross, and a dark handle beside it
+    box(-0.17, 0.36, -0.05, 0.17, 0.375, 0.05, Mat.Tail),
+    box(-0.05, 0.36, -0.17, 0.05, 0.375, 0.17, Mat.Tail),
+    trim(-0.1, 0.36, 0.18, 0.1, 0.4, 0.2, DASH),
+    ...crossZ(0.22, 0.012), ...crossZ(-0.22, -0.012),
+    ...crossX(0.3, 0.012), ...crossX(-0.3, -0.012),
+  ];
+}
+
 /** A lift platform (LIFT_SIZE square, origin at the centre of its top): a concrete slab on a steel frame with lit edges. */
 export function liftBoxes(size: number, thick: number): ModelBox[] {
   const h = size / 2;

@@ -15,7 +15,9 @@ thinning out at night and in the rain, and they step out of your way.
 Take a parked flyer from a landing pad, fly to another roof and step out,
 shoot other flyers out of the sky, or take a car and drive. Hunters come after
 you on foot, in cars and in flyers, and there's nothing to do but stay ahead
-of them (or turn them off with H). Under some of the avenues there is a subway:
+of them (or turn them off with H). Health kits, white cases with a red cross,
+turn up near you while you're hunted, and a downed hunter sometimes leaves one
+(hanging in mid-air, if they were flying); run, drive or fly through one to heal. Under some of the avenues there is a subway:
 find an entrance, take the stair down, and ride a train to the next station.
 M opens a map of the streets, railways, subway lines and rivers around you.
 
