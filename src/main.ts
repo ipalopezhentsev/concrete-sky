@@ -696,6 +696,8 @@ async function main(): Promise<void> {
 
     // vehicles, hunters, weapons, effects
     rides.hunters.active = running && hunt;
+    rides.pedestrians.hour = weather.hour;
+    rides.pedestrians.rain = weather.params.rain;
     rides.update(dt, time, { eye, fwd, roll, fov: fovDeg }, active && controls.fire);
     const hunters = rides.hunters;
     if (hunters.gotYou) {

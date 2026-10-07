@@ -8,6 +8,7 @@ import { Hunters, type Quarry } from "./hunters";
 import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import { Lifts } from "./lifts";
+import { Pedestrians, type Avoid } from "./pedestrians";
 import { Boat } from "./vehicles/boat";
 import { Metro, metroCycle, onTrack, trackOff, trainAt, TRAIN } from "./vehicles/metro";
 import { Car, type RoadSurface } from "./vehicles/car";
@@ -69,6 +70,8 @@ export class Rides {
   /** Cars knocked loose from the traffic or the kerb, until they come to rest. */
   readonly knocks = new Knocks(this.traffic, this.parking);
   readonly hunters: Hunters;
+  /** People on the pavements. */
+  readonly pedestrians: Pedestrians;
   flyer: Flyer | null = null;
   car: Car | null = null;
   boat: Boat | null = null;
@@ -92,6 +95,7 @@ export class Rides {
 
   constructor(private world: World, private player: Player) {
     this.hunters = new Hunters(this);
+    this.pedestrians = new Pedestrians(world.colliders);
   }
 
   /** City collision plus parked vehicles and lift platforms. */
@@ -189,6 +193,7 @@ export class Rides {
     this.parking.sync(this.world.pads(), this.world.parkedCars(), this.world.boats());
     this.stations = [...this.world.stations()];
     this.lifts.sync(this.world.lifts());
+    this.pedestrians.sync(this.world.lifts(), this.stations);
   }
 
   /**
@@ -429,6 +434,19 @@ export class Rides {
     return { pos: p.pos, vel: p.vel, mode: "foot", yaw: p.yaw };
   }
 
+  /** Whoever people on the pavement step out of the way of: the runner, and anything driven at them. */
+  private inTheWay(): Avoid[] {
+    const out: Avoid[] = [];
+    if (this.car) out.push({ x: this.car.pos[0], z: this.car.pos[2], r: this.car.van ? 3.4 : 2.9 });
+    else if (!this.riding) out.push({ x: this.player.pos[0], z: this.player.pos[2], r: 0.8 });
+    for (const h of this.hunters.list) {
+      if (h.dead || h.flyer) continue;
+      const p = h.pos;
+      out.push({ x: p[0], z: p[2], r: h.car ? 2.9 : 0.8 });
+    }
+    return out;
+  }
+
   /** Traffic, hunters, weapons and effects; call after drive() and once the camera is known. */
   update(dt: number, time: number, cam: RideCamera, fire: boolean): void {
     this.time = time;
@@ -436,6 +454,7 @@ export class Rides {
     const m = this.metro;
     this.traffic.ridden = m ? { axis: m.axis, line: m.line, dir: m.dir, slot: m.slot } : null;
     this.traffic.update(time, cam.eye, cam.fwd);
+    this.pedestrians.update(time, cam.eye, cam.fwd, this.inTheWay());
     const armed = this.hunters.active;
     if (this.flyer && fire) {
       this.combat.trigger(this.flyer.pos, this.flyer.yaw, this.aimPoint(cam), this.flyer.vel);
@@ -563,7 +582,7 @@ export class Rides {
     const t = this.traffic;
     return {
       cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, cabins: t.cabins, cabinEnds: t.cabinEnds,
-      figures: this.hunters.figures, lifts: this.liftList,
+      figures: this.hunters.figures, walkers: this.pedestrians.lists, lifts: this.liftList,
       inside: this.insideKind ? { kind: this.insideKind, list: this.insideList } : undefined,
     };
   }

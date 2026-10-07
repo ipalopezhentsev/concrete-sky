@@ -231,6 +231,41 @@ export function figureBoxes(stride: number): ModelBox[] {
   ];
 }
 
+const SKIN: Tint = [0.62, 0.47, 0.38];
+const HAIR: Tint = [0.1, 0.085, 0.07];
+const TROUSERS: Tint = [0.13, 0.13, 0.15];
+const SHOES: Tint = [0.06, 0.055, 0.05];
+
+/** The poses a walker is drawn in, as strides for `walkerBoxes`: a walk cycle in five frames. */
+export const WALKER_STRIDES = [-1, -0.5, 0, 0.5, 1];
+
+/**
+ * Someone out on the pavement: dark trousers, a coat in its own colour, bare head. stride
+ * -1..1 swings the legs and both arms, shorter than a hunter's run.
+ */
+export function walkerBoxes(stride: number): ModelBox[] {
+  const leg = stride * 0.17, arm = -stride * 0.11;
+  return [
+    trim(0.04, 0, -0.08 + leg, 0.2, 0.86, 0.08 + leg, TROUSERS),
+    trim(-0.2, 0, -0.08 - leg, -0.04, 0.86, 0.08 - leg, TROUSERS),
+    trim(0.03, 0, -0.06 + leg, 0.21, 0.09, 0.19 + leg, SHOES),
+    trim(-0.21, 0, -0.06 - leg, -0.03, 0.09, 0.19 - leg, SHOES),
+    // coat, down past the hips, and the shoulders
+    box(-0.23, 0.7, -0.13, 0.23, 1.44, 0.12, Mat.Paint, true),
+    box(-0.25, 1.3, -0.12, 0.25, 1.46, 0.11, Mat.Paint, true),
+    // both arms swing, each against its own leg
+    box(0.24, 0.8, -0.06 + arm, 0.33, 1.42, 0.06 + arm, Mat.Paint, true),
+    box(-0.33, 0.8, -0.06 - arm, -0.24, 1.42, 0.06 - arm, Mat.Paint, true),
+    trim(0.245, 0.7, -0.05 + arm * 1.3, 0.325, 0.8, 0.05 + arm * 1.3, SKIN),
+    trim(-0.325, 0.7, -0.05 - arm * 1.3, -0.245, 0.8, 0.05 - arm * 1.3, SKIN),
+    // neck, head and hair
+    trim(-0.06, 1.46, -0.05, 0.06, 1.52, 0.05, SKIN),
+    trim(-0.1, 1.52, -0.1, 0.1, 1.75, 0.11, SKIN),
+    trim(-0.11, 1.68, -0.12, 0.11, 1.78, 0.1, HAIR),
+    trim(-0.11, 1.52, -0.12, 0.11, 1.68, -0.08, HAIR),
+  ];
+}
+
 /** A lift platform (LIFT_SIZE square, origin at the centre of its top): a concrete slab on a steel frame with lit edges. */
 export function liftBoxes(size: number, thick: number): ModelBox[] {
   const h = size / 2;

@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { boatBoxes, carriageBoxes, carriageEndBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, liftBoxes, modelData } from "./vehicles/models";
+import { boatBoxes, carriageBoxes, carriageEndBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, liftBoxes, modelData, walkerBoxes, WALKER_STRIDES } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
@@ -60,6 +60,8 @@ export interface VehicleLists {
   inside?: { kind: "car" | "van" | "flyer"; list: InstanceList };
   /** People on foot, by pose: standing, left stride, right stride. */
   figures?: InstanceList[];
+  /** People on the pavements, by pose: one list per stride of WALKER_STRIDES. */
+  walkers?: InstanceList[];
   lifts?: InstanceList;
 }
 
@@ -164,7 +166,7 @@ export class Renderer {
     car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh; cabin: InstancedMesh; cabinEnd: InstancedMesh;
     inside: Record<"car" | "van" | "flyer", InstancedMesh>;
     carFar: InstancedMesh; vanFar: InstancedMesh; flyerFar: InstancedMesh;
-    figures: InstancedMesh[]; lift: InstancedMesh;
+    figures: InstancedMesh[]; walkers: InstancedMesh[]; lift: InstancedMesh;
   };
   private particleProg: Program;
   private particleMesh: InstancedMesh;
@@ -242,6 +244,7 @@ export class Renderer {
       vanFar: instanced(modelData(carBoxesFar(true))),
       flyerFar: instanced(modelData(flyerBoxesFar())),
       figures: [0, 1, -1].map((stride) => instanced(modelData(figureBoxes(stride)))),
+      walkers: WALKER_STRIDES.map((stride) => instanced(modelData(walkerBoxes(stride)))),
       lift: instanced(modelData(liftBoxes(LIFT_SIZE, LIFT_THICK))),
     };
     this.tri = fullscreenTriangle(gl);
@@ -462,6 +465,7 @@ export class Renderer {
       gl.enable(gl.CULL_FACE);
     }
     vehicles.figures?.forEach((list, i) => drawCulled(m.figures[i], null, list, 1.4));
+    vehicles.walkers?.forEach((list, i) => drawCulled(m.walkers[i], null, list, 1.1));
     if (vehicles.lifts) drawCulled(m.lift, null, vehicles.lifts, LIFT_SIZE);
 
     // --- sky, only where no geometry was drawn

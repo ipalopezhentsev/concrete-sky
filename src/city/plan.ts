@@ -35,7 +35,7 @@ const DECKS = [36, 44, 52, 60];
 type Kind = "perimeter" | "cluster" | "spire" | "slab" | "yard";
 
 /** Block edge to podium face: the pavement between the kerb and the building line. */
-const WALK = 7;
+export const WALK = 7;
 
 /** A convex polygon pulled in by `d` on every edge, or empty if nothing is left. */
 export function shrink(poly: Vec2[], d: number): Vec2[] {
@@ -2144,6 +2144,19 @@ function paveAt(x: number, z: number): number {
   return fieldAt(x, z) - PAVE_DROP;
 }
 
+/** The pavement's surface at a point, for anything walking on it (see `paveAt`). */
+export const pavementAt = paveAt;
+
+/**
+ * A block's outline at the kerb, if it is a block with a pavement round a podium: the ring
+ * between this and the outline pulled in by `WALK` is where people walk. Null for the slivers
+ * left between streets, which are nothing but paving.
+ */
+export function pavementOf(site: Site): Vec2[] | null {
+  const poly = cellOf(site);
+  return poly && poly.length >= 3 && podiumOf(poly) ? poly : null;
+}
+
 /**
  * The podium's footprint, as its walls stand: the outline pulled in by the walk and blunted at
  * the corners as `extrude` blunts it. Null where the block is too small to carry one, which
@@ -3634,13 +3647,16 @@ export function stationsNear(x: number, z: number, r: number): Station[] {
  * round the shaft is thick enough to face whatever ragged edge that leaves.
  */
 export function shaftCut(x: number, z: number): boolean {
-  for (const st of stationsNear(x, z, 110)) {
-    const c = Math.cos(st.yaw), sn = Math.sin(st.yaw);
-    const dx = x - st.shaftX, dz = z - st.shaftZ;
-    const u = (dx * sn + dz * c) * st.lean;
-    if (u > -FOOT - TILE / 2 && u < st.reach + TILE / 2 && Math.abs(dx * c - dz * sn) < SHAFT_X + TILE / 2) return true;
-  }
+  for (const st of stationsNear(x, z, 110)) if (inEntrance(st, x, z, TILE / 2)) return true;
   return false;
+}
+
+/** True where a point is within `pad` of a station's opening in the street. */
+export function inEntrance(st: Station, x: number, z: number, pad: number): boolean {
+  const c = Math.cos(st.yaw), sn = Math.sin(st.yaw);
+  const dx = x - st.shaftX, dz = z - st.shaftZ;
+  const u = (dx * sn + dz * c) * st.lean;
+  return u > -FOOT - pad && u < st.reach + pad && Math.abs(dx * c - dz * sn) < SHAFT_X + pad;
 }
 
 /** The well the stair comes down through, over the middle of the platform. */
