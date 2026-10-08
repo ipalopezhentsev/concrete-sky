@@ -9,6 +9,7 @@ import type { Vec3 } from "./math";
 import type { Colliders, Player } from "./player";
 import { Lifts } from "./lifts";
 import { Pedestrians, type Avoid } from "./pedestrians";
+import { Quests, type Runner } from "./quests";
 import { Boat } from "./vehicles/boat";
 import { Metro, metroCycle, onTrack, trackOff, trainAt, TRAIN } from "./vehicles/metro";
 import { Car, type RoadSurface } from "./vehicles/car";
@@ -72,6 +73,8 @@ export class Rides {
   readonly hunters: Hunters;
   /** People on the pavements. */
   readonly pedestrians: Pedestrians;
+  /** People with things that need taking somewhere. */
+  readonly quests: Quests;
   flyer: Flyer | null = null;
   car: Car | null = null;
   boat: Boat | null = null;
@@ -96,6 +99,7 @@ export class Rides {
   constructor(private world: World, private player: Player) {
     this.hunters = new Hunters(this);
     this.pedestrians = new Pedestrians(world.colliders);
+    this.quests = new Quests(world, this.colliders, this.hunters, this.pedestrians, this.particles);
   }
 
   /** City collision plus parked vehicles and lift platforms. */
@@ -434,6 +438,15 @@ export class Rides {
     return { pos: p.pos, vel: p.vel, mode: "foot", yaw: p.yaw };
   }
 
+  /** The runner, as the jobs see them. */
+  runner(): Runner {
+    const pl = this.player;
+    return {
+      pos: this.focus, foot: !this.riding, flyer: this.flyer !== null, vy: pl.vel[1],
+      jolt: this.car ? this.car.impact / 20 : 0, caught: this.hunters.gotYou,
+    };
+  }
+
   /** Whoever people on the pavement step out of the way of: the runner, and anything driven at them. */
   private inTheWay(): Avoid[] {
     const out: Avoid[] = [];
@@ -468,6 +481,7 @@ export class Rides {
     this.hunters.update(dt, this.quarry(), cam);
     this.combat.update(dt, this.traffic, this.parking, this.colliders, this.hunters);
     this.hunters.kits.update(dt, this.quarry(), cam);
+    this.quests.update(dt, this.runner());
     if (this.hunters.knock && !this.riding) {
       const k = this.hunters.knock;
       for (let i = 0; i < 3; i++) this.player.vel[i] += k[i];
@@ -576,6 +590,7 @@ export class Rides {
     this.combat.drawWrecks(t.flyers, t.cars, t.vans);
     this.hunters.draw(t.flyers, t.cars, t.vans);
     this.hunters.kits.draw(eye);
+    this.quests.draw(eye);
     this.lifts.instances(this.liftList, eye, 400);
   }
 
@@ -585,6 +600,7 @@ export class Rides {
     return {
       cars: t.cars, vans: t.vans, flyers: t.flyers, boats: t.boats, trains: t.trains, cabins: t.cabins, cabinEnds: t.cabinEnds,
       figures: this.hunters.figures, walkers: this.pedestrians.lists, lifts: this.liftList, kits: this.hunters.kits.list,
+      parcels: this.quests.parcels,
       inside: this.insideKind ? { kind: this.insideKind, list: this.insideList } : undefined,
     };
   }

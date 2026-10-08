@@ -414,6 +414,32 @@ export class Audio {
     }
   }
 
+  /**
+   * A job's moments, as a few soft bell notes: something taken, handed over, a lamp lit, the
+   * job done (rising), or lost (falling).
+   */
+  chime(kind: "take" | "give" | "done" | "fail" | "lamp"): void {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    const t = ctx.currentTime;
+    const notes: Record<typeof kind, number[]> = {
+      take: [440, 660], give: [660, 440], lamp: [880], done: [523, 659, 784, 1047], fail: [392, 330, 262],
+    };
+    notes[kind].forEach((freq, i) => {
+      const at = t + i * 0.11;
+      const o = ctx.createOscillator();
+      o.type = "triangle";
+      o.frequency.setValueAtTime(freq, at);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(0.16, at + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, at + (kind === "done" ? 0.9 : 0.5));
+      o.connect(g).connect(this.master);
+      o.start(at);
+      o.stop(at + 1);
+    });
+  }
+
   landing(strength: number): void {
     const ctx = this.ctx;
     if (!ctx || ctx.state !== "running") return;

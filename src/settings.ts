@@ -25,6 +25,7 @@ export const ACTIONS = {
   zoomIn: "map zoom in",
   zoomOut: "map zoom out",
   hunters: "hunters on / off",
+  job: "drop the job",
   music: "music on / off",
   weather: "next weather",
   holdWeather: "hold weather",
@@ -50,6 +51,7 @@ const DEFAULT_KEYS: Record<Action, string[]> = {
   zoomIn: ["Equal", "NumpadAdd"],
   zoomOut: ["Minus", "NumpadSubtract"],
   hunters: ["KeyH"],
+  job: ["KeyJ"],
   music: ["KeyU"],
   weather: ["KeyN"],
   holdWeather: ["KeyL"],
@@ -66,6 +68,8 @@ export interface Settings {
   musicVolume: number; // 0..1
   music: boolean;
   hunters: boolean;
+  /** People around the city with jobs to give. */
+  quests: boolean;
   difficulty: Difficulty;
   radar: boolean;
   quality: Quality; // applies on reload
@@ -83,6 +87,7 @@ const DEFAULTS: Settings = {
   musicVolume: 0.7,
   music: true,
   hunters: true,
+  quests: true,
   difficulty: "normal",
   radar: true,
   quality: "auto",
@@ -289,6 +294,7 @@ export class SettingsDialog {
 
     section("game");
     row("hunters", check("hunters"));
+    row("jobs", check("quests"), "people with things to carry somewhere");
     row("difficulty", choice("difficulty", [["easy", "easy"], ["normal", "normal"], ["hard", "hard"]]));
     row("radar map", check("radar"), "always on while you play");
 

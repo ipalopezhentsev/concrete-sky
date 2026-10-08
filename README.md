@@ -22,6 +22,10 @@ turn up near you while you're hunted, and a downed hunter sometimes leaves one
 (hanging in mid-air, if they were flying); run, drive or fly through one to heal. Under some of the avenues there is a subway:
 find an entrance, take the stair down, and ride a train to the next station.
 M opens a map of the streets, railways, subway lines and rivers around you.
+There is always someone not far off with a job for you, under a thin amber
+light: a parcel for someone on a tower roof, a letter for someone waiting two
+stations down the line, something left up on a deck, the survey lamps on the
+roofs gone out.
 
 Everything is generated in code, with no image or sound files:
 - the city
@@ -52,6 +56,7 @@ Click the page to capture the mouse.
 | V | chase camera or cockpit view (in a vehicle) |
 | R | return to the last roof you stood on |
 | H | hunters on / off |
+| J | drop the job in hand (or wave away whoever is offering one) |
 | U | music on / off (remembered; `?music=0` starts with it off) |
 | N | skip to the next weather |
 | L | hold the current weather / let it drift again |
@@ -83,6 +88,22 @@ open to get on, walk about inside while it runs, and press E again at a stop to
 step out — the caption tells you which station it is. It is a real way across
 the city: the stops are a few hundred metres apart and the train does not stop
 for traffic.
+
+**Jobs:** someone standing under an amber light has a job going: walk up and
+press E to hear it. The line along the top of the screen then says where to go
+next, how far it is and how far up or down, and an amber mark on the screen,
+the radar and the map points the way. Hand-overs happen as you walk up. Jobs
+are made up fresh out of whatever is around: take a parcel from the pavement
+to someone on a roof (some of them two hundred metres up, which is what the
+flyers on the landing pads are for); carry something to one person, who gives
+you something else for a third; fetch what someone left up on a deck or a roof
+and bring it back; light three or four survey lamps on the roofs against the
+clock; or take a letter from one subway platform to someone waiting at another
+station down the line. Some things are *fragile* and break in a drop of more
+than a storey or a crash; some are *hot* — the hunters want them, more of them
+come out while you carry one, and if they catch you it is gone; some are
+wanted by a time. J drops a job, and the settings can turn jobs off
+(`?quests=0` too).
 
 **Hunters:** figures in long dark coats with red visors, and black cars and
 flyers. The first ones turn up about ten seconds after you start. Up to two
@@ -134,7 +155,7 @@ hour at a time, K holds it, and `?time=19:25` starts wherever you like.
 `golden hour`, `sunset`, `blue hour`, `midnight` — which sets the hour as well
 as the sky.
 
-URL options: `?seed=12345`, `?demo` (start in the demo) / `?demo=0` (never start it by itself), `?hunters=0` (no hunters), `?weather=overcast`, `?time=19:25` (the hour to start at), `?daylength=300` (real seconds in a day; `0` stops the clock), `?vehicle=1` / `?vehicle=car` (start in a vehicle), `?scale=0.7` (internal resolution),
+URL options: `?seed=12345`, `?demo` (start in the demo) / `?demo=0` (never start it by itself), `?hunters=0` (no hunters), `?quests=0` (no jobs), `?weather=overcast`, `?time=19:25` (the hour to start at), `?daylength=300` (real seconds in a day; `0` stops the clock), `?vehicle=1` / `?vehicle=car` (start in a vehicle), `?scale=0.7` (internal resolution),
 `?dpr=2` (render at full device pixel ratio), `?msaa=0|2|4`,
 `?shadowsize=1024|2048|4096`, `?prepass=0`, `?pose=x,y,z,yaw,pitch`.
 
@@ -221,6 +242,7 @@ reversed-Z depth.
 | `src/vehicles/car.ts` | Drivable car: arcade handling, box collision, kerb stepping. |
 | `src/vehicles/parking.ts` | Vehicles standing still: flyers on pads, kerbside cars, and anything the player parked. |
 | `src/rides.ts` | The player's side of vehicles: boarding, driving, flying, shooting and their cameras. |
+| `src/quests.ts` | Jobs: the person offering one, and the job made up on the spot from the roofs, decks, pavements, landing pads and platforms streamed in round them — couriers, relays, fetches, survey lamps and runs down the subway line — with fragile and hot cargo, deadlines, and the beacon, parcels and lamps that show where to go. |
 | `src/hunters.ts` | Hunters: spawning as the pressure builds, the chase on foot (the demo's deck autopilot pointed at you over the bridges, direct pursuit otherwise), taking parked or passing vehicles, driving the street grid, flying the canyons and circling at a spot with a clear shot, shooting in bursts, your health. |
 | `src/demo.ts` | Demo mode: autopilots for running (along lines probed clear on each deck, over the bridges), flying (street corridors between the traffic layers) and driving (timing avenue crossings against the traffic), and the director that cuts between them. |
 | `src/touch.ts` | On-screen touch controls: floating stick, drag to look, hold and tap buttons. |
@@ -240,6 +262,7 @@ node scripts/bench.mjs [--discrete] [--vsync] [--dpr=2]   # uncapped fps and per
 node scripts/board-test.mjs out/board.png                 # boards, flies and lands with real key presses
 node scripts/vehicles-test.mjs out                        # drives a car, then flies and shoots, in a real browser
 node scripts/hunters-test.mjs out                         # hunters close up, shooting one, then waiting to be caught
+node scripts/quests-test.mjs out 6                        # takes a job in a few cities and is stood at each step until it is done
 node scripts/map-test.mjs out                             # opens the map, waits for its tiles, zooms through the levels
 ```
 

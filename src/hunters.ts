@@ -182,6 +182,8 @@ export class Hunters implements BoltTargets {
   readonly fallen: { pos: Vec3; air: boolean }[] = [];
   /** Health kits lying about. */
   readonly kits: Kits;
+  /** Extra hunters out while the runner carries something they want (see quests.ts). */
+  heat = 0;
   private clock = 0;
   private spawnTimer = GRACE;
   private sinceHit = 99;
@@ -199,7 +201,7 @@ export class Hunters implements BoltTargets {
   /** How many hunters may be out at once. */
   get pressure(): number {
     const d = DIFFICULTY[this.difficulty];
-    return Math.min(d.most, 2 + Math.floor(this.clock / d.every));
+    return Math.min(d.most, 2 + Math.floor(this.clock / d.every)) + this.heat;
   }
 
   /** Call everyone off (demo, toggled off). */

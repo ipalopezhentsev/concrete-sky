@@ -287,6 +287,19 @@ export function kitBoxes(): ModelBox[] {
   ];
 }
 
+/**
+ * A job's parcel, or a survey lamp waiting to be lit (origin at the bottom centre): a case in
+ * the instance's colour, strapped twice, with a lamp on top that burns when its lights are on.
+ */
+export function parcelBoxes(): ModelBox[] {
+  return [
+    box(-0.24, 0, -0.17, 0.24, 0.3, 0.17, Mat.Paint, true),
+    trim(-0.25, -0.005, -0.04, 0.25, 0.31, 0.04, DASH),
+    trim(-0.04, -0.005, -0.18, 0.04, 0.31, 0.18, DASH),
+    box(-0.06, 0.31, -0.06, 0.06, 0.4, 0.06, Mat.Glow),
+  ];
+}
+
 /** A lift platform (LIFT_SIZE square, origin at the centre of its top): a concrete slab on a steel frame with lit edges. */
 export function liftBoxes(size: number, thick: number): ModelBox[] {
   const h = size / 2;

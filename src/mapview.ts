@@ -34,6 +34,7 @@ const INK = {
   you: "#f2efe9",
   hunter: "#e64030",
   kit: "#8fdc96", // health kits on the radar
+  goal: "#f0b45a", // where a job wants you
 };
 
 export interface MapOptions {
@@ -131,6 +132,15 @@ export class MapView {
     ctx.drawImage(this.plan, -MARGIN - ox, -MARGIN - oz, this.planSize, this.planSize);
 
     this.marker(ctx, side / 2, side / 2, yaw, scale);
+    // where a job wants you, pinned to the edge when it is off the panel
+    for (const b of blips) {
+      if (b[2] !== 2) continue;
+      const c = side / 2, edge = c - 12;
+      let gx = (b[0] - x) * scale, gz = (b[1] - z) * scale;
+      const far = Math.max(Math.abs(gx), Math.abs(gz)) / edge;
+      if (far > 1) [gx, gz] = [gx / far, gz / far];
+      this.goal(ctx, c + gx, c + gz, far > 1);
+    }
     this.furniture(ctx, side, scale);
   }
 
@@ -171,6 +181,11 @@ export class MapView {
       const dx = bx - c, dy = by - c, d = Math.hypot(dx, dy);
       const edge = rim - 5;
       const out = d > edge;
+      if (b[2] === 2) {
+        if (out) [bx, by] = [c + (dx / d) * edge, c + (dy / d) * edge];
+        this.goal(ctx, bx, by, out);
+        continue;
+      }
       if (b[2] === 1) {
         // a health kit: a small cross, and only once it is within the radar's reach
         if (out) continue;
@@ -342,6 +357,24 @@ export class MapView {
     ctx.fill();
     ctx.stroke();
     ctx.restore();
+  }
+
+  /** A job's goal: an amber diamond, dimmer when it is pinned to the edge. */
+  private goal(ctx: CanvasRenderingContext2D, x: number, y: number, out: boolean): void {
+    const r = out ? 4.5 : 6;
+    ctx.globalAlpha = out ? 0.7 : 1;
+    ctx.fillStyle = INK.goal;
+    ctx.strokeStyle = "rgba(12, 13, 15, 0.85)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r, y);
+    ctx.lineTo(x, y + r);
+    ctx.lineTo(x - r, y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   /** North, a scale bar, and a word while the plan is still coming in. */

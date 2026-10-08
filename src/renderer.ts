@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { boatBoxes, carriageBoxes, carriageEndBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, kitBoxes, liftBoxes, modelData, walkerBoxes, WALKER_STRIDES } from "./vehicles/models";
+import { boatBoxes, carriageBoxes, carriageEndBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, kitBoxes, liftBoxes, modelData, parcelBoxes, walkerBoxes, WALKER_STRIDES } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
@@ -65,6 +65,8 @@ export interface VehicleLists {
   lifts?: InstanceList;
   /** Health kits on the ground. */
   kits?: InstanceList;
+  /** Jobs' parcels and survey lamps. */
+  parcels?: InstanceList;
 }
 
 /**
@@ -168,7 +170,7 @@ export class Renderer {
     car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh; cabin: InstancedMesh; cabinEnd: InstancedMesh;
     inside: Record<"car" | "van" | "flyer", InstancedMesh>;
     carFar: InstancedMesh; vanFar: InstancedMesh; flyerFar: InstancedMesh;
-    figures: InstancedMesh[]; walkers: InstancedMesh[]; lift: InstancedMesh; kit: InstancedMesh;
+    figures: InstancedMesh[]; walkers: InstancedMesh[]; lift: InstancedMesh; kit: InstancedMesh; parcel: InstancedMesh;
   };
   private particleProg: Program;
   private particleMesh: InstancedMesh;
@@ -249,6 +251,7 @@ export class Renderer {
       walkers: WALKER_STRIDES.map((stride) => instanced(modelData(walkerBoxes(stride)))),
       lift: instanced(modelData(liftBoxes(LIFT_SIZE, LIFT_THICK))),
       kit: instanced(modelData(kitBoxes())),
+      parcel: instanced(modelData(parcelBoxes())),
     };
     this.tri = fullscreenTriangle(gl);
 
@@ -471,6 +474,7 @@ export class Renderer {
     vehicles.walkers?.forEach((list, i) => drawCulled(m.walkers[i], null, list, 1.1));
     if (vehicles.lifts) drawCulled(m.lift, null, vehicles.lifts, LIFT_SIZE);
     if (vehicles.kits?.count) drawCulled(m.kit, null, vehicles.kits, 0.6);
+    if (vehicles.parcels?.count) drawCulled(m.parcel, null, vehicles.parcels, 0.5);
 
     // --- sky, only where no geometry was drawn
     timer.begin("sky");

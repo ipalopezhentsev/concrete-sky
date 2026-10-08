@@ -40,6 +40,9 @@ const healthEl = document.getElementById("health")!;
 const healthBar = healthEl.firstElementChild as HTMLElement;
 const hurtEl = document.getElementById("hurt")!;
 const markersEl = document.getElementById("markers")!;
+const jobEl = document.getElementById("job")!;
+const sayEl = document.getElementById("say")!;
+const goalsEl = document.getElementById("goals")!;
 // phones and tablets: the title screen talks about tapping
 const coarse = matchMedia("(pointer: coarse)").matches;
 const verb = coarse ? "tap" : "click";
@@ -67,6 +70,10 @@ const debug = {
   kit: (_ahead: number, _air?: boolean) => false,
   /** Test hook: take `n` health off the runner. */
   hurt: (_n: number) => {},
+  /** Test hook: what the jobs are up to. */
+  job: () => ({}) as Record<string, unknown>,
+  /** Test hook: stand the runner next to whoever is offering a job, or at the next step of the one in hand. */
+  toJob: () => false,
 };
 (window as unknown as { __cs: typeof debug }).__cs = debug;
 
@@ -109,6 +116,16 @@ function parseHour(text: string | null): number | null {
   const [h, m] = text.split(":").map(Number);
   const hour = Number.isFinite(m) ? h + m / 60 : h;
   return Number.isFinite(hour) ? ((hour % 24) + 24) % 24 : null;
+}
+
+let sayTimer = 0;
+/** What someone says, under the middle of the screen for long enough to read it. */
+function say(text: string): void {
+  if (params.get("hud") === "0") return;
+  sayEl.textContent = text;
+  sayEl.classList.add("show");
+  clearTimeout(sayTimer);
+  sayTimer = window.setTimeout(() => sayEl.classList.remove("show"), 2500 + text.length * 55);
 }
 
 let captionTimer = 0;
@@ -291,6 +308,21 @@ async function main(): Promise<void> {
   debug.hurt = (n) => {
     rides.hunters.health = Math.max(1, rides.hunters.health - n);
   };
+  debug.job = () => {
+    const q = rides.quests;
+    return {
+      offer: q.offer ? { at: q.offer.at, giver: q.offer.job.giver.name, steps: q.offer.job.steps.map((s) => s.kind + ":" + s.at.kind) } : null,
+      job: q.job ? q.job.steps.map((s) => ({ kind: s.kind, where: s.at.where, done: s.done, at: [s.at.x, s.at.y, s.at.z] })) : null,
+      objective: q.objective(), carrying: q.carrying?.name ?? null, done: q.done, failed: q.failed, left: q.left,
+    };
+  };
+  debug.toJob = () => {
+    const g = rides.quests.goals()[0];
+    if (!g || rides.riding) return false;
+    player.pos = [g[0] + 1.2, g[1] - 1, g[2]];
+    player.vel = [0, 0, 0];
+    return true;
+  };
   if (params.get("vehicle") === "car") rides.spawnCar();
   else if (params.get("vehicle") === "van") rides.spawnCar(undefined, true);
   else if (params.get("vehicle") === "boat") rides.spawnBoat();
@@ -329,6 +361,13 @@ async function main(): Promise<void> {
       saveSettings();
     }
   };
+  // jobs are offered unless turned off (the settings, or ?quests=0)
+  let jobs = settings.quests && params.get("quests") !== "0" &&
+    !["shot", "autorun", "autofly"].some((k) => params.has(k));
+  const setJobs = (on: boolean) => {
+    jobs = on;
+    if (!on) rides.quests.clear();
+  };
   const setMusic = (on: boolean) => {
     audio.setMusic(on);
     settings.music = on;
@@ -336,6 +375,7 @@ async function main(): Promise<void> {
   };
 
   const interact = () => {
+    if (rides.quests.interact(rides.runner())) return;
     const why = rides.interact();
     if (why) {
       notice = why;
@@ -373,6 +413,7 @@ async function main(): Promise<void> {
       `${k("interact")} get in / out of cars, flyers and subway trains · click shoot · ${k("view")} cockpit view`,
       `${k("map")} map (${both("zoomIn", "zoomOut")} to zoom) · ${k("hunters")} hunters on / off · ` +
         `${k("roof")} back to last roof · ${k("music")} music`,
+      `talk to anyone under an amber light for a job · ${k("job")} drop the job`,
       `${k("weather")} next weather · ${k("holdWeather")} hold weather · ${both("clockBack", "clockOn")} wind the clock · ` +
         `${k("holdClock")} hold the clock`,
       "F3 stats · F4 copy stats · esc pause",
@@ -383,6 +424,7 @@ async function main(): Promise<void> {
     if (what === "sfxVolume" || what === "musicVolume") audio.setVolumes(settings.sfxVolume, settings.musicVolume);
     else if (what === "music") audio.setMusic(settings.music);
     else if (what === "hunters") setHunt(settings.hunters, false);
+    else if (what === "quests") setJobs(settings.quests);
     else if (what === "difficulty") rides.hunters.difficulty = settings.difficulty;
     else if (what === "detail") applyDetail();
     else if (what === "resolution") {
@@ -444,6 +486,7 @@ async function main(): Promise<void> {
 
   function startDemo(): void {
     rides.hunters.clear();
+    rides.quests.clear();
     setMode("demo");
     demo.start();
   }
@@ -556,6 +599,7 @@ async function main(): Promise<void> {
     if (mode !== "play") return;
     if (act === "roof" && !rides.riding) player.respawn();
     if (act === "interact") interact();
+    if (act === "job") rides.quests.drop();
     if (act === "view" && rides.riding) rides.cockpit = !rides.cockpit;
   });
   window.addEventListener("keyup", (e) => keys.delete(e.code));
@@ -630,6 +674,8 @@ async function main(): Promise<void> {
   let shownHits = 0;
   let shownKits = 0;
   const markers: HTMLElement[] = [];
+  const goalPins: { mark: HTMLElement; label: HTMLElement }[] = [];
+  let jobText = "", shownJob = "";
 
   const frame = (now: number) => {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -716,6 +762,7 @@ async function main(): Promise<void> {
 
     // vehicles, hunters, weapons, effects
     rides.hunters.active = running && hunt;
+    rides.quests.active = running && jobs;
     rides.pedestrians.hour = weather.hour;
     rides.pedestrians.rain = weather.params.rain;
     rides.update(dt, time, { eye, fwd, roll, fov: fovDeg }, active && controls.fire);
@@ -747,6 +794,12 @@ async function main(): Promise<void> {
     }
     if (rides.car && rides.car.impact > 4) audio.landing(Math.min(1, rides.car.impact / 25));
 
+    // the jobs: what people say, what happens, and the sound of it
+    const quests = rides.quests;
+    if (quests.said.length) say(quests.said.splice(0).join("   "));
+    if (quests.news.length) caption(quests.news.splice(0).pop()!);
+    for (const s of quests.sounds.splice(0)) audio.chime(s);
+
     // sound
     const speedNorm = rides.speedNorm;
     audio.update(dt, weather.params, speedNorm, focus[1]);
@@ -756,7 +809,7 @@ async function main(): Promise<void> {
 
     // HUD
     noticeTime -= dt;
-    const promptNow = !running ? "" : noticeTime > 0 ? notice : rides.promptText();
+    const promptNow = !running ? "" : noticeTime > 0 ? notice : quests.promptText(rides.runner()) || rides.promptText();
     // touch players tap the prompt itself, so drop the key name
     // and everyone else sees whichever key does it now
     const useKey = keyFor("interact").toUpperCase();
@@ -770,6 +823,7 @@ async function main(): Promise<void> {
     if (hunters.caught) parts.push(`caught  ${hunters.caught}`);
     if (rides.combat.kills) parts.push(`flyers downed  ${rides.combat.kills}`);
     if (rides.combat.carKills) parts.push(`cars wrecked  ${rides.combat.carKills}`);
+    if (quests.done) parts.push(`jobs done  ${quests.done}`);
     const score = parts.join("   ·   ");
     if (score !== shownScore) scoreEl.textContent = shownScore = score;
     const hunted = running && hunt && params.get("hud") !== "0";
@@ -807,6 +861,52 @@ async function main(): Promise<void> {
     }
     for (let i = shown; i < markers.length; i++) markers[i].hidden = true;
 
+    // the job: a line along the top, and a mark over where to go — or an arrow at the edge
+    // toward it — with how far it is
+    const showJob = running && params.get("hud") !== "0";
+    jobText = showJob ? quests.objective() : "";
+    if (jobText !== shownJob) {
+      shownJob = jobText;
+      jobEl.textContent = jobText;
+      jobEl.hidden = !jobText;
+    }
+    let pinned = 0;
+    if (showJob) {
+      const w = window.innerWidth, h = window.innerHeight;
+      const tanY = Math.tan(cam.fov / 2), tanX = tanY * (w / h);
+      for (const g of quests.goals()) {
+        const to = sub(g, eye);
+        const dist = Math.hypot(...to);
+        if (dist < 3) continue;
+        const pin = goalPins[pinned] ?? (() => {
+          const p = { mark: goalsEl.appendChild(document.createElement("b")), label: goalsEl.appendChild(document.createElement("i")) };
+          goalPins.push(p);
+          return p;
+        })();
+        pinned++;
+        pin.mark.hidden = pin.label.hidden = false;
+        const cx = dot(to, right), cy = dot(to, up), cz = dot(to, fwd);
+        const sx = cx / (cz * tanX), sy = cy / (cz * tanY);
+        const metres = `${Math.round(dist)} m`;
+        if (pin.label.textContent !== metres) pin.label.textContent = metres;
+        if (cz > 0 && Math.abs(sx) < 0.95 && Math.abs(sy) < 0.9) {
+          const px = (0.5 + 0.5 * sx) * w, py = (0.5 - 0.5 * sy) * h;
+          pin.mark.className = "here";
+          pin.mark.style.transform = `translate(${px}px, ${py}px) rotate(45deg)`;
+          pin.label.style.transform = `translate(${px + 10}px, ${py - 7}px)`;
+        } else {
+          const len = Math.hypot(cx, cy);
+          const [ux, uy] = len > 1e-3 ? [cx / len, cy / len] : [0, -1];
+          const k = 1 / Math.hypot(ux / (w * 0.42), uy / (h * 0.39));
+          const px = w / 2 + ux * k, py = h / 2 - uy * k;
+          pin.mark.className = "";
+          pin.mark.style.transform = `translate(${px}px, ${py}px) rotate(${Math.atan2(ux, uy)}rad)`;
+          pin.label.style.transform = `translate(${px - ux * 34 - 14}px, ${py + uy * 26 - 6}px)`;
+        }
+      }
+    }
+    for (let i = pinned; i < goalPins.length; i++) goalPins[i].mark.hidden = goalPins[i].label.hidden = true;
+
     fade = Math.min(1, fade + dt * 0.5);
     const blur = Math.max(0, Math.min(1, (speedNorm - 0.6) * 2.5));
     const shade = mode === "demo" ? Math.min(fade, demo.fade) : fade;
@@ -822,16 +922,18 @@ async function main(): Promise<void> {
     // where the runner is, and which way they are pointed — the camera's heading, so it is
     // the car's or the flyer's when they are in one
     const heading = Math.atan2(fwd[0], fwd[2]);
-    map.draw(focus[0], focus[2], heading);
+    // where the job wants you, as a third value of 2
+    const goalBlips = quests.goals().map((g) => [g[0], g[2], 2]);
+    map.draw(focus[0], focus[2], heading, goalBlips);
     // the radar, while playing — not over the big map, which already shows the same thing
     const radarOn = running && settings.radar && !map.open && params.get("hud") !== "0" && !params.has("shot");
     if (radarOn !== radar.open) radar.setOpen(radarOn);
     if (radarOn) {
       radar.zoomTo(rides.riding ? 1 : 0);
-      const blips = hunted ? [
+      const blips = [...goalBlips, ...(hunted ? [
         ...hunters.list.filter((x) => !x.dead).map((x) => [x.center[0], x.center[2]]),
         ...hunters.kits.where().map((p) => [p[0], p[2], 1]), // a third value of 1 marks a kit
-      ] : [];
+      ] : [])];
       radar.draw(focus[0], focus[2], heading, blips);
     }
 
