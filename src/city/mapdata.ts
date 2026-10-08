@@ -12,7 +12,7 @@
 // handful of hashed junctions, cheap enough to walk again every time the map is redrawn.
 
 import { artery, ARTERY, arteryLines, blocksIn, cellOf, riverAt, riverLines, RIVER_STEP } from "./network";
-import { hasRail, hasSubway, stationsNear } from "./plan";
+import { hasRail, hasSubway, railStationsNear, railWay, stationsNear } from "./plan";
 
 /** Side of one tile of block outlines, in metres. */
 export const MAP_TILE = 800;
@@ -63,6 +63,24 @@ export function mapStations(tx: number, tz: number): Float32Array {
     if (st.mouthX < x0 || st.mouthX >= x0 + MAP_TILE) continue;
     if (st.mouthZ < z0 || st.mouthZ >= z0 + MAP_TILE) continue;
     out.push(st.mouthX, st.mouthZ);
+  }
+  return new Float32Array(out);
+}
+
+/**
+ * The ways up to the elevated railway in one tile: the foot of each station's stair towers,
+ * one either side of the road, x and z each. That is where you go in, as the entrance is on
+ * the subway, so that is what the map marks.
+ */
+export function mapRailStations(tx: number, tz: number): Float32Array {
+  const x0 = tx * MAP_TILE, z0 = tz * MAP_TILE;
+  const out: number[] = [];
+  for (const st of railStationsNear(x0 + MAP_TILE / 2, z0 + MAP_TILE / 2, MAP_TILE * 0.71 + 60)) {
+    for (const side of [1, -1] as const) {
+      const [x, , z] = railWay(st, side).way[1];
+      if (x < x0 || x >= x0 + MAP_TILE || z < z0 || z >= z0 + MAP_TILE) continue;
+      out.push(x, z);
+    }
   }
   return new Float32Array(out);
 }

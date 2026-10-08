@@ -11,7 +11,7 @@ import * as S from "./shaders";
 import { NOISE_SIZE, TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
 import { GpuTimer } from "./timer";
 import { boxesMesh, VERTEX_LAYOUT } from "./city/mesh";
-import { boatBoxes, carriageBoxes, carriageEndBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, kitBoxes, liftBoxes, modelData, parcelBoxes, walkerBoxes, WALKER_STRIDES } from "./vehicles/models";
+import { boatBoxes, cableBoxes, zipPostBoxes, carriageBoxes, carriageEndBoxes, carriageInsideBoxes, carBoxes, carBoxesFar, carInsideBoxes, figureBoxes, flyerBoxes, flyerBoxesFar, flyerInsideBoxes, kitBoxes, liftBoxes, modelData, parcelBoxes, walkerBoxes, WALKER_STRIDES } from "./vehicles/models";
 import { LIFT_SIZE } from "./city/generate";
 import { LIFT_THICK } from "./lifts";
 import { INSTANCE_LAYOUT, INSTANCE_STRIDE, type InstanceList } from "./vehicles/traffic";
@@ -67,6 +67,9 @@ export interface VehicleLists {
   kits?: InstanceList;
   /** Jobs' parcels and survey lamps. */
   parcels?: InstanceList;
+  /** Ziplines, two metres of cable at a time, and the posts at either end. */
+  cables?: InstanceList;
+  zipPosts?: InstanceList;
 }
 
 /**
@@ -170,7 +173,7 @@ export class Renderer {
     car: InstancedMesh; van: InstancedMesh; flyer: InstancedMesh; boat: InstancedMesh; train: InstancedMesh; cabin: InstancedMesh; cabinEnd: InstancedMesh;
     inside: Record<"car" | "van" | "flyer", InstancedMesh>;
     carFar: InstancedMesh; vanFar: InstancedMesh; flyerFar: InstancedMesh;
-    figures: InstancedMesh[]; walkers: InstancedMesh[]; lift: InstancedMesh; kit: InstancedMesh; parcel: InstancedMesh;
+    figures: InstancedMesh[]; walkers: InstancedMesh[]; lift: InstancedMesh; kit: InstancedMesh; parcel: InstancedMesh; cable: InstancedMesh; zipPost: InstancedMesh;
   };
   private particleProg: Program;
   private particleMesh: InstancedMesh;
@@ -191,6 +194,9 @@ export class Renderer {
   width = 0;
   height = 0;
   shadowRenders = 0;
+  /** Rain on the glass the camera is behind, 0..1, and how hard the air drags it off (see `glassRain`). */
+  glass = 0;
+  glassFlow = 0;
   /** Instances that survived frustum culling in the last frame (for the stats panel). */
   vehiclesDrawn = 0;
   private cull = new InstanceCull();
@@ -252,6 +258,8 @@ export class Renderer {
       lift: instanced(modelData(liftBoxes(LIFT_SIZE, LIFT_THICK))),
       kit: instanced(modelData(kitBoxes())),
       parcel: instanced(modelData(parcelBoxes())),
+      cable: instanced(modelData(cableBoxes())),
+      zipPost: instanced(modelData(zipPostBoxes())),
     };
     this.tri = fullscreenTriangle(gl);
 
@@ -475,6 +483,8 @@ export class Renderer {
     if (vehicles.lifts) drawCulled(m.lift, null, vehicles.lifts, LIFT_SIZE);
     if (vehicles.kits?.count) drawCulled(m.kit, null, vehicles.kits, 0.6);
     if (vehicles.parcels?.count) drawCulled(m.parcel, null, vehicles.parcels, 0.5);
+    if (vehicles.cables?.count) drawCulled(m.cable, null, vehicles.cables, 1.1);
+    if (vehicles.zipPosts?.count) drawCulled(m.zipPost, null, vehicles.zipPosts, 4);
 
     // --- sky, only where no geometry was drawn
     timer.begin("sky");
@@ -546,6 +556,7 @@ export class Renderer {
       .vec("uSceneSize", [scene.width, scene.height]).float("uFxaa", this.fxaa ? 1 : 0)
       .int("uScene", 4).int("uBloomTex", 6).int("uNoiseTex", 3)
       .float("uTime", time).float("uSpeed", speed).float("uFade", fade)
+      .float("uGlass", this.glass).float("uGlassFlow", this.glassFlow)
       .float("uBloomLod", Math.max(0, Math.log2(scene.bloomHeight / 110)))
       .vec("uResolution", [canvas.width, canvas.height]);
     this.tri.draw();

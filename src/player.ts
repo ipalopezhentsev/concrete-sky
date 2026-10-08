@@ -143,6 +143,9 @@ export class Player {
   fov = 78;
   roll = 0;
   footstep = false;
+  /** Hanging on the grappling line, or let go of it and still in the air: see grapple.ts. */
+  swinging = false;
+  flung = false;
   landed = 0;
   mantled = false;
   speedNorm = 0;
@@ -196,7 +199,8 @@ export class Player {
       wz /= wl;
     }
     const target = input.walk ? WALK_SPEED : input.sprint ? SPRINT_SPEED : RUN_SPEED;
-    let accel = this.grounded ? 10 : 2.5;
+    // On a line, or flung off one, the air hardly steers them: the swing is what carries them.
+    let accel = this.grounded ? 10 : this.swinging || this.flung ? 0.35 : 2.5;
     if (wl < 1e-6 && this.grounded) accel = 12;
     const k = 1 - Math.exp(-accel * dt);
     this.vel[0] += (wx * target - this.vel[0]) * k;
@@ -322,6 +326,7 @@ export class Player {
       newFeet = ground;
       this.vel[1] = 0;
       this.grounded = true;
+      this.flung = false;
     } else if (was && newFeet - ground < STEP && this.vel[1] <= 0) {
       this.eyeOffset += newFeet - ground;
       newFeet = ground;

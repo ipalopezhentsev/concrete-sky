@@ -35,6 +35,7 @@ const INK = {
   hunter: "#e64030",
   kit: "#8fdc96", // health kits on the radar
   goal: "#f0b45a", // where a job wants you
+  zip: "#e8e2d4", // ziplines, and the post at the top of each
 };
 
 export interface MapOptions {
@@ -58,6 +59,12 @@ export class MapView {
   private planVersion = -1;
   private planSize = 0;
   private waiting = 0;
+  /**
+   * The ziplines to draw, each its top end then its bottom one (x, z): the ones the game has
+   * found clear to ride, which it finds as the city streams in, so this is asked every redraw.
+   */
+  zips: () => [number, number, number, number][] = () => [];
+  private zipCount = -1;
   private zooms: number[];
   private radar: boolean;
 
@@ -233,8 +240,10 @@ export class MapView {
     // as the crow flies, not along an axis: the radar turns the plan, so a diagonal step
     // brings a corner of the panel nearer the plan's edge than either axis alone would say
     const moved = Math.hypot(x - this.planAt[0], z - this.planAt[1]) * scale;
-    if (this.planZoom === this.zoom && this.planVersion === this.world.mapVersion &&
+    const zips = this.zips();
+    if (this.planZoom === this.zoom && this.planVersion === this.world.mapVersion && this.zipCount === zips.length &&
         this.planSize === size && moved < MARGIN - 1) return;
+    this.zipCount = zips.length;
     if (this.plan.width !== Math.round(size * dpr)) this.plan.width = this.plan.height = Math.round(size * dpr);
     this.planSize = size;
     this.planZoom = this.zoom;
@@ -313,6 +322,28 @@ export class MapView {
         ctx.fill();
         ctx.stroke();
       }
+    }
+    // and the stations on the railway: a ring at the foot of each stair tower, in its colour
+    ctx.fillStyle = INK.rail;
+    for (const tile of tiles) {
+      const s = tile.railStations;
+      for (let i = 0; i < s.length; i += 2) {
+        ctx.beginPath();
+        ctx.arc(px(s[i]), pz(s[i + 1]), r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    // The ziplines: a thin line from roof to deck, and a dot at the top, where you get on.
+    for (const [ax, az, bx, bz] of this.zips()) {
+      stroke(Float32Array.of(ax, az, bx, bz), 2.4, INK.zip, true);
+      ctx.fillStyle = INK.zip;
+      ctx.strokeStyle = "rgba(12, 13, 15, 0.85)";
+      ctx.lineWidth = Math.max(1, 1.4 * scale * 4);
+      ctx.beginPath();
+      ctx.arc(px(ax), pz(az), r * 0.75, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
     }
   }
 

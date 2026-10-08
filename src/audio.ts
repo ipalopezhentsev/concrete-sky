@@ -4,6 +4,23 @@
 
 import { Music } from "./music";
 
+/** A sound out in the city: where it is coming from, and how loud it is here, 0..1. */
+export interface Source {
+  pos: [number, number, number];
+  level: number;
+}
+
+/**
+ * What the city sounds like from where the listener is: the nearest train (and whether there
+ * is ground between it and them), the traffic close by (and whether the road is wet), and the
+ * nearest market playing.
+ */
+export interface CitySound {
+  train: Source & { muffled: boolean };
+  road: Source & { wet: number };
+  market: Source;
+}
+
 interface Params {
   wind: number;
   gloom: number;
@@ -54,16 +71,27 @@ export class Audio {
   private droneDark!: GainNode;
   private rainGain!: GainNode;
   private stepNoise!: AudioBuffer;
+  /** Brown noise, long enough for one roll of thunder. */
+  private thunderNoise!: AudioBuffer;
   private engineGain!: GainNode;
   private engineFilter!: BiquadFilterNode;
   private engineOsc: OscillatorNode[] = [];
   private washFilter!: BiquadFilterNode;
   private trafficGain!: GainNode;
+  /** The positioned sources: see `city`. */
+  private trainBus!: { gain: GainNode; filter: BiquadFilterNode; pan: PannerNode; clack: GainNode };
+  private roadBus!: { gain: GainNode; hiss: GainNode; pan: PannerNode };
+  private marketBus!: { gain: GainNode; pan: PannerNode };
+  private marketNext = 0;
+  private marketStep = 0;
+  private marketNote = 0;
   private dropTimer = 0;
   private time = 0;
   private music: Music | null = null;
   /** The score has a fader of its own, beside `master`, which carries everything else. */
   private musicBus!: GainNode;
+  /** Boosting in a vehicle, 0..1; the score drives harder while it is. */
+  boost = 0;
   private sfxVolume = 1;
   private musicVolume = 1;
 
@@ -184,6 +212,7 @@ export class Audio {
     this.rainGain.connect(this.master);
 
     this.stepNoise = noiseBuffer(ctx, 0.3);
+    this.thunderNoise = noiseBuffer(ctx, 8, true);
 
     // flyer engine: detuned saws plus rotor wash
     this.engineGain = ctx.createGain();
@@ -220,7 +249,151 @@ export class Audio {
     this.trafficGain.gain.value = 0;
     rumble.connect(rf).connect(this.trafficGain).connect(this.master);
 
+    // Sources out in the city, each through a panner that only says which way it is: how loud
+    // it is is worked out from the city itself (see `city`), not from the panner's own rolloff.
+    const panner = () => {
+      const pn = ctx.createPanner();
+      pn.panningModel = "equalpower";
+      pn.distanceModel = "linear";
+      pn.rolloffFactor = 0;
+      pn.connect(this.master);
+      return pn;
+    };
+    {
+      // a train: a low roar with the beat of the rail joints in it
+      const src = loopSource(ctx, noiseBuffer(ctx, 6, true));
+      const filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 300;
+      const clack = ctx.createGain();
+      clack.gain.value = 0.7;
+      const beat = ctx.createOscillator();
+      beat.type = "square";
+      beat.frequency.value = 2.6;
+      const depth = ctx.createGain();
+      depth.gain.value = 0.3;
+      beat.connect(depth).connect(clack.gain);
+      beat.start();
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      const pan = panner();
+      src.connect(filter).connect(clack).connect(gain).connect(pan);
+      this.trainBus = { gain, filter, pan, clack };
+    }
+    {
+      // the road: the rumble of engines and the hiss of tyres, which the wet makes louder
+      const low = loopSource(ctx, noiseBuffer(ctx, 7, true));
+      const lf = ctx.createBiquadFilter();
+      lf.type = "lowpass";
+      lf.frequency.value = 260;
+      const hissSrc = loopSource(ctx, noiseBuffer(ctx, 5));
+      const hf = ctx.createBiquadFilter();
+      hf.type = "bandpass";
+      hf.frequency.value = 2600;
+      hf.Q.value = 0.6;
+      const hiss = ctx.createGain();
+      hiss.gain.value = 0.15;
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      const pan = panner();
+      low.connect(lf).connect(gain);
+      hissSrc.connect(hf).connect(hiss).connect(gain);
+      gain.connect(pan);
+      this.roadBus = { gain, hiss, pan };
+    }
+    {
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 2400;
+      const pan = panner();
+      gain.connect(lp).connect(pan);
+      this.marketBus = { gain, pan };
+    }
+
     if (this.musicOn) this.music = new Music(ctx, this.musicBus);
+  }
+
+  /**
+   * The city around the listener, standing at `eye` and looking along `fwd`: each source is
+   * turned to come from where it is, and brought up or down to how loud it is from here.
+   */
+  city(c: CitySound, eye: [number, number, number], fwd: [number, number, number]): void {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    const t = ctx.currentTime;
+    const L = ctx.listener;
+    if (L.positionX) {
+      L.positionX.setValueAtTime(eye[0], t);
+      L.positionY.setValueAtTime(eye[1], t);
+      L.positionZ.setValueAtTime(eye[2], t);
+      L.forwardX.setValueAtTime(fwd[0], t);
+      L.forwardY.setValueAtTime(fwd[1], t);
+      L.forwardZ.setValueAtTime(fwd[2], t);
+      L.upX.setValueAtTime(0, t);
+      L.upY.setValueAtTime(1, t);
+      L.upZ.setValueAtTime(0, t);
+    } else {
+      L.setPosition(eye[0], eye[1], eye[2]);
+      L.setOrientation(fwd[0], fwd[1], fwd[2], 0, 1, 0);
+    }
+    const place = (pn: PannerNode, at: [number, number, number]) => {
+      if (pn.positionX) {
+        pn.positionX.setTargetAtTime(at[0], t, 0.1);
+        pn.positionY.setTargetAtTime(at[1], t, 0.1);
+        pn.positionZ.setTargetAtTime(at[2], t, 0.1);
+      } else pn.setPosition(at[0], at[1], at[2]);
+    };
+    const { train, road, market } = c;
+    place(this.trainBus.pan, train.pos);
+    // through the ground it is all roar and no rattle
+    this.trainBus.gain.gain.setTargetAtTime(0.75 * train.level, t, 0.3);
+    this.trainBus.filter.frequency.setTargetAtTime(train.muffled ? 110 : 420, t, 0.5);
+    place(this.roadBus.pan, road.pos);
+    this.roadBus.gain.gain.setTargetAtTime(0.55 * road.level, t, 0.4);
+    this.roadBus.hiss.gain.setTargetAtTime(0.12 + 0.55 * road.wet, t, 1);
+    place(this.marketBus.pan, market.pos);
+    this.marketBus.gain.gain.setTargetAtTime(0.5 * market.level, t, 0.6);
+    if (market.level > 0.01) this.busk(t);
+    else this.marketNext = 0;
+  }
+
+  /**
+   * Someone playing in a market: a squeezebox tune wandering up and down A minor pentatonic over
+   * a bass on the beat, scheduled a little ahead like the score is.
+   */
+  private busk(t: number): void {
+    const ctx = this.ctx!;
+    const STEP = 0.22;
+    if (this.marketNext < t) this.marketNext = t + 0.05;
+    const scale = [57, 60, 62, 64, 67, 69, 72, 74, 76];
+    while (this.marketNext < t + 0.4) {
+      const at = this.marketNext, step = this.marketStep++;
+      const voice = (midi: number, len: number, vol: number, kind: OscillatorType) => {
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(vol, at + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, at + len);
+        g.connect(this.marketBus.gain);
+        for (const d of [-4, 4]) {
+          const o = ctx.createOscillator();
+          o.type = kind;
+          o.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+          o.detune.value = d;
+          o.connect(g);
+          o.start(at);
+          o.stop(at + len + 0.05);
+        }
+      };
+      // the tune: a step or two at a time, now and then a rest or a leap
+      if (Math.random() > 0.18) {
+        this.marketNote = Math.max(0, Math.min(scale.length - 1, this.marketNote + Math.round((Math.random() - 0.5) * 3.2)));
+        voice(scale[this.marketNote], STEP * (Math.random() < 0.25 ? 2 : 1.1), 0.09, "sawtooth");
+      }
+      if (step % 4 === 0) voice(step % 16 < 8 ? 45 : 43, STEP * 2.2, 0.12, "triangle");
+      this.marketNext += STEP;
+    }
   }
 
   /**
@@ -289,6 +462,71 @@ export class Audio {
     o.stop(t + 0.8);
   }
 
+  /**
+   * Thunder from a strike `distance` metres off, arriving as late as sound that far away
+   * would. Close, it opens with a crack and a slam; far off it is only the roll — lower,
+   * softer and longer, the high end taken out by the miles of air it came through.
+   */
+  thunder(distance: number): void {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    const t = ctx.currentTime + Math.min(distance / 343, 9);
+    const near = Math.max(0, 1 - distance / 1400);
+    // Loud: it has to come through the rain, which is a wall of hiss at the same time. Most of
+    // its weight is down where the rain has none, and the compressor on the way out pulls the
+    // rest of the mix down under it, the way a clap overhead drowns everything else.
+    const vol = Math.min(2.6, 2200 / (distance + 350));
+    const len = 3.5 + (distance / 3500) * 4 + Math.random() * 1.5;
+    if (near > 0.05) {
+      // the crack: a burst of bright noise, gone in a fraction of a second
+      const crack = ctx.createBufferSource();
+      crack.buffer = this.stepNoise;
+      crack.playbackRate.value = 0.7;
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 900;
+      const cg = ctx.createGain();
+      cg.gain.setValueAtTime(0.0001, t);
+      cg.gain.exponentialRampToValueAtTime(0.5 * near * vol, t + 0.01);
+      cg.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+      crack.connect(hp).connect(cg).connect(this.master);
+      crack.start(t);
+      crack.stop(t + 0.32);
+    }
+    // the roll: low noise swelling in and dying away in a few uneven surges
+    const src = ctx.createBufferSource();
+    src.buffer = this.thunderNoise;
+    src.playbackRate.value = 0.55 + Math.random() * 0.25;
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.setValueAtTime(600 + 1400 * near, t);
+    lp.frequency.exponentialRampToValueAtTime(90, t + len);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol * (0.6 + 0.4 * near), t + 0.08 + 0.5 * (1 - near));
+    let at = t + 0.4 + 0.5 * (1 - near);
+    for (let k = 0; k < 3 && at < t + len - 1; k++) {
+      // a surge, and a sag after it
+      g.gain.exponentialRampToValueAtTime(vol * (0.35 + Math.random() * 0.5), at);
+      at += 0.5 + Math.random() * 0.9;
+    }
+    g.gain.exponentialRampToValueAtTime(0.001, t + len);
+    src.connect(lp).connect(g).connect(this.master);
+    src.start(t, Math.random() * 2);
+    src.stop(t + len + 0.1);
+    // and under all of it a sub-bass shudder, felt as much as heard
+    const sub = ctx.createOscillator();
+    sub.frequency.setValueAtTime(48 + 20 * near, t);
+    sub.frequency.exponentialRampToValueAtTime(30, t + len * 0.7);
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0.0001, t);
+    sg.gain.exponentialRampToValueAtTime(vol * 0.5, t + 0.15 + 0.4 * (1 - near));
+    sg.gain.exponentialRampToValueAtTime(0.001, t + len * 0.8);
+    sub.connect(sg).connect(this.master);
+    sub.start(t);
+    sub.stop(t + len);
+  }
+
   stop(): void {
     void this.ctx?.suspend();
   }
@@ -306,9 +544,10 @@ export class Audio {
     const drones = this.musicOn ? 0.35 : 1;
     this.droneBright.gain.setTargetAtTime(0.5 * (1 - p.gloom) * drones, t, 2);
     this.droneDark.gain.setTargetAtTime(0.55 * p.gloom * drones, t, 2);
-    if (this.musicOn) this.music?.update(p);
+    if (this.musicOn) this.music?.update({ ...p, boost: this.boost });
     this.rainGain.gain.setTargetAtTime(0.35 * p.rain, t, 1);
-    this.trafficGain.gain.setTargetAtTime(0.35 * Math.max(0, 1 - altitude / 60), t, 1);
+    // the city's far-off murmur under the traffic close by, which comes from where it is (see `city`)
+    this.trafficGain.gain.setTargetAtTime(0.18 * Math.max(0, 1 - altitude / 60), t, 1);
 
     if (p.rain > 0.2) {
       this.dropTimer -= dt;

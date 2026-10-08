@@ -1,6 +1,6 @@
 // Background generation of textures, city regions and map tiles.
 
-import { mapStations, mapTile } from "./city/mapdata";
+import { mapRailStations, mapStations, mapTile } from "./city/mapdata";
 import { buildPlanRegion } from "./city/plan";
 import { setWorldSeed } from "./math";
 import { generateLayer, generateNoise } from "./textures";
@@ -23,8 +23,9 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     setWorldSeed(msg.seed);
     const blocks = mapTile(msg.tx, msg.tz);
     const stations = mapStations(msg.tx, msg.tz);
-    postMessage({ type: "map", tx: msg.tx, tz: msg.tz, blocks, stations },
-      { transfer: [blocks.buffer, stations.buffer] });
+    const railStations = mapRailStations(msg.tx, msg.tz);
+    postMessage({ type: "map", tx: msg.tx, tz: msg.tz, blocks, stations, railStations },
+      { transfer: [blocks.buffer, stations.buffer, railStations.buffer] });
   } else {
     setWorldSeed(msg.seed);
     const m = buildPlanRegion(msg.rx, msg.rz, msg.faceCull);

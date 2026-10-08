@@ -40,6 +40,13 @@ export class Flyer {
   grounded = true;
   speedNorm = 0;
   color: Vec3;
+  /**
+   * The air the craft is flying through, moving: in a storm it carries the flyer with it, so
+   * holding a line means flying into it. Set from outside each frame; nothing on the ground.
+   */
+  wind: Vec3 = [0, 0, 0];
+  /** How rough that air is, 0..1: it rocks the craft about its own axes. */
+  gust = 0;
 
   constructor(x: number, y: number, z: number, yaw: number, color: Vec3) {
     this.pos = [x, y, z];
@@ -59,7 +66,9 @@ export class Flyer {
       (fwd[2] * input.moveZ + right[2] * input.moveX) * speed,
     ];
     const k = 1 - Math.exp(-(input.boost ? 1.6 : 2.4) * dt);
-    for (let i = 0; i < 3; i++) this.vel[i] += (want[i] - this.vel[i]) * k;
+    // the rotors hold a speed through the air, so over the ground it is that plus the wind
+    const air = this.grounded ? 0 : 1;
+    for (let i = 0; i < 3; i++) this.vel[i] += (want[i] + this.wind[i] * air - this.vel[i]) * k;
     // a parked flyer settles instead of drifting
     if (this.grounded && this.vel[1] < 0.5 && Math.hypot(want[0], want[2]) < 0.1) {
       this.vel[0] *= 0.8;
@@ -106,7 +115,10 @@ export class Flyer {
     const localFwd = this.vel[0] * syaw + this.vel[2] * cyaw;
     const localRight = -this.vel[0] * cyaw + this.vel[2] * syaw;
     const targetPitch = this.grounded ? 0 : Math.max(-0.35, Math.min(0.35, localFwd * 0.012 + (want[0] * syaw + want[2] * cyaw - localFwd) * 0.01));
-    const targetRoll = this.grounded ? 0 : Math.max(-0.45, Math.min(0.45, -localRight * 0.02));
+    // rough air rocks it: a slow wallow, and a quicker shake on top of it
+    const t = performance.now() / 1000;
+    const buffet = this.grounded ? 0 : this.gust * (Math.sin(t * 1.7) * 0.6 + Math.sin(t * 5.3 + 1.1) * 0.4);
+    const targetRoll = this.grounded ? 0 : Math.max(-0.5, Math.min(0.5, -localRight * 0.02 + buffet * 0.22));
     this.pitch += (targetPitch - this.pitch) * Math.min(1, dt * 4);
     this.roll += (targetRoll - this.roll) * Math.min(1, dt * 4);
     this.speedNorm = Math.hypot(...this.vel) / BOOST;

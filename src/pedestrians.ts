@@ -4,22 +4,33 @@
 //
 // A route is one of two kinds. A loop: round a block's pavement, round its deck, round the edge
 // of a roof, with a stream each way keeping right of the line. Or a way somewhere and back: up
-// a block's stair to its deck, or down a subway entrance to the platform. That is laid out as
-// a loop too — up one side and down the other — with a stop at each end, where everyone goes
-// off to a spot of their own and stands a while (looking out over the parapet; waiting for a
-// train) before they turn back.
+// a block's stair to its deck. That is laid out as a loop too — up one side and down the other
+// — with a stop at each end, where everyone goes off to a spot of their own and stands a while
+// (looking out over the parapet) before they turn back.
+//
+// The subway is the one place people go somewhere and do not come back. It is worked out from
+// the timetable instead: for every train that stands at a platform, a few people come along
+// the pavement, down the entrance and out along the platform to wait for it, and step into it
+// while it stands there; and a few step off it and go up to the street. Riding a train, there
+// are others in it with you, getting on and off at the stops. (The people taking the flyers,
+// cars and launches are in berths.ts, which walks them with `put` and `approach`.)
 //
 // The way round a loop is worked out once, when it first comes near: a line under two metres
 // in from the edge, which swings in round anything standing in it (a lamp, a lift, the opening
 // of a subway stair, a parked flyer) and back out again past it.
 
 import type { Lift, Pad, Roof } from "./city/generate";
-import { blocksIn, grain, type Site, type Vec2 } from "./city/network";
+import { blockAt, blocksIn, grain, type Site, type Vec2 } from "./city/network";
 import {
-  deckOf, groundAt, inEntrance, pavementAt, pavementOf, shrink, stairOf, stationWay, WALK, type Station,
+  deckOf, groundAt, inEntrance, marketsNear, PLAT_IN, PLAT_OUT, pavementAt, pavementOf, RAIL_TRACK, railWay, shrink, stairOf, stationWay, WALK,
+  type RailStation, type Stall, type Station,
 } from "./city/plan";
 import { worldSeed, type Vec3 } from "./math";
 import type { Colliders } from "./player";
+import {
+  dueAt, FLOOR, metroCycle, onTrack, RAILWAY, SUBWAY, trackOff, trackScale, trainAt, trainId, TRAIN, type LineKind,
+} from "./vehicles/metro";
+import { CARRIAGE } from "./vehicles/models";
 import { WALKER_STRIDES } from "./vehicles/models";
 import { h32, InstanceList } from "./vehicles/traffic";
 
@@ -45,7 +56,18 @@ const CYCLE = 1.5;
 /** Most milliseconds a frame may spend laying out new routes. */
 const BUDGET = 2;
 /** Roughly how fast people walk, for turning a stop's seconds into metres along the route. */
-const PACE = 1.35;
+export const PACE = 1.35;
+/**
+ * Off the middle of the platform to just inside the side of a train standing at it: where
+ * someone getting on goes out of sight, and someone getting off comes into it.
+ */
+const EDGE = 7.2;
+/** How far along the train from its middle people get on and off: short of either end. */
+const BOARD = TRAIN / 2 - 3;
+/** Metres of pavement walked to the top of an entrance, or on from it. */
+const LEAD = 24;
+/** Places to stand in a train, each taken by one passenger after another. */
+const SEATS = 18;
 
 /** Coats: what a city like this wears, with the odd bright one. */
 const COATS: Vec3[] = [
@@ -53,6 +75,12 @@ const COATS: Vec3[] = [
   [0.24, 0.27, 0.2], [0.52, 0.5, 0.46], [0.1, 0.1, 0.11], [0.2, 0.14, 0.12], [0.62, 0.18, 0.12],
   [0.7, 0.55, 0.16], [0.14, 0.32, 0.36],
 ];
+
+/**
+ * How many of a market's stalls are open and how many people are at them, hour by hour, 0..1:
+ * a few through the day, and the whole of it from the early evening until after midnight.
+ */
+const MARKET = [0.4, 0.2, 0.05, 0, 0, 0, 0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.3, 0.3, 0.35, 0.5, 0.7, 0.9, 1, 1, 0.95, 0.8, 0.6];
 
 /** How busy the streets are through the day, hour by hour, 0..1. */
 const DAY = [0.12, 0.08, 0.05, 0.04, 0.05, 0.1, 0.25, 0.6, 0.95, 0.85, 0.7, 0.75,
@@ -104,6 +132,88 @@ const EMPTY: Route = {
   both: true, gap: 1, spread: 0, id: 0, busy: 0, below: false,
 };
 
+/** A line someone walks: x y z at each point, and how far along each point is in metres walked. */
+export class Path {
+  readonly pts: Float32Array;
+  readonly cum: Float32Array;
+  readonly len: number;
+
+  constructor(pts: ArrayLike<number>) {
+    this.pts = Float32Array.from(pts);
+    const q = this.pts, n = Math.max(1, Math.floor(q.length / 3));
+    this.cum = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+      const o = i * 3;
+      const flat = Math.hypot(q[o] - q[o - 3], q[o + 2] - q[o - 1]);
+      // slower on the stairs
+      this.cum[i] = this.cum[i - 1] + flat * (Math.abs(q[o + 1] - q[o - 2]) > 0.2 * flat ? 1.4 : 1);
+    }
+    this.len = this.cum[n - 1];
+  }
+
+  /** The same line walked the other way. */
+  reversed(): Path {
+    const q = this.pts, out: number[] = [];
+    for (let o = q.length - 3; o >= 0; o -= 3) out.push(q[o], q[o + 1], q[o + 2]);
+    return new Path(out);
+  }
+
+  /** Where someone `d` metres along it is, and which way they are going. */
+  at(d: number, p: { x: number; y: number; z: number; yaw: number }): void {
+    const q = this.pts, c = this.cum, n = c.length;
+    if (n < 2) {
+      p.x = q[0];
+      p.y = q[1];
+      p.z = q[2];
+      return;
+    }
+    d = Math.max(0, Math.min(this.len, d));
+    let lo = 0, hi = n - 2;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (c[mid] <= d) lo = mid;
+      else hi = mid - 1;
+    }
+    const a = lo * 3, b = a + 3;
+    const t = c[lo + 1] > c[lo] ? Math.min(1, (d - c[lo]) / (c[lo + 1] - c[lo])) : 1;
+    p.x = q[a] + (q[b] - q[a]) * t;
+    p.y = q[a + 1] + (q[b + 1] - q[a + 1]) * t;
+    p.z = q[a + 2] + (q[b + 2] - q[a + 2]) * t;
+    // the heading of the stretch they are on, or of the last one before it that went anywhere
+    for (let o = a; o >= 0; o -= 3) {
+      const dx = q[o + 3] - q[o], dz = q[o + 5] - q[o + 2];
+      if (dx * dx + dz * dz > 1e-6) {
+        p.yaw = Math.atan2(dx, dz);
+        return;
+      }
+    }
+  }
+}
+
+/** Somewhere to wait on a platform: the way to it from the foot of the stair, and the step from it into the train. */
+interface Wait {
+  path: Path;
+  edge: Path;
+  face: number;
+}
+
+/** A station's comings and goings, laid out once it is near. */
+interface Flow {
+  id: number;
+  /** The kind of line, whose timetable its people keep to. */
+  kind: LineKind;
+  /** Down the entrance to the foot of the stair on the platform, and back up, each keeping right. */
+  down: Path;
+  up: Path;
+  /** For each side of the platform, +1 then -1: places to wait for the train on that side. */
+  waits: Wait[][];
+  /** For each side: ways off its train to the foot of the stair. */
+  offs: Path[][];
+  /** Where the way meets the pavement, and the walks along the pavement to it from either hand and away from it. */
+  street: Vec3;
+  leads: { to: Path[]; from: Path[] } | null;
+}
+
 /** Someone in the way, who people step aside from. */
 export interface Avoid {
   x: number;
@@ -151,21 +261,34 @@ export class Pedestrians {
   hour = 12;
   /** 0..1: rain keeps some of them in. */
   rain = 0;
+  /** How busy the streets are this frame, 0..1, before the rain. */
+  crowd = 0;
   private routes = new Map<string, Route>();
+  private flows = new Map<string, Flow>();
+  /** The markets in reach, asked again when the eye has moved a way. */
+  private markets: { key: string; list: Stall[][] } = { key: "", list: [] };
   private lifts: Lift[] = [];
   private stations: Station[] = [];
+  private railStations: RailStation[] = [];
   private pads: Pad[] = [];
   private roofs: Roof[] = [];
   private near: { key: string; jobs: { key: string; make: () => Route; d: number }[] } = { key: "", jobs: [] };
   private seed = worldSeed() ^ 0x5eed;
   private spot: Place = { x: 0, y: 0, z: 0, yaw: 0, stride: 0 };
+  /** The eye, which way it looks, and who is in the way, as of this frame's update. */
+  private eye: Vec3 = [0, 0, 0];
+  private fwd: Vec3 = [0, 0, 1];
+  private avoid: Avoid[] = [];
 
   constructor(private colliders: Colliders) {}
 
   /** What the world has streamed in that people walk round, down into or up onto. */
-  sync(lifts: Iterable<Lift>, stations: Iterable<Station>, pads: Iterable<Pad>, roofs: Iterable<Roof>): void {
+  sync(
+    lifts: Iterable<Lift>, stations: Iterable<Station>, pads: Iterable<Pad>, roofs: Iterable<Roof>, railStations: Iterable<RailStation> = [],
+  ): void {
     this.lifts = [...lifts];
     this.stations = [...stations];
+    this.railStations = [...railStations];
     this.pads = [...pads];
     this.roofs = [...roofs];
     this.near.key = "";
@@ -176,17 +299,48 @@ export class Pedestrians {
     if (this.seed !== (worldSeed() ^ 0x5eed)) {
       this.seed = worldSeed() ^ 0x5eed;
       this.routes.clear();
+      this.flows.clear();
       this.near.key = "";
     }
+    this.eye = eye;
+    this.fwd = fwd;
+    this.avoid = avoid;
     // in the subway there is nobody above to see, and from the street nobody below but down
     // the stair, which the way down the entrance is
     const under = eye[1] < groundAt(eye[0], eye[2]) - 3;
     const jobs = this.jobsNear(eye);
     const crowd = DAY[Math.floor(this.hour) % 24] * (1 - (this.hour % 1)) + DAY[Math.ceil(this.hour) % 24] * (this.hour % 1);
+    this.crowd = crowd;
     const ahead = (x: number, y: number, z: number) =>
       (x - eye[0]) * fwd[0] + (y - eye[1]) * fwd[1] + (z - eye[2]) * fwd[2] > -3;
 
     const start = performance.now();
+    for (const st of this.stations) {
+      if (Math.min(Math.hypot(st.x - eye[0], st.z - eye[2]), Math.hypot(st.shaftX - eye[0], st.shaftZ - eye[2])) > RADIUS + 90) continue;
+      const key = `${st.axis},${st.line},${st.k}`;
+      let f = this.flows.get(key);
+      if (!f) {
+        if (performance.now() - start > BUDGET) continue;
+        f = this.flowOf(st);
+        this.flows.set(key, f);
+      }
+      this.travellers(f, time, crowd);
+    }
+    for (const st of this.railStations) {
+      if (Math.hypot(st.x - eye[0], st.z - eye[2]) > RADIUS + 90) continue;
+      for (const side of [1, -1] as const) {
+        const key = "r" + st.axis + "," + st.line + "," + st.k + "," + side;
+        let f = this.flows.get(key);
+        if (!f) {
+          if (performance.now() - start > BUDGET) continue;
+          f = this.railFlowOf(st, side);
+          this.flows.set(key, f);
+        }
+        this.travellers(f, time, crowd);
+      }
+    }
+    if (this.flows.size > 96) this.flows.clear();
+    this.marketgoers(time, eye);
     for (const job of jobs) {
       let w = this.routes.get(job.key);
       if (!w) {
@@ -198,7 +352,7 @@ export class Pedestrians {
       if (w.n === 0 || (under && !w.below)) continue;
       // the rain keeps people off the street, but not out of the subway
       const busy = crowd * (w.below ? 1 : 1 - 0.55 * this.rain);
-      this.walkers(w, time, busy, eye, ahead, avoid);
+      this.walkers(w, time, busy, eye, ahead);
       this.standers(w, time, busy, eye, ahead, avoid);
     }
     if (this.routes.size > 1500) {
@@ -221,10 +375,6 @@ export class Pedestrians {
       jobs.push({ key: `d${s.key}`, make: () => this.loopOf(s, DECK), d: d + 20 });
       jobs.push({ key: `s${s.key}`, make: () => this.stairRoute(s), d: d + 10 });
     }
-    for (const st of this.stations) {
-      const d = Math.min(far(st.x, st.z), far(st.shaftX, st.shaftZ));
-      if (d < reach) jobs.push({ key: `t${st.axis},${st.line},${st.k}`, make: () => this.stationRoute(st), d });
-    }
     for (const r of this.roofs) {
       const [x, z] = r.poly[0];
       const d = far(x, z);
@@ -236,8 +386,7 @@ export class Pedestrians {
   }
 
   /** The people walking a route: a stream each way round a loop, or one along a way and back. */
-  private walkers(w: Route, time: number, busy: number, eye: Vec3, ahead: (x: number, y: number, z: number) => boolean, avoid: Avoid[]): void {
-    const still = WALKER_STRIDES.indexOf(0);
+  private walkers(w: Route, time: number, busy: number, eye: Vec3, ahead: (x: number, y: number, z: number) => boolean): void {
     for (const dir of w.both ? [1, -1] as const : [1] as const) {
       const h0 = h32(w.id, dir > 0 ? 1 : 2, 0, this.seed);
       const speed = 1.15 + ((h0 & 0xff) / 255) * 0.4;
@@ -262,19 +411,277 @@ export class Pedestrians {
           x -= Math.cos(yaw) * lane;
           z += Math.sin(yaw) * lane;
         }
-        [x, z] = stepAside(x, p.y, z, avoid);
-        const coat = COATS[(h >>> 4) % COATS.length];
-        if (Number.isNaN(p.stride)) {
-          this.lists[still].push(x, p.y, z, yaw, 0, 0, coat, 1);
-          continue;
-        }
-        const phase = (p.stride / CYCLE + ((h >>> 8) & 0xff) / 255) * Math.PI * 2;
-        const swing = Math.sin(phase);
-        const bob = (1 - Math.abs(swing)) * 0.03;
-        const pose = Math.round((swing + 1) * 2);
-        this.lists[pose].push(x, p.y + bob, z, yaw, 0, 0, coat, 1);
+        this.put(x, p.y, z, yaw, p.stride, h);
       }
     }
+  }
+
+  /**
+   * Draw someone this frame, if they are near enough and in front of the eye: walking, `stride`
+   * metres into their walk, or standing still if it is NaN. `h` picks their coat and their step.
+   */
+  put(x: number, y: number, z: number, yaw: number, stride: number, h: number): void {
+    const eye = this.eye, fwd = this.fwd;
+    if (Math.abs(x - eye[0]) > RADIUS || Math.abs(z - eye[2]) > RADIUS) return;
+    if ((x - eye[0]) * fwd[0] + (y - eye[1]) * fwd[1] + (z - eye[2]) * fwd[2] < -3) return;
+    [x, z] = stepAside(x, y, z, this.avoid);
+    const coat = COATS[(h >>> 4) % COATS.length];
+    if (Number.isNaN(stride)) {
+      this.lists[WALKER_STRIDES.indexOf(0)].push(x, y, z, yaw, 0, 0, coat, 1);
+      return;
+    }
+    const phase = (stride / CYCLE + ((h >>> 8) & 0xff) / 255) * Math.PI * 2;
+    const swing = Math.sin(phase);
+    const bob = (1 - Math.abs(swing)) * 0.03;
+    const pose = Math.round((swing + 1) * 2);
+    this.lists[pose].push(x, y + bob, z, yaw, 0, 0, coat, 1);
+  }
+
+  /**
+   * The people of one station, for the trains each way through it. Each train that stands at
+   * the platform has its own few to get on and its own few to get off, and each of them is
+   * worked out from when that train is in: so someone getting on is somewhere on the way down
+   * for a minute or two before it, and someone getting off somewhere on the way up after.
+   */
+  private travellers(f: Flow, time: number, crowd: number): void {
+    const p = this.spot;
+    if (!f.leads) f.leads = this.leadsTo(f.street);
+    const busy = 0.15 + 0.85 * crowd;
+    for (const side of [1, -1] as const) {
+      const si = side > 0 ? 0 : 1;
+      const waits = f.waits[si], offs = f.offs[si];
+      // the train for this side of the platform is the one running on that side's track
+      const K = f.kind;
+      const now = Math.floor((time + (side > 0 ? 0 : K.period / 2)) / K.period);
+      // trains due over the next few minutes, whose people are on their way to meet them, and
+      // the ones gone in the last few, whose people are still on their way out
+      for (let n = now - 8; n <= now + 10; n++) {
+        const due = dueAt(n, side, K);
+        if (n <= now + 1) {
+          for (let j = 0; j < 4 && offs.length; j++) {
+            const h = h32(f.id, n * 2 + si, 100 + j, this.seed);
+            if ((h & 0xffff) / 0x10000 >= busy * 0.7) continue;
+            const off = offs[(h >>> 16) % offs.length];
+            const lead = f.leads?.from[(h >>> 20) & 1];
+            let d = (time - due - 0.8 - ((h >>> 24) & 0xff) / 255 * 4) * PACE;
+            if (d < 0) continue;
+            const stride = d;
+            if (d < off.len) off.at(d, p);
+            else if ((d -= off.len) < f.up.len) f.up.at(d, p);
+            else if (lead && (d -= f.up.len) < lead.len) lead.at(d, p);
+            else continue;
+            this.put(p.x, p.y, p.z, p.yaw, stride, h);
+          }
+        }
+        if (n < now || !waits.length) continue;
+        for (let j = 0; j < 4; j++) {
+          const h = h32(f.id, n * 2 + si, j, this.seed);
+          if ((h & 0xffff) / 0x10000 >= busy * 0.8) continue;
+          const w = waits[(h >>> 16) % waits.length];
+          // in through the side of the train while it stands there, having waited a while for it
+          const aboard = due + 1.5 + (((h >>> 8) & 0xff) / 255) * (K.dwell - 4);
+          const leave = aboard - w.edge.len / PACE;
+          const there = leave - 8 - (((h >>> 24) & 0xff) / 255) * 60;
+          const set = there - (LEAD + f.down.len + w.path.len) / PACE;
+          if (time < set || time > aboard) continue;
+          let d = (time - set) * PACE;
+          const stride = d;
+          if (time >= leave) {
+            w.edge.at((time - leave) * PACE, p);
+            this.put(p.x, p.y, p.z, p.yaw, (time - leave) * PACE, h);
+            continue;
+          }
+          if (time >= there) {
+            w.path.at(w.path.len, p);
+            this.put(p.x, p.y, p.z, w.face + Math.sin(time * 0.3 + j) * 0.25, NaN, h);
+            continue;
+          }
+          if (d < LEAD) {
+            // along the pavement to the top of the entrance, or out of nowhere at the top of it
+            // if the pavement is not laid out yet
+            const lead = f.leads?.to[(h >>> 20) & 1];
+            if (!lead || d < LEAD - lead.len) continue;
+            lead.at(d - (LEAD - lead.len), p);
+          } else if ((d -= LEAD) < f.down.len) f.down.at(d, p);
+          else w.path.at(d - f.down.len, p);
+          this.put(p.x, p.y, p.z, p.yaw, stride, h);
+        }
+      }
+    }
+  }
+
+  /**
+   * The people of the markets: whoever keeps each stall, behind its counter while it is open,
+   * and a few at its front, who come and go every minute or so. Busiest from the early evening
+   * until after midnight, and thinner in the rain.
+   */
+  /**
+   * The market playing nearest the eye, for its music: where its middle stall is, and how loud
+   * it is from here — none when it is shut, quieter in the rain, gone ninety metres off.
+   */
+  marketNear(eye: Vec3): { pos: Vec3; level: number } {
+    const hr = this.hour % 24;
+    const open = MARKET[Math.floor(hr)] * (1 - (hr % 1)) + MARKET[Math.ceil(hr) % 24] * (hr % 1);
+    let best: { pos: Vec3; level: number } = { pos: [eye[0], eye[1], eye[2]], level: 0 };
+    for (const stalls of this.markets.list) {
+      const s = stalls[Math.floor(stalls.length / 2)];
+      const d = Math.hypot(s.x - eye[0], s.y + 1.5 - eye[1], s.z - eye[2]);
+      const level = Math.max(0, 1 - d / 90) ** 1.5 * Math.min(1, open * 1.4) * (1 - 0.5 * this.rain);
+      if (level > best.level) best = { pos: [s.x, s.y + 1.5, s.z], level };
+    }
+    return best;
+  }
+
+  private marketgoers(time: number, eye: Vec3): void {
+    const key = `${Math.round(eye[0] / 40)},${Math.round(eye[2] / 40)}`;
+    if (this.markets.key !== key) this.markets = { key, list: marketsNear(eye[0], eye[2], RADIUS + 20) };
+    const hr = this.hour % 24;
+    const open = MARKET[Math.floor(hr)] * (1 - (hr % 1)) + MARKET[Math.ceil(hr) % 24] * (hr % 1);
+    const busy = open * (1 - 0.6 * this.rain);
+    for (const stalls of this.markets.list) {
+      for (const st of stalls) {
+        if (Math.abs(st.x - eye[0]) > RADIUS || Math.abs(st.z - eye[2]) > RADIUS) continue;
+        const out = Math.atan2(st.n[0], st.n[1]);
+        if (((st.id >>> 4) & 0xff) / 255 < open + 0.1) {
+          this.put(st.x, groundAt(st.x, st.z), st.z, out + Math.sin(time * 0.2 + st.id) * 0.3, NaN, st.id);
+        }
+        for (let c = 0; c < 3; c++) {
+          const stay = Math.floor(time / 70 + ((st.id >>> (c * 5)) & 31) / 31);
+          const h = h32(st.id, c, stay, this.seed);
+          if ((h & 0xffff) / 0x10000 >= busy * 0.75) continue;
+          const a = ((((h >>> 16) & 0xff) / 255) * 2 - 1) * 1.3;
+          const d = 2.2 + (((h >>> 24) & 0xff) / 255) * 1.4;
+          const x = st.x + st.t[0] * a + st.n[0] * d, z = st.z + st.t[1] * a + st.n[1] * d;
+          this.put(x, groundAt(x, z), z, out + Math.PI + (((h >>> 8) & 0xff) / 255 - 0.5) * 0.8, NaN, h);
+        }
+      }
+    }
+  }
+
+  /**
+   * The passengers in the train the runner is riding. At every stop some of them get off and
+   * others get on, through the side the platform is on, while the train stands there; the
+   * rest stay where they are. Who is in each place is worked out from the stops the train has
+   * made: whoever got on at the last one, or, if they stayed on there, whoever was in it before.
+   */
+  riders(train: { axis: 0 | 1; line: number; dir: 1 | -1; slot: number; kind?: LineKind }, time: number, runner: Vec3): void {
+    const { axis, line, dir, slot } = train;
+    const K = train.kind ?? SUBWAY;
+    const { n } = metroCycle(time, dir, true, K);
+    // the slot a train runs from steps on by one every cycle; what it started from does not
+    const id = trainId(slot, dir, time, K);
+    // the last few stops it made, latest first: most slots on a line have no station
+    const stops: number[] = [];
+    for (let m = n; m > n - 40 && stops.length < 5; m--) if (K.station(axis, line, id + dir * m)) stops.push(m);
+    if (!stops.length) return;
+    const since = time - dueAt(n, dir, K);
+    const doors = stops[0] === n && since < K.dwell;
+    const mid = trainAt(axis, line, slot, dir, time, K);
+    const scale = trackScale(axis, line, mid);
+    const board = (K.cars * CARRIAGE) / 2 - 3;
+    // the doors are on the platform's side: towards the middle on the subway, outwards up on the viaduct
+    const door = K.doors(dir) * 1.8;
+    const avoid = this.avoid;
+    this.avoid = [{ x: runner[0], y: runner[1], z: runner[2], r: 0.7 }];
+    const busy = 0.15 + 0.75 * this.crowd;
+    const stays = (q: number, m: number) => (h32(id, q * 7919 + m, 23, this.seed) & 0xffff) / 0x10000 < 0.55;
+    /** Who has the place since the `j`th stop back, or -1 if nobody. */
+    const who = (q: number, j: number) => {
+      while (j + 1 < stops.length && stays(q, stops[j])) j++;
+      const h = h32(id, q * 7919 + stops[j], 22, this.seed);
+      return ((h >>> 8) & 0xffff) / 0x10000 < busy ? h : -1;
+    };
+    const draw = (h: number, walk: number, out: boolean) => {
+      const along = ((((h >>> 3) & 0x3ff) / 1023) * 2 - 1) * board;
+      const across = ((((h >>> 13) & 0xff) / 255) * 2 - 1) * 0.9;
+      // facing across the car, or along it
+      const face = (h >>> 21) % 3 === 0 ? (h & 4 ? 0 : Math.PI) : h & 4 ? Math.PI / 2 : -Math.PI / 2;
+      // `walk` seconds into getting off (to the door) or on (from it); NaN standing in their place
+      const k = Number.isNaN(walk) ? 1 : Math.min(1, (walk * PACE) / Math.abs(door - across));
+      const c = out ? across + (door - across) * (Number.isNaN(walk) ? 0 : k) : door + (across - door) * k;
+      const at = onTrack(axis, line, mid + along / scale, trackOff(dir, K) + c, K);
+      const walking = !Number.isNaN(walk) && k < 1;
+      // off to the right of the line is towards a higher offset, which is a quarter turn clockwise
+      const yaw = walking ? at.yaw - (Math.sign(out ? door - across : across - door) * Math.PI) / 2 : at.yaw + face;
+      this.put(at.pos[0], at.pos[1] + FLOOR, at.pos[2], yaw, walking ? Math.abs(c - across) : NaN, h);
+    };
+    for (let q = 0; q < SEATS; q++) {
+      const now = who(q, 0);
+      if (!doors || stays(q, n)) {
+        if (now >= 0) draw(now, NaN, false);
+        continue;
+      }
+      // standing at a stop: whoever had the place gets off, then whoever has it now gets on
+      const before = stops.length > 1 ? who(q, 1) : -1;
+      if (before >= 0) {
+        const t = since - 0.5 - (((before >>> 24) & 0xff) / 255) * 2.5;
+        if (t < 0) draw(before, NaN, true);
+        else if ((t * PACE) / Math.abs(door - ((((before >>> 13) & 0xff) / 255) * 2 - 1) * 0.9) < 1) draw(before, t, true);
+      }
+      if (now >= 0) {
+        const t = since - 4 - (((now >>> 24) & 0xff) / 255) * 3.5;
+        if (t >= 0) draw(now, t, false);
+      }
+    }
+    this.avoid = avoid;
+  }
+
+  /**
+   * A walk along the pavement, deck or roof loop nearest a point, `len` metres of it going
+   * `dir` round the loop and ending at the point of it nearest the one asked for: x y z, every
+   * half metre. Null if that loop is not laid out yet; empty if there is none to walk.
+   */
+  approach(on: "pave" | "deck" | "roof", x: number, y: number, z: number, len: number, dir: 1 | -1): number[] | null {
+    let key: string | null = null;
+    if (on === "roof") {
+      for (const r of this.roofs) {
+        if (Math.abs(r.y - y) > 1.5 || !inside(r.poly, x, z)) continue;
+        const [rx, rz] = r.poly[0];
+        key = `r${rx.toFixed(1)},${rz.toFixed(1)},${r.y.toFixed(1)}`;
+      }
+    } else {
+      const site = blockAt(x, z);
+      if (site) key = `${on === "pave" ? "p" : "d"}${site.key}`;
+    }
+    if (!key) return [];
+    const w = this.routes.get(key);
+    if (!w) return null;
+    let best = -1, bd = Infinity;
+    for (let i = 0; i < w.n; i++) {
+      if (w.blocked[i] || Math.abs(w.y[i] - y) > 2) continue;
+      const d = (w.x[i] - x) ** 2 + (w.z[i] - z) ** 2;
+      if (d < bd) {
+        bd = d;
+        best = i;
+      }
+    }
+    if (best < 0) return [];
+    const out: number[] = [];
+    for (let k = Math.round(len / STEP); k >= 0; k--) {
+      const i = (((best - dir * k) % w.n) + w.n) % w.n;
+      // from the far side of anything it could not get round
+      if (w.blocked[i]) out.length = 0;
+      else out.push(w.x[i], w.y[i], w.z[i]);
+    }
+    return out;
+  }
+
+  /** What a body standing in a patch of the city would walk into; see `clearIn`. */
+  clearNear(x: number, z: number, r: number, y: number, ground: boolean): (x: number, y: number, z: number, pad: number) => boolean {
+    return this.clearIn(x - r, z - r, x + r, z + r, y - 1, y + 1, ground);
+  }
+
+  /** The walks along the pavement to a point from either hand, if the pavement is laid out there. */
+  private leadsTo(p: Vec3): { to: Path[]; from: Path[] } | null {
+    const to: Path[] = [], from: Path[] = [];
+    for (const dir of [1, -1] as const) {
+      const pts = this.approach("pave", p[0], p[1], p[2], LEAD - 3, dir);
+      if (!pts) return null;
+      const path = new Path([...pts, ...p]);
+      to.push(path);
+      from.push(path.reversed());
+    }
+    return { to, from };
   }
 
   /** Where someone `s` metres along a route is, or null where nobody can be. */
@@ -556,23 +963,20 @@ export class Pedestrians {
   }
 
   /**
-   * Down into a station and back: a stop just off the top of the entrance, and one on the
-   * platform, where everyone goes off along it to wait.
+   * A station's ways: down the entrance and up it again, places to wait along the platform
+   * for the train on either side, and ways off each train to the foot of the stair.
    */
-  private stationRoute(st: Station): Route {
+  private flowOf(st: Station): Flow {
     const sw = stationWay(st);
     const way = sw.way.slice();
-    const h = h32(st.axis, st.line, st.k, this.seed ^ 0x57a7);
+    const id = h32(st.axis, st.line, st.k, this.seed ^ 0x57a7);
     const top = way[1];
     const street = this.clearIn(top[0] - 12, top[2] - 12, top[0] + 12, top[2] + 12, top[1] - 1.5, top[1] + 1, true);
-    const onStreet = (x: number, z: number) => street(x, pavementAt(x, z), z, 0.5);
     // off the end of the opening, if it is pavement there and not the wall of a block
-    if (!onStreet(way[0][0], way[0][2])) way.shift();
-    const atStreet = way[0] === sw.way[0]
-      ? spotsAround(way[0], 0.8, 2.4, 8, h, onStreet, pavementAt, NaN)
-      : [{ pts: new Float32Array(way[0]), len: 0, face: 0 }];
+    if (!street(way[0][0], pavementAt(way[0][0], way[0][2]), way[0][2], 0.5)) way.shift();
+    const [down, up] = lanes(way);
 
-    // the platform: spots up and down it, clear of the stair and of the edges, and the ones
+    // the platform: places up and down it, clear of the stair and of the edges, and the ones
     // on the far side of the stair got to down the side of it
     const wait = way[way.length - 1];
     const [w0] = sw.well;
@@ -580,32 +984,83 @@ export class Pedestrians {
     const plat = this.clearIn(
       Math.min(ends[0][0], ends[1][0]) - 8, Math.min(ends[0][2], ends[1][2]) - 8,
       Math.max(ends[0][0], ends[1][0]) + 8, Math.max(ends[0][2], ends[1][2]) + 8, wait[1] - 0.5, wait[1] + 0.5, false);
-    const spots: Spot[] = [];
-    for (let k = 0; spots.length < 32 && k < 96; k++) {
-      const r = h32(h, k, 12, this.seed);
-      const m = -sw.hall + 5 + ((r & 0xffff) / 0x10000) * (2 * sw.hall - 10);
-      const side = (r >>> 16) & 1 ? 1 : -1;
-      const off = side * (((r >>> 17) & 0xff) / 255) * 4.4;
-      const [sx, sy, sz] = sw.platform(m, off);
-      if (!plat(sx, sy, sz, 0.45)) continue;
+    const clear = (p: Vec3) => plat(p[0], p[1], p[2], 0.45);
+    /** From the foot of the stair to a point `m` along the platform on one side of it, round the stair if need be. */
+    const from = (m: number, side: 1 | -1): number[] => {
       const pts: number[] = [...wait];
-      if (m > w0 - 3) {
-        // past the foot of the stair: down the side of it
-        if (Math.abs(off) < sw.half + 0.8) continue;
-        pts.push(...sw.platform(w0 - 3, side * (sw.half + 1.3)), ...sw.platform(Math.max(m, w0 - 3), side * (sw.half + 1.3)));
+      if (m > w0 - 3) pts.push(...sw.platform(w0 - 3, side * (sw.half + 1.3)), ...sw.platform(Math.max(m, w0 - 3), side * (sw.half + 1.3)));
+      return pts;
+    };
+    const waits: Wait[][] = [[], []], offs: Path[][] = [[], []];
+    for (const side of [1, -1] as const) {
+      const si = side > 0 ? 0 : 1;
+      for (let k = 0; waits[si].length < 16 && k < 64; k++) {
+        const r = h32(id, k * 2 + si, 12, this.seed);
+        const m = (((r & 0xffff) / 0x10000) * 2 - 1) * BOARD;
+        const off = side * (0.8 + (((r >>> 17) & 0xff) / 255) * 4.2);
+        const at = sw.platform(m, off);
+        if (!clear(at)) continue;
+        if (m > w0 - 3 && Math.abs(off) < sw.half + 0.8) continue;
+        // facing the track the train comes in on, or down the platform for it
+        const [ex, , ez] = sw.platform(m, side * 7);
+        const [ax, , az] = sw.platform(m + 1, off);
+        const face = (r >>> 25) % 3 === 0
+          ? Math.atan2(ax - at[0], az - at[2]) + ((r >>> 27) & 1 ? Math.PI : 0)
+          : Math.atan2(ex - at[0], ez - at[2]);
+        waits[si].push({ path: new Path([...from(m, side), ...at]), edge: new Path([...at, ...sw.platform(m, side * EDGE)]), face });
       }
-      pts.push(sx, sy, sz);
-      // facing the track on their own side, or down the platform for the train
-      const [ex, , ez] = sw.platform(m, side * 7);
-      const [ax, , az] = sw.platform(m + 1, off);
-      const face = (r >>> 25) % 3 === 0
-        ? Math.atan2(ax - sx, az - sz) + ((r >>> 27) & 1 ? Math.PI : 0)
-        : Math.atan2(ex - sx, ez - sz);
-      spots.push(spot(pts, face));
+      for (let k = 0; offs[si].length < 8 && k < 32; k++) {
+        const r = h32(id, k * 2 + si, 13, this.seed);
+        const m = (((r & 0xffff) / 0x10000) * 2 - 1) * BOARD;
+        const out = sw.platform(m, side * (4.4 + ((r >>> 16) & 0xff) / 255));
+        if (!clear(out)) continue;
+        const pts = [...sw.platform(m, side * EDGE), ...out];
+        if (m > w0 - 3) {
+          const by = sw.platform(m, side * (sw.half + 1.3));
+          if (!clear(by)) continue;
+          pts.push(...by);
+        }
+        const back = from(m, side);
+        for (let o = back.length - 3; o >= 0; o -= 3) pts.push(back[o], back[o + 1], back[o + 2]);
+        offs[si].push(new Path(pts));
+      }
     }
-    if (!spots.length) spots.push(spot([...wait], 0));
-    return this.wayRoute(way, { len: 4 * PACE + 2 * longest(atStreet), spots: atStreet }, { len: 50 * PACE + 2 * longest(spots), spots },
-      { gap: 8, spread: 4, busy: 0.85, id: h, below: true });
+    return { id, kind: SUBWAY, down, up, waits, offs, street: way[0], leads: null };
+  }
+
+  /**
+   * One side of a station on the elevated railway: up the stair tower from the forecourt and
+   * over the footbridge, places to wait along that side's platform, and ways off its train back
+   * to the footbridge. The other side is a flow of its own, with its own stair.
+   */
+  private railFlowOf(st: RailStation, side: 1 | -1): Flow {
+    const { way, platform } = railWay(st, side);
+    const id = h32(st.axis * 7 + (side > 0 ? 1 : 2), st.line, st.k, this.seed ^ 0x7a11);
+    const [down, up] = lanes(way);
+    const wait = way[way.length - 1];
+    const board = (RAILWAY.cars * CARRIAGE) / 2 - 3;
+    // into the side of the train standing on this side's track
+    const edge = RAIL_TRACK + 1.05;
+    const si = side > 0 ? 0 : 1;
+    const waits: Wait[][] = [[], []], offs: Path[][] = [[], []];
+    for (let k = 0; k < 16; k++) {
+      const r = h32(id, k, 12, this.seed);
+      const m = (((r & 0xffff) / 0x10000) * 2 - 1) * board;
+      const v = PLAT_IN + 0.9 + (((r >>> 16) & 0xff) / 255) * (PLAT_OUT - PLAT_IN - 1.7);
+      const at = platform(m, v);
+      // facing the track, or down the platform for the train
+      const [ex, , ez] = platform(m, 0), [ax, , az] = platform(m + 1, v);
+      const face = (r >>> 25) % 3 === 0
+        ? Math.atan2(ax - at[0], az - at[2]) + ((r >>> 27) & 1 ? Math.PI : 0)
+        : Math.atan2(ex - at[0], ez - at[2]);
+      waits[si].push({ path: new Path([...wait, ...at]), edge: new Path([...at, ...platform(m, edge)]), face });
+    }
+    for (let k = 0; k < 8; k++) {
+      const r = h32(id, k, 13, this.seed);
+      const m = (((r & 0xffff) / 0x10000) * 2 - 1) * board;
+      offs[si].push(new Path([...platform(m, edge), ...platform(m, PLAT_IN + 1.2 + ((r >>> 16) & 0xff) / 255), ...wait]));
+    }
+    return { id, kind: RAILWAY, down, up, waits, offs, street: way[0], leads: null };
   }
 
   /**
@@ -698,6 +1153,45 @@ function spot(pts: number[], face: number): Spot {
 }
 
 const longest = (spots: Spot[]) => spots.reduce((m, s) => Math.max(m, s.len), 0);
+
+/** A way walked there and back, as two paths keeping to the right of it: there, and back. */
+function lanes(way: Vec3[]): [Path, Path] {
+  const cx: number[] = [], cy: number[] = [], cz: number[] = [];
+  for (let k = 0; k + 1 < way.length; k++) {
+    const [ax, ay, az] = way[k], [bx, by, bz] = way[k + 1];
+    const m = Math.max(1, Math.round(Math.hypot(bx - ax, bz - az) / STEP));
+    for (let i = 0; i < m; i++) {
+      cx.push(ax + ((bx - ax) * i) / m);
+      cy.push(ay + ((by - ay) * i) / m);
+      cz.push(az + ((bz - az) * i) / m);
+    }
+  }
+  const end = way[way.length - 1];
+  cx.push(end[0]);
+  cy.push(end[1]);
+  cz.push(end[2]);
+  const [sx, sz] = smooth(Float32Array.from(cx), Float32Array.from(cz), 3, false);
+  const n = sx.length, there: number[] = [], back: number[] = [];
+  for (let j = 0; j < n; j++) {
+    const a = Math.max(0, j - 1), b = Math.min(n - 1, j + 1);
+    const yaw = Math.atan2(sx[b] - sx[a], sz[b] - sz[a]);
+    const k = j === 0 || j === n - 1 ? 0 : LANE;
+    const rx = -Math.cos(yaw) * k, rz = Math.sin(yaw) * k;
+    there.push(sx[j] + rx, cy[j], sz[j] + rz);
+    back.push(sx[j] - rx, cy[j], sz[j] - rz);
+  }
+  return [new Path(there), new Path(back).reversed()];
+}
+
+/** Whether a point is inside an outline. */
+function inside(poly: Vec2[], x: number, z: number): boolean {
+  let hit = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [ax, az] = poly[i], [bx, bz] = poly[j];
+    if ((az > z) !== (bz > z) && x < ((bx - ax) * (z - az)) / (bz - az) + ax) hit = !hit;
+  }
+  return hit;
+}
 
 const dist = (a: Vec2, b: Vec2) => Math.hypot(b[0] - a[0], b[1] - a[1]);
 

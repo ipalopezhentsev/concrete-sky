@@ -291,6 +291,33 @@ export function kitBoxes(): ModelBox[] {
  * A job's parcel, or a survey lamp waiting to be lit (origin at the bottom centre): a case in
  * the instance's colour, strapped twice, with a lamp on top that burns when its lights are on.
  */
+/**
+ * Two metres of zipline cable, centred on its origin and running along local z; a line is laid
+ * as a run of these, each pitched down the slope.
+ */
+export function cableBoxes(): ModelBox[] {
+  return [box(-0.055, -0.055, -1.03, 0.055, 0.055, 1.03, Mat.Metal)];
+}
+
+/**
+ * A zipline's post, from its top, where the cable is made fast, down into what it stands on:
+ * a steel pole, the arm the cable hangs from, and a lamp on top so it can be found.
+ */
+export function zipPostBoxes(): ModelBox[] {
+  const steel: Tint = [0.32, 0.33, 0.34];
+  return [
+    // a stout pole, braced at its foot
+    box(-0.2, -3.8, -0.2, 0.2, 0.3, 0.2, Mat.Metal, false, steel),
+    box(-0.45, -3.6, -0.45, 0.45, -3.2, 0.45, Mat.Metal, false, steel),
+    // the arm the cable hangs from
+    box(-0.1, 0.1, -0.7, 0.1, 0.3, 0.7, Mat.Metal, false, steel),
+    // a painted plate on it, in the line's colour, to be seen across the street by day
+    box(-0.04, -1.6, -0.55, 0.04, -0.4, 0.55, Mat.Paint, true),
+    // and a lamp on top, to be seen by night
+    box(-0.22, 0.3, -0.22, 0.22, 0.75, 0.22, Mat.Lamp),
+  ];
+}
+
 export function parcelBoxes(): ModelBox[] {
   return [
     box(-0.24, 0, -0.17, 0.24, 0.3, 0.17, Mat.Paint, true),

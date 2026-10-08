@@ -1429,6 +1429,155 @@ const lcg = (seed: number) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0
   setWorldSeed(1971);
 }
 
+// 12. the elevated railway: up a stair tower from the forecourt, over the footbridge onto the
+// platform, and a train that stops there and takes you to the next station
+{
+  const { buildPlanRegion, railStationsNear, railWay, planSpawn, RAIL_PLAT } = await import("../src/city/plan");
+  const { Metro, RAILWAY } = await import("../src/vehicles/metro");
+  const { setFloor } = await import("../src/player");
+  const { REGION_CELLS: RC } = await import("../src/city/generate");
+  for (const seed of [1971, 696531]) {
+    setWorldSeed(seed);
+    setFloor(-400);
+    const sp = planSpawn();
+    const near = railStationsNear(sp.x, sp.z, 3000)
+      .sort((a, b) => Math.hypot(a.x - sp.x, a.z - sp.z) - Math.hypot(b.x - sp.x, b.z - sp.z));
+    check(`railway: the city has stations on its viaducts (seed ${seed})`, near.length >= 2, `${near.length} within 3 km of the spawn`);
+    if (!near.length) continue;
+    const st = near[0];
+    const cells = new Map<string, Float32Array[]>();
+    const loaded = new Set<string>();
+    const load = (rx: number, rz: number) => {
+      if (loaded.has(`${rx},${rz}`)) return;
+      loaded.add(`${rx},${rz}`);
+      for (const c of buildPlanRegion(rx, rz).colliders) {
+        const k = `${c.ci},${c.cj}`;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k)!.push(c.boxes);
+      }
+    };
+    const colliders = (x: number, z: number) => {
+      const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+      const parts: Float32Array[] = [];
+      for (let i = ci - 1; i <= ci + 1; i++)
+        for (let j = cj - 1; j <= cj + 1; j++) {
+          load(Math.floor(i / RC), Math.floor(j / RC));
+          for (const p of cells.get(`${i},${j}`) ?? []) parts.push(p);
+        }
+      const out = new Float32Array(parts.reduce((a, p) => a + p.length, 0));
+      let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    };
+    // Both sides: from the forecourt, up every flight of the tower and over to the platform.
+    for (const side of [1, -1] as const) {
+      const { way } = railWay(st, side);
+      const p = new Player(way[0][0], way[0][1] + 0.5, way[0][2], 0);
+      for (let i = 1; i < way.length; i++) walk(p, colliders(p.pos[0], p.pos[2]), [[way[i][0], way[i][2]]], 6);
+      const plat = st.y + RAIL_PLAT;
+      check(`railway: the stair tower reaches the platform (seed ${seed}, side ${side})`, Math.abs(p.pos[1] - plat) < 0.6,
+        `ended at y=${p.pos[1].toFixed(2)}, platform=${plat.toFixed(2)}, ${way.length} points up`);
+    }
+    // A ride from it to the next station, which it gets to and stands at.
+    const ride = new Metro(st.axis, st.line, 1, st.k, 0, RAILWAY);
+    let standing = false, got = ride.stop, rode = 0;
+    for (let t = 0.1; t <= RAILWAY.period * 10 && !(standing && ride.slot > st.k); t += 0.1) {
+      standing = ride.update(0.1, t, 0, 0).stopped;
+      got = ride.stop;
+      rode = t;
+    }
+    check(`railway: a ride reaches the next stop (seed ${seed})`, standing && !!got && ride.slot > st.k,
+      `${st.name} -> ${got ? got.name : "nowhere"} after ${rode.toFixed(0)} s`);
+    if (got) {
+      const exit = ride.exitSpot()!;
+      check(`railway: stepping out lands on the platform (seed ${seed})`, Math.abs(exit[1] - (got as { y: number }).y - RAIL_PLAT) < 0.3,
+        `exit y=${exit[1].toFixed(2)}`);
+    }
+  }
+  setFloor(0);
+  setWorldSeed(1971);
+}
+
+// 13. the grappling line: from the street, fired at the edge of a block's deck and reeled in,
+// it brings the runner up and over onto the deck
+{
+  const { buildPlanRegion, planSpawn, deckOf, pavementOf, groundAt } = await import("../src/city/plan");
+  const { Grapple } = await import("../src/grapple");
+  const { setFloor } = await import("../src/player");
+  const { REGION_CELLS: RC } = await import("../src/city/generate");
+  for (const seed of [1971, 696531]) {
+    setWorldSeed(seed);
+    setFloor(-400);
+    const sp = planSpawn();
+    const cells = new Map<string, Float32Array[]>();
+    const loaded = new Set<string>();
+    const load = (rx: number, rz: number) => {
+      if (loaded.has(`${rx},${rz}`)) return;
+      loaded.add(`${rx},${rz}`);
+      for (const c of buildPlanRegion(rx, rz).colliders) {
+        const k = `${c.ci},${c.cj}`;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k)!.push(c.boxes);
+      }
+    };
+    const colliders = (x: number, z: number) => {
+      const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+      const parts: Float32Array[] = [];
+      for (let i = ci - 1; i <= ci + 1; i++)
+        for (let j = cj - 1; j <= cj + 1; j++) {
+          load(Math.floor(i / RC), Math.floor(j / RC));
+          for (const p of cells.get(`${i},${j}`) ?? []) parts.push(p);
+        }
+      const out = new Float32Array(parts.reduce((a, p) => a + p.length, 0));
+      let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    };
+    // The block nearest the spawn: stand in the street off the middle of one of its sides, a
+    // few metres out from the kerb, and fire up at the deck edge above.
+    const site = blocksIn(sp.x - 300, sp.z - 300, sp.x + 300, sp.z + 300)
+      .filter((s) => !s.road && pavementOf(s))
+      .sort((a, b) => Math.hypot(a.p[0] - sp.x, a.p[1] - sp.z) - Math.hypot(b.p[0] - sp.x, b.p[1] - sp.z))[0];
+    const poly = pavementOf(site)!;
+    const E = deckOf(site);
+    let tried = 0, made = 0, detail = "";
+    for (let k = 0; k < poly.length && tried < 3; k++) {
+      const a = poly[k], b = poly[(k + 1) % poly.length];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (len < 30) continue;
+      const mx = (a[0] + b[0]) / 2, mz = (a[1] + b[1]) / 2;
+      const cx = poly.reduce((s, p) => s + p[0], 0) / poly.length, cz = poly.reduce((s, p) => s + p[1], 0) / poly.length;
+      let nx = -(b[1] - a[1]) / len, nz = (b[0] - a[0]) / len;
+      if (nx * (cx - mx) + nz * (cz - mz) < 0) { nx = -nx; nz = -nz; }
+      // out in the street, facing the block
+      const sx = mx - nx * 6, sz = mz - nz * 6;
+      const g = groundAt(sx, sz);
+      const p = new Player(sx, g + 0.5, sz, Math.atan2(nx, nz));
+      for (let i = 0; i < 30; i++) p.update(1 / 60, { moveX: 0, moveZ: 0, sprint: false, walk: false, jump: false }, colliders);
+      tried++;
+      // aim at the lip of the deck: the deck edge is WALK - 0.9 in from the kerb
+      const eye = p.eye();
+      const target: [number, number, number] = [mx + nx * 6.3, E - 0.6, mz + nz * 6.3];
+      const dl = Math.hypot(target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]);
+      const gr = new Grapple();
+      const hit = gr.fire(eye, [(target[0] - eye[0]) / dl, (target[1] - eye[1]) / dl, (target[2] - eye[2]) / dl], colliders);
+      if (!hit) { detail += ` side ${k}: no hit;`; continue; }
+      for (let t = 0; t < 60 * 8; t++) {
+        if (gr.anchor) gr.pull(1 / 60, p, true, colliders);
+        if (gr.climbing) continue;
+        p.update(1 / 60, { moveX: 0, moveZ: gr.anchor ? 0 : 1, sprint: false, walk: false, jump: false }, colliders);
+        if (!gr.anchor && p.grounded) break;
+      }
+      const up = Math.abs(p.pos[1] - E) < 1.2;
+      if (up) made++;
+      detail += ` side ${k}: hit y=${hit[1].toFixed(1)} ended y=${p.pos[1].toFixed(1)} deck ${E.toFixed(1)};`;
+    }
+    check(`grapple: up from the street onto a deck (seed ${seed})`, made > 0, `${made}/${tried}${detail}`);
+  }
+  setFloor(0);
+  setWorldSeed(1971);
+}
+
 // Off the end of a bridge and onto the road beyond it. On 984216 the lower of two bridges
 // crossing over the water came down to the bank at one in five, ended in a bay's length of
 // nothing, and met the road a metre above where the ramp left off: three bumps in sixty metres,

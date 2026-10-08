@@ -312,6 +312,7 @@ canvas#view {
 #map .legend .road::before { background: #848d98; }
 #map .legend .rail::before { background: #c8a05a; }
 #map .legend .tube::before { background: #5fb8a6; }
+#map .legend .zip::before { background: #e8e2d4; }
 #map .legend .water::before { background: #2d5673; height: 6px; }
 #map .legend .you::before { background: #f2efe9; height: 6px; width: 6px; border-radius: 50%; }
 

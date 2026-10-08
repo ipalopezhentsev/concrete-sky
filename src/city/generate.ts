@@ -146,6 +146,10 @@ export class Builder {
   pads: Pad[] = [];
   /** Street lamp heads (x, y, z), for lighting the network city, which has no lamp grid. */
   lamps: number[] = [];
+  /** The tips of the masts on the tallest towers, x y z each: what lightning strikes. */
+  masts: number[] = [];
+  /** Ziplines from a roof down to a deck: the top of each end's post, x y z, high end first, and the block they belong to. */
+  zips: number[] = [];
   cars: ParkedCar[] = [];
   /** Small craft tied up along a quay, which can be boarded. */
   boats: Pad[] = [];
@@ -1926,12 +1930,16 @@ export interface RegionMesh {
   cells: CellRange[];
   pads: (Pad & { id: string })[];
   lamps: number[];
+  masts: number[];
+  zips: number[];
   cars: (ParkedCar & { id: string })[];
   lifts: (Lift & { id: string })[];
   boats: (Pad & { id: string })[];
   roofs: Roof[];
   /** Subway stations whose platform is in this region; see src/city/plan.ts. */
   stations: unknown[];
+  /** Stations on the elevated railway whose middle is in this region. */
+  railStations: unknown[];
   maxHeight: number;
   colliders: { ci: number; cj: number; boxes: Float32Array }[];
 }
@@ -2280,9 +2288,11 @@ export function assembleRegion(rx: number, rz: number, cells: Part[], faceCull =
   const boats = cells.flatMap(({ ci, cj, b }) => b.boats.map((v, k) => ({ ...v, id: `b${ci},${cj},${k}` })));
   return {
     rx, rz, vertices, positions: positionsOf(vertices, v), indices: indices.slice(0, idx),
-    groundCount, cells: ranges, pads, cars, lifts, boats, stations: [], maxHeight, colliders,
+    groundCount, cells: ranges, pads, cars, lifts, boats, stations: [], railStations: [], maxHeight, colliders,
     roofs: cells.flatMap(({ b }) => b.roofs),
     lamps: cells.flatMap(({ b }) => b.lamps),
+    masts: cells.flatMap(({ b }) => b.masts),
+    zips: cells.flatMap(({ b }) => b.zips),
   };
 }
 

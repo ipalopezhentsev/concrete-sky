@@ -1,8 +1,9 @@
 // Concrete Sky: boot, input, main loop and HUD.
 
 import { Audio } from "./audio";
-import { groundAt, spawnSearch } from "./city/plan";
+import { groundAt, marketsNear, spawnSearch } from "./city/plan";
 import { setFloor } from "./player";
+import { Grapple } from "./grapple";
 import { Demo } from "./demo";
 import { MAX_HEALTH } from "./hunters";
 import { MapView, RADAR_ZOOMS } from "./mapview";
@@ -74,6 +75,20 @@ const debug = {
   job: () => ({}) as Record<string, unknown>,
   /** Test hook: stand the runner next to whoever is offering a job, or at the next step of the one in hand. */
   toJob: () => false,
+  /** Test hook: wind the game clock on by `s` seconds. */
+  /** Test hook: what the city sounds like from where the runner is. */
+  sound: () => ({}) as unknown,
+  skip: (_s: number) => {},
+  /** Test hook: put the runner somewhere, looking some way. */
+  goto: (_x: number, _y: number, _z: number, _yaw: number, _pitch: number) => {},
+  /** Test hook: the parked vehicles out on a trip, the people drawn, and the stations streamed in. */
+  berths: () => ({}) as Record<string, unknown>,
+  /** Test hook: how bright the lightning is this frame, and the weather it is in. */
+  lightning: () => ({}) as { flash?: number; bolt?: number; az?: number; weather?: string },
+  /** Test hook: lightning now, `distance` metres off in the direction the runner is looking, flickering `pulses` times. */
+  strike: (_distance: number, _pulses: number) => {},
+  /** Test hook: lightning onto the mast most nearly ahead; where it is, or null. */
+  strikeMast: (_at?: Vec3) => null as Vec3 | null,
 };
 (window as unknown as { __cs: typeof debug }).__cs = debug;
 
@@ -343,6 +358,16 @@ async function main(): Promise<void> {
   const keys = new Set<string>();
   let mouseDX = 0, mouseDY = 0;
   let firing = false;
+  /** The grappling line, and whether the right mouse button is holding it. */
+  const grapple = new Grapple();
+  let grappling = false;
+  /** Fire the line along the view, on foot. */
+  const throwLine = () => {
+    if (mode !== "play" || rides.riding || grapple.anchor) return;
+    const cp = Math.cos(player.pitch);
+    const dir: Vec3 = [Math.sin(player.yaw) * cp, Math.sin(player.pitch), Math.cos(player.yaw) * cp];
+    if (grapple.fire(player.eye(), dir, rides.colliders)) audio.zap(0.35, 2.4);
+  };
   let notice = "";
   let noticeTime = 0;
   // hunters chase the player unless turned off (H, the settings, or ?hunters=0)
@@ -400,6 +425,11 @@ async function main(): Promise<void> {
   const radar = new MapView(document.getElementById("radarview") as HTMLCanvasElement, world, {
     radar: true, zooms: RADAR_ZOOMS,
   });
+  // the ziplines the game has found clear to ride, on both
+  const zipLines = (): [number, number, number, number][] =>
+    rides.zips.near(player.pos[0], player.pos[2], 1500, world.colliders, world.streamedAt).map((z) => [z.a[0], z.a[2], z.b[0], z.b[2]]);
+  map.zips = zipLines;
+  radar.zips = zipLines;
 
   // --- settings
   const keysEl = document.getElementById("keys")!;
@@ -410,7 +440,7 @@ async function main(): Promise<void> {
     keysEl.innerHTML = [
       `mouse look · ${k("forward")}${k("left")}${k("back")}${k("right")} run · ${k("sprint")} sprint · ` +
         `${k("walk")} walk · ${k("jump")} jump / climb`,
-      `${k("interact")} get in / out of cars, flyers and subway trains · click shoot · ${k("view")} cockpit view`,
+      `${k("interact")} get in / out of cars, flyers and trains, or ride a zipline · click shoot · ${k("grapple")} / right click grappling line · ${k("view")} cockpit view`,
       `${k("map")} map (${both("zoomIn", "zoomOut")} to zoom) · ${k("hunters")} hunters on / off · ` +
         `${k("roof")} back to last roof · ${k("music")} music`,
       `talk to anyone under an amber light for a job · ${k("job")} drop the job`,
@@ -597,8 +627,12 @@ async function main(): Promise<void> {
       caption(settings.music ? "music on" : "music off");
     }
     if (mode !== "play") return;
-    if (act === "roof" && !rides.riding) player.respawn();
+    if (act === "roof" && !rides.riding) {
+      grapple.release(player);
+      player.respawn();
+    }
     if (act === "interact") interact();
+    if (act === "grapple" && !e.repeat) throwLine();
     if (act === "job") rides.quests.drop();
     if (act === "view" && rides.riding) rides.cockpit = !rides.cockpit;
   });
@@ -619,9 +653,16 @@ async function main(): Promise<void> {
   });
   window.addEventListener("mousedown", (e) => {
     if (e.button === 0 && document.pointerLockElement === canvas) firing = true;
+    if (e.button === 2 && document.pointerLockElement === canvas) {
+      grappling = true;
+      throwLine();
+    }
   });
+  // the right button is the grappling line, not a menu
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   window.addEventListener("mouseup", (e) => {
     if (e.button === 0) firing = false;
+    if (e.button === 2) grappling = false;
   });
   window.addEventListener("pointerdown", (e) => {
     idle = 0;
@@ -676,6 +717,42 @@ async function main(): Promise<void> {
   const markers: HTMLElement[] = [];
   const goalPins: { mark: HTMLElement; label: HTMLElement }[] = [];
   let jobText = "", shownJob = "";
+  debug.sound = () => rides.soundscape(player.eye(), time);
+  debug.skip = (s) => {
+    time += s;
+  };
+  debug.goto = (x, y, z, yaw, pitch) => {
+    player.pos = [x, y, z];
+    player.vel = [0, 0, 0];
+    player.yaw = yaw;
+    player.pitch = pitch;
+  };
+  debug.strike = (distance, pulses) => weather.strikeNow(distance, player.yaw, true, pulses);
+  debug.strikeMast = (at) => {
+    if (at) {
+      weather.strikeMast(at);
+      return at;
+    }
+    const e = rides.focus, f = [Math.sin(player.yaw), Math.cos(player.yaw)];
+    let best: Vec3 | null = null, score = -Infinity;
+    for (const m of world.masts()) {
+      const dx = m[0] - e[0], dz = m[2] - e[2], d = Math.hypot(dx, dz);
+      if (d < 250 || d > 2200) continue;
+      const s = (dx * f[0] + dz * f[1]) / d;
+      if (s > score) [score, best] = [s, m];
+    }
+    if (best) weather.strikeMast(best);
+    return best;
+  };
+  debug.lightning = () => ({ flash: weather.flash, bolt: weather.bolt[2], az: weather.bolt[0], weather: weather.name });
+  debug.berths = () => ({
+    moving: rides.berths.trips(),
+    walkers: rides.pedestrians.lists.reduce((n, l) => n + l.count, 0),
+    stations: [...world.stations()].map((s) => [s.x, s.y, s.z, s.yaw]),
+    railStations: [...world.railStations()].map((s) => [s.x, s.y, s.z, s.yaw]),
+    zips: rides.zips.near(player.pos[0], player.pos[2], 900, world.colliders, world.streamedAt).map((z) => [...z.a, ...z.b]),
+    markets: marketsNear(player.pos[0], player.pos[2], 600).map((m) => m.map((s) => [s.x, s.y, s.z, Math.atan2(s.n[0], s.n[1])])),
+  });
 
   const frame = (now: number) => {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -710,6 +787,7 @@ async function main(): Promise<void> {
         controls.fire = Math.sin(time * 2) > 0.3;
         player.yaw += dt * 0.12 * Math.sin(time * 0.3);
       }
+      rides.air = { wind: weather.params.wind, rain: weather.params.rain, wet: weather.wet };
       rides.drive(dt, controls, time);
     } else if (active) {
       player.look(controls.mouseDX, controls.mouseDY);
@@ -722,7 +800,18 @@ async function main(): Promise<void> {
         input.jump = Math.sin(time * 1.3) > 0.95;
         player.yaw += dt * 0.15 * Math.sin(time * 0.4);
       }
-      player.update(dt, input, rides.colliders);
+      // The line: held, it reels in; let go of, or jumped off, it comes away.
+      // Hauling up over a lip, it carries them whatever is held.
+      if (grapple.climbing) grapple.pull(dt, player, true, rides.colliders);
+      else if (grapple.anchor) {
+        const hold = held(keys, "grapple") || grappling;
+        if (!hold || (controls.up && !player.grounded)) grapple.release(player);
+        else {
+          grapple.pull(dt, player, true, rides.colliders);
+          input.jump = false;
+        }
+      }
+      if (!grapple.climbing) player.update(dt, input, rides.colliders);
       rides.lifts.carry(player);
       if (player.footstep) audio.step(player.speedNorm, weather.wet);
       if (player.landed > 0.2) audio.landing(player.landed);
@@ -733,7 +822,10 @@ async function main(): Promise<void> {
     // A slot with no platform is run straight through, so there is nothing to announce.
     if (rides.metro?.arrived && rides.metro.stop) caption(rides.metro.stop.name);
 
+    weather.eye = rides.focus;
     weather.update(params.has("shot") ? 0 : dt);
+    for (const d of weather.strikes.splice(0)) audio.thunder(d);
+    for (const m of weather.hits.splice(0)) rides.particles.strike(m);
     if (weather.changed) {
       if (time > 1) caption(weather.changed);
       weather.changed = null;
@@ -766,6 +858,8 @@ async function main(): Promise<void> {
     rides.pedestrians.hour = weather.hour;
     rides.pedestrians.rain = weather.params.rain;
     rides.update(dt, time, { eye, fwd, roll, fov: fovDeg }, active && controls.fire);
+    if (rides.riding && grapple.anchor) grapple.release(player);
+    grapple.draw(player, rides.particles, dt);
     const hunters = rides.hunters;
     if (hunters.gotYou) {
       caption("caught");
@@ -802,7 +896,10 @@ async function main(): Promise<void> {
 
     // sound
     const speedNorm = rides.speedNorm;
+    // Shift in anything you can drive is the boost, and the drums come up with it
+    audio.boost = controls.sprint && (rides.flyer || rides.car || rides.boat) ? 1 : 0;
     audio.update(dt, weather.params, speedNorm, focus[1]);
+    audio.city(rides.soundscape(eye, time), eye, fwd);
     if (rides.flyer) audio.engine(1, 74, rides.flyer.speedNorm, rides.flyer.vel[1] * 0.03);
     else if (rides.car) audio.engine(1, 38, rides.car.speedNorm, Math.abs(controls.moveZ) * 0.2);
     else audio.engine(0, 74, 0, 0);
@@ -916,7 +1013,12 @@ async function main(): Promise<void> {
       renderer.lamps = world.lampsNear(cam.eye[0], cam.eye[2], LAMP_SLOTS);
       lampsAt = [cam.eye[0], cam.eye[2]];
       lampsVersion = world.version;
+      weather.masts = [...world.masts()];
     }
+    // rain on the canopy or the windscreen, seen from the seat behind it, blown back at speed
+    const behindGlass = rides.cockpit && (!!rides.flyer || !!rides.car);
+    renderer.glass += ((behindGlass ? weather.params.rain : 0) - renderer.glass) * Math.min(1, dt * 0.8);
+    renderer.glassFlow = rides.speedNorm;
     renderer.render(cam, weather, world, rides.vehicleLists, rides.particles, time, blur, shade);
     debug.frames++;
     // where the runner is, and which way they are pointed — the camera's heading, so it is

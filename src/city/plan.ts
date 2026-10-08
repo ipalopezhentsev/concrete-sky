@@ -4,15 +4,15 @@
 
 import { hashInt, Rng, type Vec3 } from "../math";
 import {
-  assembleRegion, Builder, CELL, LIFT_SIZE, REGION, REGION_CELLS, type Part, type RegionMesh,
+  assembleRegion, Builder, CELL, collidersOf, LIFT_SIZE, REGION, REGION_CELLS, type Part, type RegionMesh,
 } from "./generate";
 import { Finish, Mat, Win, type Tint } from "./materials";
 import { YAW_STEP, yawStep } from "./mesh";
 import { PAINT_COLORS } from "../vehicles/models";
 import {
-  ARTERY, ARTERY_HALF, arteriesNear, arteryFrame, arteryLines, arteryScale, blocksIn, cellOf, checkSeed, grain, RIVER_HALF,
-  neighbours, QUAY, QUAY_RISE, rememberBySeed, riverFrame, riverLines, riverNear, ROAD, streetsOf, TERRACE, terrainAt, TILE,
-  waterLevel,
+  ARTERY, ARTERY_HALF, arteriesNear, arteryFrame, arteryLines, arteryScale, blockAt, blocksIn, cellOf, checkSeed, grain, hasRail,
+  hasSubway, forecourtOf, RAIL_SPACING, railStop, type Forecourt, RIVER_HALF, neighbours, QUAY, QUAY_RISE, rememberBySeed, riverFrame, riverLines,
+  riverNear, ROAD, streetsOf, SUB_SPACING, TERRACE, terrainAt, TILE, waterLevel,
   type Site, type Street, type Vec2,
 } from "./network";
 
@@ -440,11 +440,85 @@ function buildBlock(site: Site, b: Builder): void {
         const mast = r.uniform(20, 70);
         b.box(c[0] - 0.45, top + 3, c[1] - 0.45, c[0] + 0.45, top + 3 + mast, c[1] + 0.45, Mat.Metal, tint, 0, { detail: false });
         b.box(c[0] - 0.7, top + 3 + mast, c[1] - 0.7, c[0] + 0.7, top + 4.4 + mast, c[1] + 0.7, Mat.Beacon, tint, 0, { collide: false });
+        b.masts.push(c[0], top + 4.4 + mast, c[1]);
       } else if (r.chance(0.4)) {
         b.box(c[0] - 0.6, top + 3, c[1] - 0.6, c[0] + 0.6, top + 3.9, c[1] + 0.6, Mat.Beacon, tint, 0, { collide: false });
       }
     }
   });
+  zipline(b, site, E);
+}
+
+/** How high each end's post stands over what it stands on: the cable runs between their tops. */
+const ZIP_POST_HIGH = 3.4, ZIP_POST_LOW = 3.2;
+
+/**
+ * A zipline off the roof of one of the block's towers, down across a street to the deck of the
+ * block on the other side. Not on every block — a few in each quarter — and only where the run
+ * is long enough to be worth riding and falls steeply enough to carry a rider the whole way.
+ *
+ * What stands between the two ends is not known here: the block across the street is built on
+ * its own, and the towers on this one could be anywhere. So the line is laid regardless, and
+ * the game tests it against the city's collision once both ends are streamed in, and leaves it
+ * out if anything is in the way (see zips.ts). So it lays a few, and their posts are drawn
+ * with whichever one is ridden rather than built here.
+ */
+function zipline(b: Builder, site: Site, E: number): void {
+  const h = hashInt(Math.round(site.p[0]), Math.round(site.p[1]), 368);
+  if (h % 100 >= 85) return;
+  const roofs = b.roofs.filter((r) => r.y - E > 18);
+  if (!roofs.length) return;
+  const own = collidersOf(b);
+  /** Whether a rider hanging under the cable from a to c would hit anything this block has built. */
+  const clear = (a: Vec3, c: Vec3): boolean => {
+    const len = Math.hypot(c[0] - a[0], c[1] - a[1], c[2] - a[2]);
+    for (let t = 2.5; t < len - 3; t += 1.5) {
+      const k = t / len, x = a[0] + (c[0] - a[0]) * k, y = a[1] + (c[1] - a[1]) * k, z = a[2] + (c[2] - a[2]) * k;
+      for (let i = 0; i < own.length; i += 6) {
+        if (x > own[i] - 0.6 && x < own[i + 3] + 0.6 && z > own[i + 2] - 0.6 && z < own[i + 5] + 0.6 &&
+            own[i + 4] > y - 2.7 && own[i + 1] < y + 0.3) return false;
+      }
+    }
+    return true;
+  };
+  const across = neighbours(site).filter((n) => !riverNear(n.mid[0], n.mid[1], RIVER_HALF + 40));
+  const found: { a: Vec3; c: Vec3; score: number }[] = [];
+  for (const { other, mid, normal } of across) {
+    const poly = cellOf(other);
+    if (!poly || poly.length < 3 || !podiumOf(poly)) continue;
+    // out over the street onto the far deck's walk, between its parapet and its towers
+    const walk = shrink(poly, WALK + 1.6);
+    if (walk.length < 3) continue;
+    const deck = deckOf(other);
+    // Off to one side of the middle of the street, where the bridge between the two decks lands.
+    for (const slide of [14, -14, 24, -24]) {
+    let target: Vec2 | null = null;
+    for (let d = 0; d < 90 && !target; d += 1) {
+      const q: Vec2 = [mid[0] + normal[0] * d - normal[1] * slide, mid[1] + normal[1] * d + normal[0] * slide];
+      if (inPoly(walk, q[0], q[1])) target = q;
+    }
+    if (!target) continue;
+    for (const roof of roofs) {
+      // from the edge of the roof facing that way, inside its rim and clear of the plant room
+      const c = centroid(roof.poly);
+      const ux = target[0] - c[0], uz = target[1] - c[1], ul = Math.hypot(ux, uz) || 1;
+      let edge = 0;
+      while (edge < 80 && inPoly(roof.poly, c[0] + (ux / ul) * edge, c[1] + (uz / ul) * edge)) edge += 0.25;
+      const sx = c[0] + (ux / ul) * (edge - 0.8), sz = c[1] + (uz / ul) * (edge - 0.8);
+      const a: Vec3 = [sx, roof.y + ZIP_POST_HIGH, sz], e: Vec3 = [target[0], deck + ZIP_POST_LOW, target[1]];
+      const run = Math.hypot(e[0] - a[0], e[2] - a[2]), slope = (a[1] - e[1]) / run;
+      if (run < 40 || run > 280 || slope < 0.12 || slope > 0.75) continue;
+      // a fall of about one in three is the ride: steep enough to fly, not so steep it is a drop
+      const score = Math.abs(slope - 0.33);
+      if (!clear(a, e)) continue;
+      found.push({ a, c: e, score });
+    }
+    }
+  }
+  // The best few, in order: the game rides the first of them that turns out to be clear all
+  // the way down, and the block's number is what ties them together.
+  found.sort((x, y) => x.score - y.score);
+  for (const f of found.slice(0, 3)) b.zips.push(...f.a, ...f.c, h);
 }
 
 // The terrace and the tile live with the terrain field: between them they set the steepest
@@ -2227,6 +2301,10 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   streets(ground, x0, z0);
   bridges(ground, solid, x0, z0);
   rails(ground, x0, z0);
+  const railStops = railStationsNear(x0 + REGION / 2, z0 + REGION / 2, REGION)
+    .filter((st) => st.x >= x0 && st.x < x0 + REGION && st.z >= z0 && st.z < z0 + REGION);
+  for (const st of railStops) railStation(ground, st);
+  marketsIn(ground, x0, z0);
   const stations = subway(ground, x0, z0);
   waterfront(ground, x0, z0);
   river(ground, x0, z0);
@@ -2246,6 +2324,7 @@ export function buildPlanRegion(rx: number, rz: number, faceCull = true): Region
   // carried back with the mesh so that nothing on the main thread ever has to work out
   // where a station is for itself
   mesh.stations = stations;
+  mesh.railStations = railStops;
   return mesh;
 }
 
@@ -2283,7 +2362,7 @@ function byGridCell(
   });
 }
 
-export { ROAD };
+export { ROAD, hasRail, hasSubway, SUB_SPACING };
 
 /**
  * Where the runner starts on the network city: standing in the middle of an arterial.
@@ -3176,9 +3255,6 @@ export function railY(axis: 0 | 1, line: number, s: number): number {
   return railNode(axis, line, k) * (1 - t) + railNode(axis, line, k + 1) * t;
 }
 
-export function hasRail(axis: 0 | 1, line: number): boolean {
-  return hashInt(axis, line, 320) % 100 < 26;
-}
 
 /**
  * An elevated railway, carried on piers above an arterial.
@@ -3214,8 +3290,11 @@ function rails(b: Builder, x0: number, z0: number): void {
             { turn, rise, detail: false });
         };
         put(HALF, y - DEEP, y, 0, Mat.Board, t, Finish.Cast); // deck
-        put(0.3, y, y + 0.9, 4.9, Mat.Panel, t); // upstands
-        put(0.3, y, y + 0.9, -4.9, Mat.Panel, t);
+        // upstands, except along a station, where the platforms stand out past the deck instead
+        if (!inRailStation(axis, line, (k + 0.5) * RAIL_BAY)) {
+          put(0.3, y, y + 0.9, 4.9, Mat.Panel, t);
+          put(0.3, y, y + 0.9, -4.9, Mat.Panel, t);
+        }
         for (const off of [-2.6, -1.1, 1.1, 2.6]) put(0.09, y, y + 0.16, off, Mat.Metal, steel); // rails
         // A portal every third bay: a column either side of the road, clear of the kerb, and a
         // crossbeam under the deck between them. This used to be a single pier on the arterial's
@@ -3262,8 +3341,6 @@ function rails(b: Builder, x0: number, z0: number): void {
 // The line runs on the same armature as the elevated railway and never on an arterial that
 // already carries one: one road, one railway, above it or below it.
 
-/** Metres between stations along a line; a whole number of bays, so stations sit on nodes. */
-export const SUB_SPACING = 360;
 /** Centre of each running track, off the tunnel centreline. */
 export const TRACK_OFF = 8.5;
 /** Interior of the running tunnel: half-width, and track bed to soffit. */
@@ -3314,9 +3391,6 @@ function flightRun(drop: number): number {
   return Math.max(1, Math.round(drop / STEP_RISE)) * STEP_GOING;
 }
 
-export function hasSubway(axis: 0 | 1, line: number): boolean {
-  return !hasRail(axis, line) && hashInt(axis, line, 361) % 100 < 74;
-}
 
 /**
  * Track bed level at a node of the line.
@@ -4787,4 +4861,408 @@ function underRoad(x: number, z: number): boolean {
   }
   for (const st of near) if (underStreet(st, x, z, 1)) return true;
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Stations on the elevated railway
+//
+// A platform either side of the deck, outside the two tracks, the length of a train and under
+// a canopy; and from the middle of each, a footbridge out over the carriageway to a stair tower
+// standing in the forecourt the block on that side keeps in front of it (see `railStop`).
+
+/** Platform top above the rails: level with a carriage floor, as on the subway. */
+export const RAIL_PLAT = 1.06;
+/** Where each track runs, off the middle of the deck; see `railways` in traffic.ts. */
+export const RAIL_TRACK = 1.85;
+/** A platform runs from just clear of the train to its outer edge, either side. */
+export const PLAT_IN = 3.45, PLAT_OUT = 7.6;
+/** Half the length of a platform: a train of five twenty-metre cars and a little over. */
+const PLAT_LONG = 54;
+/** The stair tower: how far out from the line its near face stands, and how wide it is. */
+const TOWER_IN = ARTERY_HALF + 6.5;
+const TOWER_WIDE = 4.6;
+/** Steps to a flight, their going, and the landings at either end. */
+const TOWER_STEPS = 7, TOWER_GOING = 0.8, TOWER_LAND = 2.4;
+const TOWER_LONG = TOWER_LAND * 2 + TOWER_STEPS * TOWER_GOING;
+
+export interface RailStation {
+  axis: 0 | 1;
+  line: number;
+  k: number;
+  /** Where it is on the line, and the point on the line there. */
+  s: number;
+  x: number;
+  z: number;
+  /** Top of the rails at its middle; the platforms stand `RAIL_PLAT` above that. */
+  y: number;
+  yaw: number;
+  name: string;
+  /** The way up each side, from the forecourt to the platform: see `railWay`. */
+  towers: RailTower[];
+}
+
+/** A stair tower, in the station's own frame: `u` along the line, `v` out from it on its side. */
+export interface RailTower {
+  side: 1 | -1;
+  /** Where along the line its first landing begins. */
+  u0: number;
+  /** The ground at its foot, the platform level at its top, and how many flights between. */
+  foot: number;
+  top: number;
+  flights: number;
+}
+
+const railStations = rememberBySeed<string, RailStation | null>();
+
+/** Station `k` of an elevated railway, or null where it has none. */
+export function railStationAt(axis: 0 | 1, line: number, k: number): RailStation | null {
+  const stop = railStop(axis, line, k);
+  if (!stop) return null;
+  const key = `${axis},${line},${k}`;
+  checkSeed();
+  const hit = railStations.get(key);
+  if (hit !== undefined) return hit;
+  const { s } = stop;
+  const { p, dir } = arteryFrame(axis, line, s);
+  const y = railY(axis, line, s);
+  const top = y + RAIL_PLAT;
+  const h = hashInt(axis, line, k, 365);
+  const towers: RailTower[] = ([1, -1] as const).map((side) => {
+    // The tower stands so that the landing the last flight arrives at is opposite the middle
+    // of the platform, where the footbridge leaves from. Flights go out along the line and back,
+    // so that is the far end after an odd number of them and the near end after an even one —
+    // which depends on the ground at its foot, which depends on where it stands. Asked twice.
+    let u0 = -TOWER_LONG + TOWER_LAND / 2, foot = 0, flights = 1;
+    for (let pass = 0; pass < 2; pass++) {
+      foot = -Infinity;
+      for (const a of [0, TOWER_LONG]) for (const v of [TOWER_IN, TOWER_IN + TOWER_WIDE]) {
+        const u = u0 + a;
+        foot = Math.max(foot, groundAt(p[0] + dir[0] * u - dir[1] * v * side, p[1] + dir[1] * u + dir[0] * v * side));
+      }
+      flights = Math.max(1, Math.ceil((top - foot) / (TOWER_STEPS * 0.45)));
+      u0 = -(flights % 2 === 1 ? TOWER_LONG - TOWER_LAND / 2 : TOWER_LAND / 2);
+    }
+    return { side, u0, foot, top, flights };
+  });
+  const st: RailStation = {
+    axis, line, k, s, x: p[0], z: p[1], y, yaw: Math.atan2(dir[0], dir[1]),
+    name: `${STATION_HEAD[h % STATION_HEAD.length]} ${STATION_TAIL[(h >>> 8) % STATION_TAIL.length]}`,
+    towers,
+  };
+  if (railStations.size > 2048) railStations.clear();
+  railStations.set(key, st);
+  return st;
+}
+
+/** Every station on an elevated railway within `r` of a point. */
+export function railStationsNear(x: number, z: number, r: number): RailStation[] {
+  const out: RailStation[] = [];
+  for (const axis of [0, 1] as const) {
+    const across = axis === 0 ? z : x, along = axis === 0 ? x : z;
+    for (const line of arteryLines(across, r + WANDER)) {
+      if (!hasRail(axis, line)) continue;
+      for (let k = Math.floor((along - r - WANDER) / RAIL_SPACING) - 1; k <= Math.ceil((along + r + WANDER) / RAIL_SPACING) + 1; k++) {
+        const st = railStationAt(axis, line, k);
+        if (st && Math.hypot(st.x - x, st.z - z) <= r) out.push(st);
+      }
+    }
+  }
+  return out;
+}
+
+/** Whether a stretch of an elevated railway runs along a platform, where the deck leaves its upstands off. */
+function inRailStation(axis: 0 | 1, line: number, s: number): boolean {
+  const k = Math.round(s / RAIL_SPACING);
+  for (const j of [k - 1, k, k + 1]) {
+    const st = railStationAt(axis, line, j);
+    if (st && Math.abs(s - st.s) * arteryScale(axis, line, st.s) < PLAT_LONG + 6) return true;
+  }
+  return false;
+}
+
+/** The point of the tower on `side` that is `a` along it from its first landing and `v` out from the line, at height `y`. */
+function towerPoint(st: RailStation, t: RailTower, a: number, v: number, y: number): Vec3 {
+  const { p, dir } = arteryFrame(st.axis, st.line, st.s);
+  const u = t.u0 + a;
+  return [p[0] + dir[0] * u - dir[1] * v * t.side, y, p[1] + dir[1] * u + dir[0] * v * t.side];
+}
+
+/**
+ * The way up one side of a station, for anyone walking it: x y z from the forecourt in front of
+ * the tower's foot, up every flight and across every landing, over the footbridge and out onto
+ * the middle of the platform. With it, a point on that platform `m` metres along from the
+ * middle and `v` out from the line.
+ */
+export function railWay(st: RailStation, side: 1 | -1): { way: Vec3[]; platform: (m: number, v: number) => Vec3 } {
+  const t = st.towers.find((w) => w.side === side)!;
+  const rise = (t.top - t.foot) / (t.flights * TOWER_STEPS);
+  const lane = (f: number) => TOWER_IN + (f % 2 === 0 ? TOWER_WIDE * 0.75 : TOWER_WIDE * 0.25);
+  const start = towerPoint(st, t, -2.5, lane(0), 0);
+  start[1] = groundAt(start[0], start[2]);
+  const way: Vec3[] = [start, towerPoint(st, t, TOWER_LAND / 2, lane(0), t.foot)];
+  for (let f = 0; f < t.flights; f++) {
+    const out = f % 2 === 0;
+    const fa = TOWER_LAND, fb = TOWER_LAND + TOWER_STEPS * TOWER_GOING;
+    const y0 = t.foot + f * TOWER_STEPS * rise, y1 = y0 + TOWER_STEPS * rise;
+    way.push(towerPoint(st, t, out ? fa : fb, lane(f), y0), towerPoint(st, t, out ? fb : fa, lane(f), y1));
+    // onto the landing, and across it to the next flight's lane
+    const mid = out ? TOWER_LONG - TOWER_LAND / 2 : TOWER_LAND / 2;
+    way.push(towerPoint(st, t, mid, lane(f), y1));
+    if (f + 1 < t.flights) way.push(towerPoint(st, t, mid, lane(f + 1), y1));
+  }
+  // over the footbridge to the platform
+  way.push(towerPoint(st, t, -t.u0, TOWER_IN - 0.5, t.top), towerPoint(st, t, -t.u0, PLAT_OUT + 0.5, t.top));
+  const scale = arteryScale(st.axis, st.line, st.s);
+  const platform = (m: number, v: number): Vec3 => {
+    const s = st.s + m / scale;
+    const f = arteryFrame(st.axis, st.line, s);
+    return [f.p[0] - f.dir[1] * v * side, railY(st.axis, st.line, s) + RAIL_PLAT, f.p[1] + f.dir[0] * v * side];
+  };
+  way.push(platform(0, (PLAT_IN + PLAT_OUT) / 2 + 0.6));
+  return { way, platform };
+}
+
+const RAIL_STONE: Tint = [0.72, 0.71, 0.69];
+const CANOPY: Tint = [0.3, 0.31, 0.33];
+
+/** One station of an elevated railway: platforms, canopies, footbridges and stair towers. */
+function railStation(b: Builder, st: RailStation): void {
+  const scale = arteryScale(st.axis, st.line, st.s);
+  /** A box `u0`..`u1` metres along the line from the middle and `v0`..`v1` out on `side`, sloping with the deck. */
+  const along = (u0: number, u1: number, v0: number, v1: number, y0: number, y1: number, side: number,
+    mat: Mat, tint: Tint, style = 0, collide = true) => {
+    const s0 = st.s + u0 / scale, s1 = st.s + u1 / scale;
+    const a = arteryFrame(st.axis, st.line, s0), c = arteryFrame(st.axis, st.line, s1);
+    const dx = c.p[0] - a.p[0], dz = c.p[1] - a.p[1], chord = Math.hypot(dx, dz) || 1;
+    const nx = (-dz / chord) * side, nz = (dx / chord) * side, vc = (v0 + v1) / 2;
+    const cx = (a.p[0] + c.p[0]) / 2 + nx * vc, cz = (a.p[1] + c.p[1]) / 2 + nz * vc;
+    const ya = railY(st.axis, st.line, s0), yc = railY(st.axis, st.line, s1), ym = (ya + yc) / 2;
+    const len = chord + 0.12, half = (v1 - v0) / 2;
+    b.box(cx - len / 2, ym + y0, cz - half, cx + len / 2, ym + y1, cz + half, mat, tint, style,
+      { turn: Math.atan2(dz, dx), rise: ((yc - ya) * len) / chord, detail: false, collide });
+  };
+  const SEG = 4;
+  const gap = TOWER_LAND / 2 + 0.1;
+  const MID = (PLAT_IN + PLAT_OUT) / 2;
+  for (const side of [1, -1] as const) {
+    for (let u = -PLAT_LONG; u < PLAT_LONG - 0.01; u += SEG) {
+      const u1 = Math.min(u + SEG, PLAT_LONG);
+      // the platform, standing on the deck and out past its edge, with a yellow line along it
+      along(u, u1, PLAT_IN, PLAT_OUT, -1.2, RAIL_PLAT, side, Mat.Board, RAIL_STONE, Finish.Cast);
+      along(u, u1, PLAT_IN, PLAT_IN + 0.5, RAIL_PLAT, RAIL_PLAT + 0.02, side, Mat.Paint, [0.78, 0.62, 0.12], 0, false);
+      // the parapet along the outer edge, open where the footbridge leaves
+      const wall = (a: number, c: number) => along(a, c, PLAT_OUT - 0.25, PLAT_OUT, RAIL_PLAT, RAIL_PLAT + 1.1, side, Mat.Panel, RAIL_STONE);
+      if (u1 <= -gap || u >= gap) wall(u, u1);
+      else {
+        if (u < -gap) wall(u, -gap);
+        if (u1 > gap) wall(gap, u1);
+      }
+      // the canopy over it, on posts along the back, with a strip light under it
+      along(u, u1, PLAT_IN - 0.4, PLAT_OUT + 0.3, RAIL_PLAT + 3.5, RAIL_PLAT + 3.75, side, Mat.Metal, CANOPY);
+      along(u, u1, MID - 0.15, MID + 0.15, RAIL_PLAT + 3.38, RAIL_PLAT + 3.5, side, Mat.Strip, [0.9, 0.9, 0.86], 0, false);
+      if (Math.round(u / SEG) % 2 === 0 && (u + 2.2 < -gap || u + 1.8 > gap)) {
+        along(u + 1.8, u + 2.2, PLAT_OUT - 0.65, PLAT_OUT - 0.25, RAIL_PLAT, RAIL_PLAT + 3.5, side, Mat.Metal, CANOPY);
+      }
+    }
+    // the name, hung under the canopy either side of the middle
+    for (const u of [-14, 14]) along(u - 2.5, u + 2.5, PLAT_OUT - 0.5, PLAT_OUT - 0.4, RAIL_PLAT + 2.2, RAIL_PLAT + 2.9, side, Mat.Strip, [0.55, 0.78, 0.72], 0, false);
+    // pools of lamp light down the platform at night
+    for (let u = -PLAT_LONG + 8; u <= PLAT_LONG - 8; u += 16) {
+      const s = st.s + u / scale, f = arteryFrame(st.axis, st.line, s);
+      b.lamps.push(f.p[0] - f.dir[1] * MID * side, railY(st.axis, st.line, s) + RAIL_PLAT + 3.3, f.p[1] + f.dir[0] * MID * side);
+    }
+  }
+  for (const t of st.towers) railTower(b, st, t);
+}
+
+/**
+ * A stair tower and its footbridge. Flights of seven run out along the line and back in two
+ * lanes, turning on a landing at either end, inside four columns that carry a roof over the top;
+ * the footbridge leaves the top landing across the carriageway to the platform.
+ */
+function railTower(b: Builder, st: RailStation, t: RailTower): void {
+  const { dir } = arteryFrame(st.axis, st.line, st.s);
+  const turn = Math.atan2(dir[1], dir[0]);
+  /** A box in the tower's frame: `a` along the line from its first landing, `v` out from the line. */
+  const put = (a0: number, a1: number, v0: number, v1: number, y0: number, y1: number, mat: Mat, tint: Tint,
+    style = 0, opts: { rise?: number; collide?: boolean } = {}) => {
+    const [cx, , cz] = towerPoint(st, t, (a0 + a1) / 2, (v0 + v1) / 2, 0);
+    const hl = (a1 - a0) / 2, hw = (v1 - v0) / 2;
+    b.box(cx - hl, y0, cz - hw, cx + hl, y1, cz + hw, mat, tint, style, { turn, detail: false, ...opts });
+  };
+  const rise = (t.top - t.foot) / (t.flights * TOWER_STEPS);
+  const h = TOWER_STEPS * rise;
+  // the outer lane goes out along the line, the inner one comes back
+  const lanes: [number, number][] = [
+    [TOWER_IN + TOWER_WIDE / 2 + 0.1, TOWER_IN + TOWER_WIDE - 0.2], [TOWER_IN + 0.2, TOWER_IN + TOWER_WIDE / 2 - 0.1],
+  ];
+  const fa = TOWER_LAND, fb = TOWER_LAND + TOWER_STEPS * TOWER_GOING;
+  // A rising `rise` climbs towards local +x, which is the way the line runs, so a flight going
+  // back climbs the other way. The side the tower is on mirrors nothing along the line.
+  for (let f = 0; f < t.flights; f++) {
+    const out = f % 2 === 0;
+    const [v0, v1] = lanes[f % 2];
+    const y0 = t.foot + f * h;
+    for (let i = 0; i < TOWER_STEPS; i++) {
+      const top = y0 + (i + 1) * rise;
+      const a = out ? fa + i * TOWER_GOING : fb - (i + 1) * TOWER_GOING;
+      put(a, a + TOWER_GOING, v0, v1, top - rise - 0.12, top, Mat.Board, RAIL_STONE, Finish.Boards);
+    }
+    // the raking slab under the steps, and a parapet along the outside of the outer lane
+    const mid = y0 + h / 2 - rise;
+    put(fa, fb, v0, v1, mid - 0.4, mid, Mat.Board, RAIL_STONE, Finish.Cast, { rise: out ? h : -h });
+    if (out) put(fa, fb, v1 + 0.02, v1 + 0.2, mid + rise, mid + rise + 1.05, Mat.Panel, RAIL_STONE, 0, { rise: h, collide: false });
+    // the landing it arrives at, across both lanes
+    const [la, lb] = out ? [fb, TOWER_LONG] : [0, fa];
+    put(la, lb, TOWER_IN, TOWER_IN + TOWER_WIDE, y0 + h - 0.35, y0 + h, Mat.Board, RAIL_STONE, Finish.Cast);
+  }
+  // a wall between the lanes, so the flights read as a stair rather than a heap of steps
+  put(fa, fb, TOWER_IN + TOWER_WIDE / 2 - 0.1, TOWER_IN + TOWER_WIDE / 2 + 0.1, t.foot, t.top + 1.05, Mat.Panel, RAIL_STONE);
+  // four columns and the roof over the top landing
+  for (const a of [0.2, TOWER_LONG - 0.2]) for (const v of [TOWER_IN + 0.2, TOWER_IN + TOWER_WIDE - 0.2]) {
+    put(a - 0.2, a + 0.2, v - 0.2, v + 0.2, t.foot - 1, t.top + 3.4, Mat.Board, RAIL_STONE, Finish.Ribbed);
+  }
+  put(-0.3, TOWER_LONG + 0.3, TOWER_IN - 0.3, TOWER_IN + TOWER_WIDE + 0.3, t.top + 3.4, t.top + 3.75, Mat.Metal, CANOPY);
+  for (let y = t.foot + h; y < t.top + 1; y += 2 * h) {
+    const [x, , z] = towerPoint(st, t, TOWER_LONG / 2, TOWER_IN + TOWER_WIDE / 2, 0);
+    b.lamps.push(x, y + 2.6, z);
+  }
+  // The footbridge, level from the top landing out over the road to the platform's edge.
+  const ba = -t.u0 - TOWER_LAND / 2, bb = -t.u0 + TOWER_LAND / 2;
+  put(ba, bb, PLAT_OUT - 0.1, TOWER_IN + 0.05, t.top - 0.45, t.top, Mat.Board, RAIL_STONE, Finish.Cast);
+  for (const a of [ba, bb - 0.2]) put(a, a + 0.2, PLAT_OUT, TOWER_IN, t.top, t.top + 1.1, Mat.Panel, RAIL_STONE);
+}
+
+// ---------------------------------------------------------------------------
+// Night markets
+//
+// The forecourts the blocks keep in front of the stations would otherwise be gaps: open ground
+// between the kerb and a block standing back from it for no reason anyone can see. A row of
+// stalls along each one makes it a square — a counter under a canvas roof with a string of
+// bulbs along its front, lit when the street lamps are — and the people standing about them
+// (see pedestrians.ts) make it a market.
+
+/** One stall: where it stands, which way its counter faces, and its canvas. */
+export interface Stall {
+  x: number;
+  z: number;
+  /** The ground it stands on. */
+  y: number;
+  /** Along its front, and out of its front towards the street: unit vectors. */
+  t: Vec2;
+  n: Vec2;
+  tint: Tint;
+  /** Which stall it is, for whoever keeps it and whoever is at it. */
+  id: number;
+}
+
+const STALL_HALF = 1.7, STALL_DEEP = 1.3;
+/** Where the row of stalls stands, out from the middle of the street. */
+const STALL_V = ARTERY_HALF + 11;
+const CANVAS: Tint[] = [
+  [0.62, 0.16, 0.12], [0.78, 0.55, 0.14], [0.16, 0.36, 0.42], [0.3, 0.42, 0.22], [0.52, 0.5, 0.46], [0.4, 0.2, 0.36],
+];
+
+const markets = rememberBySeed<string, Stall[]>();
+
+/** The stalls in the forecourt `court` keeps, `key` naming it. */
+function marketOf(key: string, court: Forecourt): Stall[] {
+  checkSeed();
+  const hit = markets.get(key);
+  if (hit) return hit;
+  const { p, n, owner } = court;
+  const t: Vec2 = [-n[1], n[0]];
+  const at = (u: number, v: number): Vec2 => [p[0] + t[0] * u + n[0] * v, p[1] + t[1] * u + n[1] * v];
+  const out: Stall[] = [];
+  const near = blocksIn(p[0] - 90, p[1] - 90, p[0] + 90, p[1] + 90);
+  const subs = stationsNear(p[0], p[1], 140);
+  const rails = railStationsNear(p[0], p[1], 160);
+  const h0 = hashInt(Math.round(p[0]), Math.round(p[1]), 366);
+  for (let u = -36; u <= 36; u += 2 * STALL_HALF + 1.4) {
+    const h = hashInt(h0, Math.round(u * 10), 367);
+    // gaps in the row, so it is a market and not a terrace
+    if (h % 100 < 22) continue;
+    // in front of this block, and nowhere else
+    if ([u - STALL_HALF, u + STALL_HALF].some((a) => blockAt(...at(a, ARTERY_HALF + 6))?.key !== owner.key)) continue;
+    const corners = [at(u - STALL_HALF, STALL_V - STALL_DEEP), at(u + STALL_HALF, STALL_V - STALL_DEEP),
+      at(u - STALL_HALF, STALL_V + STALL_DEEP), at(u + STALL_HALF, STALL_V + STALL_DEEP)];
+    // and in front of the stall, where people stand at it
+    const front = [at(u - STALL_HALF, STALL_V - STALL_DEEP - 2.5), at(u + STALL_HALF, STALL_V - STALL_DEEP - 2.5)];
+    if (![...corners, ...front].every(([x, z]) => openGround(x, z, near))) continue;
+    // clear of the way down into the subway, and of the stairs up to the railway
+    if (subs.some((st) => [...corners, ...front].some(([x, z]) => inEntrance(st, x, z, 2.5)))) continue;
+    const [cx, cz] = at(u, STALL_V);
+    if (rails.some((st) => st.towers.some((tw) => {
+      const c = towerPoint(st, tw, TOWER_LONG / 2, TOWER_IN + TOWER_WIDE / 2, 0);
+      return Math.hypot(c[0] - cx, c[2] - cz) < 10;
+    }))) continue;
+    // on ground flat enough to stand a counter on
+    let lo = Infinity, hi = -Infinity;
+    for (const [x, z] of corners) {
+      const g = groundAt(x, z);
+      lo = Math.min(lo, g);
+      hi = Math.max(hi, g);
+    }
+    if (hi - lo > 0.7) continue;
+    // facing the street, which is back towards the line
+    out.push({ x: cx, z: cz, y: hi, t, n: [-n[0], -n[1]], tint: CANVAS[(h >>> 8) % CANVAS.length], id: h });
+  }
+  if (markets.size > 2048) markets.clear();
+  markets.set(key, out);
+  return out;
+}
+
+/** Every market with a stall within `r` of a point: the stalls of each, in a row. */
+export function marketsNear(x: number, z: number, r: number): Stall[][] {
+  const out: Stall[][] = [];
+  for (const axis of [0, 1] as const) {
+    const across = axis === 0 ? z : x, along = axis === 0 ? x : z;
+    for (const line of arteryLines(across, r + WANDER)) {
+      const sub = hasSubway(axis, line);
+      if (!sub && !hasRail(axis, line)) continue;
+      const spacing = sub ? SUB_SPACING : RAIL_SPACING;
+      for (let k = Math.floor((along - r - WANDER) / spacing) - 1; k <= Math.ceil((along + r + WANDER) / spacing) + 1; k++) {
+        const courts = sub ? [forecourtOf(axis, line, k)] : railStop(axis, line, k)?.sides ?? [];
+        courts.forEach((court, i) => {
+          if (!court || Math.hypot(court.p[0] - x, court.p[1] - z) > r + 60) return;
+          const stalls = marketOf(`${axis},${line},${k},${i}`, court);
+          if (stalls.length) out.push(stalls);
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/** A stall: a counter and a back table under a canvas roof on four posts, with bulbs along the front. */
+function stall(b: Builder, s: Stall): void {
+  const turn = Math.atan2(s.t[1], s.t[0]);
+  /** A box `a` along the stall's front and `c` out of it towards the street, from its middle. */
+  const put = (a0: number, a1: number, c0: number, c1: number, y0: number, y1: number, mat: Mat, tint: Tint, collide = true) => {
+    const ac = (a0 + a1) / 2, cc = (c0 + c1) / 2;
+    const x = s.x + s.t[0] * ac + s.n[0] * cc, z = s.z + s.t[1] * ac + s.n[1] * cc;
+    const hl = (a1 - a0) / 2, hw = (c1 - c0) / 2;
+    b.box(x - hl, s.y + y0, z - hw, x + hl, s.y + y1, z + hw, mat, tint, 0, { turn, detail: false, collide });
+  };
+  const wood: Tint = [0.5, 0.4, 0.3], steel: Tint = [0.3, 0.31, 0.32];
+  const H = STALL_HALF, D = STALL_DEEP;
+  put(-H + 0.1, H - 0.1, D - 0.7, D - 0.1, -0.3, 1.05, Mat.Panel, wood);
+  put(-H + 0.1, H - 0.1, -D + 0.1, -D + 0.6, -0.3, 1.35, Mat.Panel, wood);
+  for (const a of [-H + 0.08, H - 0.08]) for (const c of [-D + 0.08, D - 0.08]) put(a - 0.06, a + 0.06, c - 0.06, c + 0.06, -0.3, 2.5, Mat.Metal, steel);
+  // the canvas, overhanging the counter, and a valance hanging off its front
+  put(-H - 0.15, H + 0.15, -D - 0.1, D + 0.45, 2.5, 2.6, Mat.Paint, s.tint);
+  put(-H - 0.15, H + 0.15, D + 0.38, D + 0.45, 2.15, 2.5, Mat.Paint, s.tint, false);
+  // a string of bulbs along the front, under the valance
+  for (let i = 0; i < 5; i++) {
+    const a = -H + 0.25 + (i * (2 * H - 0.5)) / 4;
+    put(a - 0.07, a + 0.07, D + 0.3, D + 0.44, 2.02, 2.14, Mat.Lamp, [1, 1, 1], false);
+  }
+  b.lamps.push(s.x + s.n[0] * D, s.y + 2.2, s.z + s.n[1] * D);
+}
+
+/** The markets whose stalls stand in this region. */
+function marketsIn(b: Builder, x0: number, z0: number): void {
+  for (const stalls of marketsNear(x0 + REGION / 2, z0 + REGION / 2, REGION)) {
+    for (const s of stalls) if (s.x >= x0 && s.x < x0 + REGION && s.z >= z0 && s.z < z0 + REGION) stall(b, s);
+  }
 }

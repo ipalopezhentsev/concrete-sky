@@ -508,6 +508,144 @@ function offTheRoad(poly: Vec2[], seed: Vec2): Vec2[] | null {
     out = clipHalf(out, -nx, -nz, -(nx * a[0] + nz * a[1] + ARTERY_HALF));
     if (out.length < 3) return null;
   }
+  return forecourts(out, seed);
+}
+
+/** Elevated railways run over some arterials; see `railways` in traffic.ts. */
+export function hasRail(axis: 0 | 1, line: number): boolean {
+  return hashInt(axis, line, 320) % 100 < 26;
+}
+
+/** Most of the arterials without a railway over them have a subway under them. */
+export function hasSubway(axis: 0 | 1, line: number): boolean {
+  return !hasRail(axis, line) && hashInt(axis, line, 361) % 100 < 74;
+}
+
+/** Metres between stations along a line; a whole number of bays, so stations sit on nodes. */
+export const SUB_SPACING = 360;
+
+/** How far a block stands back from a subway's arterial to leave room for an entrance in front of it. */
+export const FORECOURT = 16;
+
+/** Metres between stations along an elevated railway. */
+export const RAIL_SPACING = 720;
+
+/** A forecourt: the block it is in front of, a point on the line opposite it, and the way out to it. */
+export interface Forecourt {
+  owner: Site;
+  p: Vec2;
+  n: Vec2;
+}
+
+const railStops = rememberBySeed<string, { s: number; sides: [Forecourt, Forecourt] } | null>();
+
+/**
+ * Where station `k` of an elevated railway stands, if it has one: exactly on its slot, with a
+ * block of the line's own on both sides to keep a forecourt in front of, where the stair up to
+ * that side's platform comes down. Not over the water, and not where another main road crosses
+ * — the platforms would stand over a junction with nowhere for the stairs to land.
+ */
+export function railStop(axis: 0 | 1, line: number, k: number): { s: number; sides: [Forecourt, Forecourt] } | null {
+  if (!hasRail(axis, line)) return null;
+  checkSeed();
+  const key = `${axis},${line},${k}`;
+  const hit = railStops.get(key);
+  if (hit !== undefined) return hit;
+  let out: { s: number; sides: [Forecourt, Forecourt] } | null = null;
+  // slid along the line, a bay at a time, to clear a crossing or a side street's mouth
+  for (const shift of [0, 40, -40, 80, -80, 120, -120, 160, -160]) {
+    const s = k * RAIL_SPACING + shift;
+    const { p, dir } = arteryFrame(axis, line, s);
+    if (arteriesNear(p[0], p[1], 110, { axis, line }).some(([a, b]) => distToSeg(p, a, b) < 110)) continue;
+    if (riverNear(p[0], p[1], RIVER_HALF + QUAY + 90)) continue;
+    const sides = ([1, -1] as const).map((side) => {
+      const n: Vec2 = [-dir[1] * side, dir[0] * side];
+      const owner = blockAt(p[0] + n[0] * (ARTERY_HALF + 6), p[1] + n[1] * (ARTERY_HALF + 6));
+      return owner?.road?.id === `${axis},${line}` ? { owner, p, n } : null;
+    });
+    if (sides[0] && sides[1]) {
+      out = { s, sides: [sides[0], sides[1]] };
+      break;
+    }
+  }
+  if (railStops.size > 4096) railStops.clear();
+  railStops.set(key, out);
+  return out;
+}
+
+/**
+ * The block in front of each station on a subway line, pulled back off the arterial to leave
+ * a forecourt between the kerb and its pavement.
+ *
+ * An entrance is a hole thirty metres long in the ground, and solid things go a long way down
+ * under a block and under a carriageway, so it can only come up where there is neither. Along
+ * an arterial that is hardly anywhere: the blocks are cut back to exactly the kerb, and the
+ * only open ground was the odd corner where two arterials cross. So stations stood wherever
+ * one of those happened to be — two hundred metres apart in one place and two kilometres in
+ * the next. One block every slot, on one side of the line, gives each station somewhere to be.
+ */
+function forecourts(poly: Vec2[], seed: Vec2): Vec2[] | null {
+  let out = poly;
+  for (const axis of [0, 1] as const) {
+    const across = axis === 0 ? seed[1] : seed[0], along = axis === 0 ? seed[0] : seed[1];
+    for (const line of arteryLines(across, SLOT * 2)) {
+      const sub = hasSubway(axis, line), rail = hasRail(axis, line);
+      if (!sub && !rail) continue;
+      const spacing = sub ? SUB_SPACING : RAIL_SPACING;
+      for (let k = Math.floor((along - SLOT * 2) / spacing); k <= Math.ceil((along + SLOT * 2) / spacing); k++) {
+        // a subway station keeps one forecourt; a viaduct station one each side, for a stair each
+        const courts = sub ? [forecourtOf(axis, line, k)] : railStop(axis, line, k)?.sides ?? [];
+        for (const at of courts) {
+          if (!at || at.owner.p[0] !== seed[0] || at.owner.p[1] !== seed[1]) continue;
+          const { p, n } = at;
+          out = clipHalf(out, -n[0], -n[1], -(n[0] * p[0] + n[1] * p[1] + ARTERY_HALF + FORECOURT));
+          if (out.length < 3) return null;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The block station `k` keeps a forecourt in front of: a block of this arterial's own, on one
+ * side of it, as near the slot as there is one. Where the slot falls on a crossing, the block
+ * fronting it is the other road's, and pulling that back leaves a forecourt on the wrong street.
+ */
+const forecourtCache = rememberBySeed<string, { owner: Site; p: Vec2; n: Vec2 } | null>();
+
+export function forecourtOf(axis: 0 | 1, line: number, k: number): { owner: Site; p: Vec2; n: Vec2 } | null {
+  checkSeed();
+  const key = `${axis},${line},${k}`;
+  const hit = forecourtCache.get(key);
+  if (hit !== undefined) return hit;
+  let out: { owner: Site; p: Vec2; n: Vec2 } | null = null;
+  const first = hashInt(axis, line, k, 363) & 1 ? 1 : -1;
+  const own = `${axis},${line}`;
+  /** The block fronting the line `s` along it, on one side. */
+  const front = (s: number, side: number) => {
+    const { p, dir } = arteryFrame(axis, line, s);
+    return blockAt(p[0] - dir[1] * side * (ARTERY_HALF + 6), p[1] + dir[0] * side * (ARTERY_HALF + 6));
+  };
+  // The one with the longest frontage near the slot: the entrance and the covered stair behind
+  // it run fifty metres along the kerb, and a block with less than that in front of it is no
+  // more use than no forecourt at all.
+  let best = 0;
+  for (const shift of [0, 40, -40, 80, -80, 120, -120]) {
+    const s0 = k * SUB_SPACING + shift;
+    for (const side of [first, -first]) {
+      const owner = front(s0, side);
+      if (owner?.road?.id !== own) continue;
+      let run = 0;
+      for (let d = -80; d <= 80; d += 8) if (front(s0 + d, side)?.key === owner.key) run++;
+      if (run <= best) continue;
+      best = run;
+      const { p, dir } = arteryFrame(axis, line, s0);
+      out = { owner, p, n: [-dir[1] * side, dir[0] * side] };
+    }
+  }
+  if (forecourtCache.size > 4096) forecourtCache.clear();
+  forecourtCache.set(key, out);
   return out;
 }
 

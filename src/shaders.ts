@@ -37,6 +37,9 @@ uniform float uNight;
 uniform float uMoon; // how far the moon has taken over from the sun as the light (0..1)
 uniform float uCloudDither; // amplitude of the cloud-shadow dither (0 disables it)
 uniform float uWet;
+uniform vec4 uBolt; // lightning: which way (radians), how high it reaches, how bright, which shape
+uniform float uBoltLow; // and how far down the sky it comes: the horizon, or a struck mast
+uniform vec4 uOutage; // windows gone dark round a struck mast: x, z, how far out, how far gone
 uniform float uTime;
 uniform vec3 uCamPos;
 
@@ -176,6 +179,32 @@ vec3 moonDisc(vec3 rd, float sd) {
     * (vec3(0.95, 0.96, 1.0) * disc * face * 10.0 + vec3(0.6, 0.72, 1.0) * halo);
 }
 
+/**
+ * A lightning bolt, from the cloud down to the horizon in the direction uBolt says. A jagged
+ * line in angle, kinked as it comes down, with a hot core a
+ * fraction of a degree wide and a glow round it. Drawn in the sky, so the city stands in
+ * front of it.
+ */
+vec3 bolt(vec3 rd) {
+  if (uBolt.z < 0.01) return vec3(0.0);
+  float e = asin(clamp(rd.y, -1.0, 1.0));
+  if (e < uBoltLow - 0.01 || e > uBolt.y) return vec3(0.0);
+  float d = atan(rd.x, rd.z) - uBolt.x;
+  d = mod(d + 3.14159265, 6.2831853) - 3.14159265;
+  float u = (e - uBoltLow) / max(uBolt.y - uBoltLow, 0.01);
+  // straight strokes from kink to kink: a few big ones, and many small ones on top of them
+  float seed = uBolt.w * 97.0;
+  float k = u * 7.0, i = floor(k);
+  float big = mix(hash12(vec2(i, seed)), hash12(vec2(i + 1.0, seed)), k - i) - 0.5;
+  float m = u * 29.0, j = floor(m);
+  float small = mix(hash12(vec2(j, seed + 5.0)), hash12(vec2(j + 1.0, seed + 5.0)), m - j) - 0.5;
+  float jag = (big * 0.2 + small * 0.05) * uBolt.y;
+  float x = abs(d * cos(e) - jag);
+  // thinning out into the cloud at the top
+  float top = smoothstep(1.0, 0.8, u);
+  return vec3(0.82, 0.88, 1.0) * (smoothstep(0.0035, 0.0, x) * 12.0 + exp(-x * 90.0) * 0.8) * uBolt.z * top;
+}
+
 vec3 skyColor(vec3 rd) {
   vec3 col = skyBase(rd);
   float sd = dot(rd, uSunDir);
@@ -188,6 +217,7 @@ vec3 skyColor(vec3 rd) {
   col += moonDisc(rd, sd);
   vec4 c = clouds(rd);
   col = mix(col, c.rgb, c.a);
+  col += bolt(rd);
   float skyFog = clamp(uFogDensity * 70.0, 0.0, 1.0) * (1.0 - 0.6 * clamp(rd.y * 2.0, 0.0, 1.0));
   return mix(col, fogColor(rd), skyFog);
 }
@@ -791,6 +821,8 @@ void main() {
     vec3 blindCol = vec3(0.42, 0.41, 0.38) * (hemi * 0.8 + uSunColor * NdL * sh * 0.12);
     glassCol = mix(glassCol, blindCol, blind * 0.88);
     float lit = step(h, 0.02 + 0.24 * uNight);
+    // out round a mast the lightning has just come down on
+    if (uOutage.w > 0.0) lit *= 1.0 - uOutage.w * smoothstep(uOutage.z, uOutage.z * 0.6, length(vPos.xz - uOutage.xy));
     vec3 warm = mix(vec3(1.0, 0.62, 0.32), vec3(0.75, 0.88, 1.0), step(0.8, h2));
     glassCol += lit * warm * (0.08 + 1.5 * uNight) * (0.5 + 0.5 * h2) * mix(1.0, 0.45, blind);
     glassCol += uSunColor * pow(max(dot(gN, H), 0.0), 200.0) * sh * 2.0;
@@ -872,7 +904,62 @@ uniform float uBloomLod;
 uniform vec2 uResolution;
 uniform vec2 uSceneSize; // the scene texture, which the adaptive scale can make smaller than the canvas
 uniform float uFxaa;
+uniform float uGlass; // rain on the glass the camera is behind, 0..1 (cockpit views only)
+uniform float uGlassFlow; // how hard the air drags it back across the glass, 0..1
 out vec4 fragColor;
+
+float hash1(float n) { return fract(sin(n) * 43758.5453); }
+
+/** How much of this pixel is water on the glass, set by glassRain, for the glint on the drops. */
+float gWet = 0.0;
+
+/**
+ * Rain on a canopy or a windscreen, as a bend in what is seen through it: beads that land,
+ * sit and dry off, and runs that slide down the glass leaving a thin trail — or, at speed, are
+ * blown back off it towards the edges. Only the offset into the scene; the drops themselves
+ * are the world seen through them, the way water on glass is.
+ */
+vec2 glassRain(vec2 uv) {
+  vec2 p = uv * vec2(uResolution.x / uResolution.y, 1.0);
+  vec2 off = vec2(0.0);
+  // beads
+  vec2 g = p * 16.0;
+  vec2 cell = floor(g), f = fract(g) - 0.5;
+  float h = hash1(dot(cell, vec2(12.9898, 78.233)));
+  float slot = floor(uTime * 0.12 + h * 9.0);
+  float h3 = hash1(h * 131.0 + slot);
+  if (h3 < uGlass * 0.55) {
+    vec2 at = vec2(hash1(h3 * 7.1), hash1(h3 * 3.3)) - 0.5;
+    vec2 d = f - at * 0.6;
+    float r = 0.18 + 0.16 * hash1(h3 * 5.7);
+    float life = fract(uTime * 0.12 + h * 9.0);
+    // swept away once the air is moving over it
+    float m = smoothstep(r, r * 0.55, length(d)) * smoothstep(1.0, 0.75, life) * (1.0 - 0.8 * uGlassFlow);
+    off += d * m * 0.12;
+    gWet = max(gWet, m);
+  }
+  // runs, straight down at rest and back across the glass to its edges at speed
+  vec2 c = uv - 0.5;
+  vec2 dir = normalize(mix(vec2(0.0, -1.0), normalize(c + vec2(0.0, 1e-3)), uGlassFlow * 0.85));
+  vec2 perp = vec2(-dir.y, dir.x);
+  float a = dot(p, perp) * 28.0, b = dot(p, dir);
+  float col = floor(a);
+  float h2 = hash1(col * 91.7 + 3.1);
+  if (h2 < uGlass * 0.4) {
+    float x = fract(a) - 0.5 - (hash1(h2 * 17.0) - 0.5) * 0.4;
+    float sp = 0.06 + 0.12 * hash1(h2 * 5.3) + 1.4 * uGlassFlow;
+    float q = fract(b * 0.7 - uTime * sp + h2 * 3.7);
+    // a round drop at the front, and a trail that narrows away behind it
+    float w = q > 0.93 ? 0.3 * smoothstep(1.0, 0.95, q) : 0.09 * smoothstep(0.5, 0.93, q);
+    float m = smoothstep(w, w * 0.4, abs(x)) * step(0.01, w);
+    off += (perp * x * 0.02 + dir * 0.004) * m;
+    gWet = max(gWet, m * 0.8);
+  }
+  // nothing on the dashboard
+  float clear = smoothstep(0.12, 0.3, uv.y);
+  gWet *= clear;
+  return off * clear;
+}
 
 vec3 aces(vec3 x) {
   return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
@@ -912,6 +999,7 @@ vec3 fxaa(vec2 uv, vec2 texel) {
 
 void main() {
   vec2 uv = vUV;
+  if (uGlass > 0.01) uv += glassRain(vUV);
   vec2 c = uv - 0.5;
   float r2 = dot(c, c);
   float ca = (0.0005 + 0.004 * uSpeed) * r2 * 4.0;
@@ -948,6 +1036,9 @@ void main() {
   // A power about the mid-grey rather than a straight line through it: the line clamped
   // everything under about a twentieth to black, which by night was most of the street.
   col = clamp(0.5 * pow(col * 2.0, vec3(uContrast)), 0.0, 1.0);
+
+  // a glint on the water on the glass, catching whatever light there is
+  col = mix(col, col * 1.15 + 0.035, gWet);
 
   float vig = smoothstep(0.95, 0.25, length(c * vec2(uResolution.x / uResolution.y, 1.0)) * 0.9);
   col *= mix(0.55, 1.0, vig);

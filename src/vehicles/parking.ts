@@ -41,6 +41,8 @@ export class Parking {
   private fromCity = new Map<string, Parked>();
   private dropped = new Map<string, Parked>();
   private gone = new Set<string>(); // city vehicles taken or destroyed
+  /** City vehicles someone has taken out for a while (see berths.ts): not there to draw, hit or take. */
+  private out = new Set<string>();
   private dropCount = 0;
   version = 0;
   private boxCache = new Map<string, Float32Array>();
@@ -72,8 +74,33 @@ export class Parking {
   }
 
   *all(): Iterable<Parked> {
-    yield* this.fromCity.values();
+    for (const p of this.fromCity.values()) if (!this.out.has(p.id)) yield p;
     yield* this.dropped.values();
+  }
+
+  /** The vehicles the city parked, whether or not they are out. */
+  city(): Iterable<Parked> {
+    return this.fromCity.values();
+  }
+
+  /** Whether one of the city's vehicles is still the city's, not taken or burnt out. */
+  has(id: string): boolean {
+    return this.fromCity.has(id);
+  }
+
+  /** Which of the city's vehicles are out this frame. */
+  setOut(ids: Set<string>): void {
+    if (ids.size === this.out.size && [...ids].every((id) => this.out.has(id))) return;
+    this.out = ids;
+    this.version++;
+  }
+
+  /** Whether something left by the player or the hunters (a vehicle, or a wreck) stands within `r` of a point. */
+  occupied(x: number, y: number, z: number, r: number): boolean {
+    for (const p of this.dropped.values()) {
+      if (Math.abs(p.y - y) < 3 && Math.hypot(p.x - x, p.z - z) < r) return true;
+    }
+    return false;
   }
 
   /** Closest vehicle whose body is within reach of a person standing at (x, y, z). */

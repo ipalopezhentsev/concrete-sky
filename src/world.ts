@@ -6,7 +6,7 @@ import { CELL, REGION, REGION_CELLS, VERTEX_LAYOUT, type CellRange, type Lift, t
 import { Mesh, type GL } from "./gl";
 import { aabbVisible, type Vec3 } from "./math";
 import { TEX_LAYERS, TEX_SIZE, type TextureSet } from "./textures";
-import type { Station } from "./city/plan";
+import type { RailStation, Station } from "./city/plan";
 import type { WorkerRequest } from "./worker";
 
 /** What a worker sends back, across all three kinds of job. */
@@ -21,12 +21,14 @@ interface WorkerReply {
   normal?: Uint8Array;
   noise?: Uint8Array;
   stations?: Float32Array;
+  railStations?: Float32Array;
 }
 
-/** One square of the map: the block outlines in it, and the subway entrances. */
+/** One square of the map: the block outlines in it, the subway entrances, and the stairs up to the railway. */
 export interface MapTile {
   blocks: Float32Array;
   stations: Float32Array;
+  railStations: Float32Array;
 }
 
 export const LOAD_RADIUS = 950;
@@ -38,11 +40,14 @@ interface Region {
   mesh: Mesh;
   pads: (Pad & { id: string })[];
   lamps: number[];
+  masts: number[];
+  zips: number[];
   cars: (ParkedCar & { id: string })[];
   lifts: Lift[];
   boats: (Pad & { id: string })[];
   roofs: Roof[];
   stations: Station[];
+  railStations: RailStation[];
   groundCount: number;
   cells: CellRange[];
   lo: Vec3;
@@ -129,6 +134,24 @@ export class World {
    */
   *stations(): Iterable<Station> {
     for (const r of this.regions.values()) yield* r.stations;
+  }
+
+  /** The tips of the masts on the tallest towers streamed in, x y z each. */
+  *masts(): Iterable<Vec3> {
+    for (const r of this.regions.values()) for (let i = 0; i < r.masts.length; i += 3) yield [r.masts[i], r.masts[i + 1], r.masts[i + 2]];
+  }
+
+  /** The ziplines streamed in: each the top of its high post and its low one, x y z, and the block it is one of a few for. */
+  *zips(): Iterable<[Vec3, Vec3, number]> {
+    for (const r of this.regions.values())
+      for (let i = 0; i < r.zips.length; i += 7) {
+        yield [[r.zips[i], r.zips[i + 1], r.zips[i + 2]], [r.zips[i + 3], r.zips[i + 4], r.zips[i + 5]], r.zips[i + 6]];
+      }
+  }
+
+  /** The stations on the elevated railways, the same way. */
+  *railStations(): Iterable<RailStation> {
+    for (const r of this.regions.values()) yield* r.railStations;
   }
 
   constructor(private gl: GL, private seed: number) {
@@ -223,7 +246,9 @@ export class World {
       this.mapBusy.delete(k);
       // a few hundred tiles is a city twenty kilometres across; older ones can go
       if (this.mapCache.size > 400) this.mapCache.clear();
-      this.mapCache.set(k, { blocks: data.blocks, stations: data.stations ?? new Float32Array(0) });
+      this.mapCache.set(k, {
+        blocks: data.blocks, stations: data.stations ?? new Float32Array(0), railStations: data.railStations ?? new Float32Array(0),
+      });
       this.mapVersion++;
       return;
     }
@@ -262,11 +287,14 @@ export class World {
       mesh: new Mesh(this.gl, m.vertices, VERTEX_LAYOUT, m.indices, this.gl.TRIANGLES, m.positions),
       pads: m.pads,
       lamps: m.lamps,
+      masts: m.masts ?? [],
+      zips: m.zips ?? [],
       cars: m.cars,
       lifts: m.lifts,
       boats: m.boats,
       roofs: m.roofs,
       stations: m.stations as Station[],
+      railStations: (m.railStations ?? []) as RailStation[],
       groundCount: m.groundCount,
       cells: m.cells,
       lo,
@@ -352,6 +380,18 @@ export class World {
       await new Promise((r) => setTimeout(r, 30));
     }
   }
+
+  /**
+   * Whether the collision round a point is all streamed in, so asking for it will not build a
+   * region on the spot (see `colliders`).
+   */
+  streamedAt = (x: number, z: number): boolean => {
+    const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);
+    for (let i = ci - 1; i <= ci + 1; i++)
+      for (let j = cj - 1; j <= cj + 1; j++)
+        if (!this.regions.has(key(Math.floor(i / REGION_CELLS), Math.floor(j / REGION_CELLS)))) return false;
+    return true;
+  };
 
   colliders = (x: number, z: number): Float32Array => {
     const ci = Math.floor(x / CELL), cj = Math.floor(z / CELL);

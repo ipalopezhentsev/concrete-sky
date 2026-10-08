@@ -9,6 +9,8 @@ interface Mood {
   gloom: number;
   night: number;
   rain: number;
+  /** Boosting in a vehicle, 0..1: the drums come up, open out and drive. */
+  boost?: number;
 }
 
 interface Chord {
@@ -74,7 +76,12 @@ export class Music {
   private padFilter: BiquadFilterNode;
   private padBus: GainNode;
   private beatBus: GainNode;
+  /** The drums again, beside the beat's own slow fader, brought up fast while boosting. */
+  private pushBus: GainNode;
   private beatFilter: BiquadFilterNode;
+  /** Where the groove has the beat's filter, for when the boost lets go of it. */
+  private grooveFreq = 300;
+  private boost = 0;
   private airFilter: BiquadFilterNode;
   private airGain: GainNode;
   private noise: AudioBuffer;
@@ -144,6 +151,9 @@ export class Music {
     this.beatBus = ctx.createGain();
     this.beatBus.gain.value = 0;
     this.beatFilter.connect(this.beatBus).connect(this.out);
+    this.pushBus = ctx.createGain();
+    this.pushBus.gain.value = 0;
+    this.beatFilter.connect(this.pushBus).connect(this.out);
 
     this.noise = noise(ctx, 2);
 
@@ -207,6 +217,15 @@ export class Music {
     if (this.next < t - 0.1) this.next = t + 0.05;
     const dark = Math.max(mood.gloom, mood.night);
     this.airGain.gain.setTargetAtTime(0.08 + 0.12 * dark + 0.1 * mood.rain, t, 3);
+    // The boost: in quickly, a beat's worth, and out again over a second or so.
+    const boost = mood.boost ?? 0;
+    if (boost !== this.boost) {
+      const up = boost > this.boost;
+      this.boost = boost;
+      this.pushBus.gain.setTargetAtTime(0.7 * boost, t, up ? 0.12 : 0.8);
+      this.beatFilter.frequency.cancelScheduledValues(t);
+      this.beatFilter.frequency.setTargetAtTime(boost > 0.5 ? 7500 : this.grooveFreq, t, up ? 0.1 : 1.2);
+    }
     while (this.next < t + 0.3) {
       this.tick(this.step, this.next);
       this.step++;
@@ -226,14 +245,15 @@ export class Music {
         this.grooveBars = (this.groove ? 16 : 12) + 4 * Math.floor(Math.random() * 4);
       }
       this.beatBus.gain.setTargetAtTime(this.groove * 0.55, t, 6);
-      this.beatFilter.frequency.setTargetAtTime(this.groove ? 5000 - 2500 * dark : 250, t, 8);
+      this.grooveFreq = this.groove ? 5000 - 2500 * dark : 250;
+      if (this.boost < 0.5) this.beatFilter.frequency.setTargetAtTime(this.grooveFreq, t, 8);
       if (this.arp.length === 0 && Math.random() < 0.3) this.makeArp();
     }
     // a little swing on the off sixteenths
     const at = t + (s % 2 ? STEP * 0.16 : 0);
 
     // broken beat, while it is in or still fading
-    if (this.groove || this.beatBus.gain.value > 0.01) this.beat(s, at);
+    if (this.groove || this.boost > 0 || this.beatBus.gain.value > 0.01 || this.pushBus.gain.value > 0.01) this.beat(s, at);
 
     // the sub follows the bar: one long note, or with the beat a shorter one and a push on the "and" of three
     if (s === 0) this.bassNote(this.chord.root - 12, at, STEP * (this.groove ? 9 : 15));
@@ -254,10 +274,12 @@ export class Music {
   }
 
   private beat(s: number, at: number): void {
-    if (s === 0 || s === 10 || (s === 6 && Math.random() < 0.4) || (s === 3 && Math.random() < 0.15)) this.kick(at);
+    // boosting, the kick goes to every beat and the hats to every sixteenth
+    const drive = this.boost > 0.5;
+    if (s === 0 || s === 10 || (drive && s % 4 === 0) || (s === 6 && Math.random() < 0.4) || (s === 3 && Math.random() < 0.15)) this.kick(at);
     if (s === 4 || s === 12) this.snare(at, 1);
-    else if ((s === 7 || s === 15) && Math.random() < 0.25) this.snare(at, 0.3);
-    if (s % 2 === 0 || Math.random() < 0.3) this.hat(at, s === 14 && Math.random() < 0.5, s % 4 === 2 ? 1 : 0.5);
+    else if ((s === 7 || s === 15) && Math.random() < (drive ? 0.5 : 0.25)) this.snare(at, 0.3);
+    if (drive || s % 2 === 0 || Math.random() < 0.3) this.hat(at, s === 14 && Math.random() < 0.5, s % 4 === 2 ? 1 : 0.5);
   }
 
   private changeChord(t: number, dark: number): void {

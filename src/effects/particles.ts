@@ -155,6 +155,22 @@ export class Particles {
     }
   }
 
+  /**
+   * Lightning on a mast: a blue-white burst at the tip, and a shower of burning bits falling
+   * off it — made big, because it is seen from a kilometre away or more.
+   */
+  strike(p: Vec3): void {
+    this.glow.add({ pos: p, vel: [0, 0, 0], life: 0.35, size: 9, grow: 2, color: [9, 11, 14] });
+    for (let i = 0; i < 70; i++) {
+      const d = this.rand(), s = 6 + Math.random() * 16;
+      const hot = Math.random() < 0.5;
+      this.glow.add({
+        pos: p, vel: [d[0] * s, d[1] * s + 4, d[2] * s], life: 0.6 + Math.random() * 1.4, size: 0.6 + Math.random() * 0.8,
+        color: hot ? [12, 8, 3] : [8, 10, 14], drag: 0.6, gravity: 9,
+      });
+    }
+  }
+
   /** A short glowing streak for a bolt in flight. */
   tracer(p: Vec3, color: Vec3): void {
     this.glow.add({ pos: p, vel: [0, 0, 0], life: 0.12, size: 0.35, grow: -1.5, color });

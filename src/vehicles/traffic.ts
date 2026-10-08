@@ -6,11 +6,11 @@
 // straight line. Flyers use air corridors over the same arterials, at altitudes that clear
 // every bridge; north-south and east-west corridors sit at different heights.
 
-import { arteryFrame, arteryLines, RIVER_HALF, riverFrame, riverLines, waterLevel } from "../city/network";
+import { arteryFrame, arteryLines, RAIL_SPACING, RIVER_HALF, riverFrame, riverLines, waterLevel } from "../city/network";
 import { groundAt, hasRail, hasSubway, railY, roadY, SUB_SPACING, subwayY } from "../city/plan";
 import { worldSeed, type Vec3 } from "../math";
 import { CARRIAGE, PAINT_COLORS } from "./models";
-import { CARS, onTrack, trackOff, trackScale, trainAt } from "./metro";
+import { CARS, onTrack, RAILWAY, SUBWAY, trackOff, trackScale, trainAt, trainId, type LineKind } from "./metro";
 
 export const INSTANCE_LAYOUT = [3, 3, 4]; // position, rotation (yaw, pitch, roll), colour (rgb, lights)
 export const INSTANCE_STRIDE = 10;
@@ -127,7 +127,7 @@ export class Traffic {
   /** The front and back of that train, which its open-ended cars leave open. */
   cabinEnds = new InstanceList(2);
   /** Which train that is, set by the ride before the traffic of the frame is worked out. */
-  ridden: { axis: 0 | 1; line: number; dir: 1 | -1; slot: number } | null = null;
+  ridden: { axis: 0 | 1; line: number; dir: 1 | -1; slot: number; kind: LineKind } | null = null;
   /** Slots whose vehicle was taken or destroyed; they stay empty. */
   readonly removed = new Set<number>();
   private velocities = new Map<number, Vec3>();
@@ -193,9 +193,10 @@ export class Traffic {
           for (const dir of [1, -1] as const) {
             const mid = trainAt(axis, line, k, dir, time);
             if (Math.abs(mid - centre) > R) continue;
-            const color = PAINT_COLORS[h32(line, 150 + axis, k, this.seed) % PAINT_COLORS.length];
+            // painted by which train it is, not by the slot it is running from, which steps on every cycle
+            const color = PAINT_COLORS[h32(line, 150 + axis * 2 + (dir > 0 ? 0 : 1), trainId(k, dir, time), this.seed) % PAINT_COLORS.length];
             const r = this.ridden;
-            const inside = !!r && r.axis === axis && r.line === line && r.dir === dir && r.slot === k;
+            const inside = !!r && r.kind === SUBWAY && r.axis === axis && r.line === line && r.dir === dir && r.slot === k;
             // a carriage is twenty metres long, which is not twenty stations along the line
             const scale = trackScale(axis, line, mid);
             for (let c = 0; c < CARS; c++) {
@@ -228,33 +229,38 @@ export class Traffic {
   }
 
   /**
-   * Trains on the elevated railways: a few carriages each, one track each way, running along
-   * the arterial the viaduct follows at the height of its deck.
+   * Trains on the elevated railways, running the railway's timetable (see `RAILWAY` in
+   * metro.ts): standing at each station a while, and running to the next, along the deck.
    */
   private railways(time: number, eye: Vec3, ahead: (x: number, y: number, z: number, m: number) => boolean): void {
-    const SPACING = 1300, SPEED = 26, CARS = 5, R = 900;
+    const R = 900, K = RAILWAY;
     for (const axis of [0, 1] as const) {
       const across = axis === 0 ? eye[2] : eye[0], centre = axis === 0 ? eye[0] : eye[2];
       for (const line of arteryLines(across, R)) {
         if (!hasRail(axis, line)) continue;
-        for (const dir of [1, -1] as const) {
-          const shift = dir * SPEED * time;
-          for (let k = Math.floor((centre - R - shift) / SPACING) - 1; k <= Math.ceil((centre + R - shift) / SPACING); k++) {
-            const h = h32(line, 90 + axis * 2 + (dir > 0 ? 0 : 1), k, this.seed);
-            if ((h & 0xff) / 256 > 0.75) continue;
-            const head = k * SPACING + ((h >>> 8) & 0xff) / 255 * SPACING * 0.4 + shift;
-            const color = PAINT_COLORS[(h >>> 16) % PAINT_COLORS.length];
-            const scale = trackScale(axis, line, head);
-            for (let c = 0; c < CARS; c++) {
-              const s = head - (dir * c * CARRIAGE) / scale;
-              if (Math.abs(s - centre) > R) continue;
-              const { p, dir: d } = arteryFrame(axis, line, s);
-              // keep right: each direction has its own pair of rails
-              const off = dir > 0 ? 1.85 : -1.85;
-              const x = p[0] - d[1] * off, z = p[1] + d[0] * off;
-              const y = railY(axis, line, s) + 0.16;
-              if (!ahead(x, y, z, 60)) continue;
-              this.trains.push(x, y, z, Math.atan2(d[0] * dir, d[1] * dir), 0, 0, color);
+        for (let k = Math.floor((centre - R) / RAIL_SPACING) - 1; k <= Math.ceil((centre + R) / RAIL_SPACING) + 1; k++) {
+          for (const dir of [1, -1] as const) {
+            const mid = trainAt(axis, line, k, dir, time, K);
+            if (Math.abs(mid - centre) > R) continue;
+            const color = PAINT_COLORS[h32(line, 90 + axis * 2 + (dir > 0 ? 0 : 1), trainId(k, dir, time, K), this.seed) % PAINT_COLORS.length];
+            const r = this.ridden;
+            const inside = !!r && r.kind === K && r.axis === axis && r.line === line && r.dir === dir && r.slot === k;
+            const scale = trackScale(axis, line, mid);
+            for (let c = 0; c < K.cars; c++) {
+              const s = mid + ((c - (K.cars - 1) / 2) * CARRIAGE * dir) / scale;
+              const at = onTrack(axis, line, s, trackOff(dir, K), K);
+              const yaw = at.yaw + (dir > 0 ? 0 : Math.PI);
+              const bogie = (8 * dir) / scale;
+              const pitch = Math.atan2(railY(axis, line, s - bogie) - railY(axis, line, s + bogie), 16);
+              if (inside) {
+                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
+                if (c === K.cars - 1) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
+                if (c === 0) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw + Math.PI, -pitch, 0, color);
+                continue;
+              }
+              const y = at.pos[1] + 0.16;
+              if (!ahead(at.pos[0], y, at.pos[2], 60)) continue;
+              this.trains.push(at.pos[0], y, at.pos[2], yaw, pitch, 0, color);
             }
           }
         }
@@ -285,7 +291,7 @@ export class Traffic {
           const off = dir > 0 ? -LANE : LANE;
           const x = p[0] - d[1] * off, z = p[1] + d[0] * off;
           if (!ahead(x, y, z, 60)) continue;
-          this.boats.push(x, y, z, Math.atan2(d[0] * dir, d[1] * dir), 0, 0, HULLS[(h >>> 16) % HULLS.length]);
+          this.boats.push(x, y, z, Math.atan2(d[0] * dir, d[1] * dir), 0, 0, HULLS[(h >>> 16) % HULLS.length], 1, slotKey(5, line, dir > 0 ? 0 : 1, k));
         }
       }
     }

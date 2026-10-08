@@ -3,7 +3,21 @@
 A moody, experimental first-person run through an endless brutalist city,
 playable in the browser. You run across podium decks, climb stairs onto
 rooftops, and cross bridges between towers while the day turns and the
-weather changes above you.
+weather changes above you. Some rain turns to thunderstorms: lightning forks
+down out of the cloud, the whole city flashes blue-white for an instant, and
+the thunder rolls in a few seconds later — sooner, and with a crack, when it
+struck close. Now and then it comes down on the mast of one of the tallest
+towers in a shower of sparks, and the windows round it go dark for a few
+seconds before they flicker back on. Storms blow a flyer about, worst high up,
+and from the cockpit the rain beads on the canopy and runs off it, blown back
+across it at speed. In the wet, cars throw up spray behind them and your feet
+splash at every step.
+A grappling line takes you up a wall to the ledge or deck edge it caught on,
+or swings you across a gap, and from the roofs of some towers a zipline runs
+down across the street to the deck of the next block.
+The city sounds like where you are in it: the rumble of a train under the
+street as it passes, the traffic from the avenue it is on, hissing in the
+wet, and a tune from the nearest market in the evening.
 Long stairs wrap around the podium corners from the street, and open lifts
 run beside some of them. Stair and lift towers on the block corners climb to
 skyways 36 or 42 m up, some railed, some covered and some just a bare
@@ -11,9 +25,19 @@ concrete beam. Where a bridge has fallen, its broken stubs are still there to
 jump at a sprint.
 Cars stream along the avenues and flyers cross the air above the streets.
 People walk the pavements round the blocks and the decks above them, climb
-the stairs, stroll round the roofs and go down into the subway to wait on the
-platforms. They are busiest at the rush hours, thin out at night and in the
-rain, and step out of your way.
+the stairs and stroll round the roofs. They go down into the subway, wait on
+the platform and get on the next train, while others get off it and go up to
+the street; ride one yourself and there are passengers in it with you, getting
+on and off at the stops. Now and then someone walks up to a parked flyer and
+lifts off over the roofs, gets into a car at the kerb and drives off down the
+street, or takes a launch out into the river, and a while later one comes back
+and its driver walks away. Nobody takes a vehicle from right beside you, and
+nothing comes back to a spot you are standing on. People are busiest at the
+rush hours, thin out at night and in the rain, and step out of your way.
+In front of every station a block stands back from the avenue round a square,
+and in the squares there are markets: a row of stalls under coloured canvas
+with strings of bulbs along their fronts, a few open by day, all of them lit
+and busy from the early evening until after midnight.
 Take a parked flyer from a landing pad, fly to another roof and step out,
 shoot other flyers out of the sky, or take a car and drive. Hunters come after
 you on foot, in cars and in flyers, and there's nothing to do but stay ahead
@@ -21,7 +45,7 @@ of them (or turn them off with H). Health kits, white cases with a red cross,
 turn up near you while you're hunted, and a downed hunter sometimes leaves one
 (hanging in mid-air, if they were flying); run, drive or fly through one to heal. Under some of the avenues there is a subway:
 find an entrance, take the stair down, and ride a train to the next station.
-M opens a map of the streets, railways, subway lines and rivers around you.
+M opens a map of the streets, railways, subway lines and rivers around you, with a ring at every way into a station: teal for the subway, amber for the railway.
 There is always someone not far off with a job for you, under a thin amber
 light: a parcel for someone on a tower roof, a letter for someone waiting two
 stations down the line, something left up on a deck, the survey lamps on the
@@ -51,7 +75,8 @@ Click the page to capture the mouse.
 | Shift | sprint |
 | Ctrl / C | walk |
 | Space | jump; hold it while running into a ledge up to ~2.3 m high to climb it |
-| E | get into a parked car, a passing car or a parked flyer, or board a train standing at a platform / step out |
+| E | get into a parked car, a passing car or a parked flyer, board a train standing at a platform, or clip on to a zipline at its top post / step out, let go |
+| Q / right mouse | grappling line: fire it at a ledge, a deck edge or a bridge, hold to reel in, let go to fly on |
 | left mouse / F | shoot (on foot while the hunters are on, and in a flyer) |
 | V | chase camera or cockpit view (in a vehicle) |
 | R | return to the last roof you stood on |
@@ -67,7 +92,8 @@ Click the page to capture the mouse.
 | Esc | pause |
 
 **In a flyer:** the mouse steers and W flies where you look. A / D strafe,
-Space / Ctrl climb and descend, and Shift boosts. The left mouse button (or F)
+Space / Ctrl climb and descend, and Shift boosts (the drums in the music
+come up while you do, in any vehicle). The left mouse button (or F)
 fires bolts toward the crosshair, with a little aim assist. A hit flyer catches
 fire, falls and explodes on impact. Cars can be shot too: passing ones, parked
 ones, and any you left somewhere. They blow up into the air and land as burning
@@ -79,6 +105,12 @@ Space is the handbrake and Shift boosts. The mouse looks around, and the view
 drifts back behind the car. Stop and press E to get out. You can take a parked
 car, or step into the avenue and take a passing one.
 
+**Elevated railway:** the viaducts over some avenues have stations too, every
+seven hundred metres or so: a platform either side of the deck under a canopy,
+and from the middle of each a footbridge over the road to a stair tower
+standing in the square below. Trains stop at them, and you get on and off as on
+the subway (below) — from the platform on the side the train is on.
+
 **Subway:** some avenues have a line under them, and the map shows both the
 line and a ring at every entrance. An entrance is a stair down off the pavement,
 doubling back on itself for twenty metres or so, into a passage over the tracks
@@ -86,8 +118,9 @@ and down again onto an island platform. Trains call every twenty-four seconds,
 one each way, half a cycle apart. Press E beside one standing with its doors
 open to get on, walk about inside while it runs, and press E again at a stop to
 step out — the caption tells you which station it is. It is a real way across
-the city: the stops are a few hundred metres apart and the train does not stop
-for traffic.
+the city: the stops are mostly three or four hundred metres apart, each with an
+open forecourt in front of a block where its entrance comes up, and the train
+does not stop for traffic.
 
 **Jobs:** someone standing under an amber light has a job going: walk up and
 press E to hear it. The line along the top of the screen then says where to go
@@ -234,7 +267,7 @@ reversed-Z depth.
 | `src/renderer.ts`, `src/gl.ts` | WebGL2 render passes, 4× MSAA HDR target, shadow map. |
 | `src/player.ts` | Runner movement, box collision, stepping, ledge climbing, camera bob, roll and FOV kick. |
 | `src/daylight.ts` | The clock and the sun. Real spherical astronomy at a fixed latitude and date puts the sun in the sky for a given hour, so it rises north of east, crosses high in the south and sets north of west, and the shadows swing round with it. A table keyed by sun elevation — not by the clock — gives the light and the sky for that moment, which means dawn and dusk come out of the same entries. Below −6° the moon takes over: always full, always opposite the sun, so it rises as the sun sets. |
-| `src/weather.ts` | Eight mood states (clear sky, drifting cumulus, hard light, high haze, overcast, rain, fog, storm light) that blend smoothly. A state does not set the light — it tints and dims whatever the clock is giving, as a fraction of the sky's own brightness, so one `overcast` is a white glare at noon, a dull smear at sunset and a lid over a dark city at two in the morning. |
+| `src/weather.ts` | Nine mood states (clear sky, drifting cumulus, hard light, high haze, overcast, rain, thunderstorm, fog, storm light) that blend smoothly, and the lightning: strikes at random while there is thunder about, each a flash, a bolt in the sky and the distance the thunder has to come. A state does not set the light — it tints and dims whatever the clock is giving, as a fraction of the sky's own brightness, so one `overcast` is a white glare at noon, a dull smear at sunset and a lid over a dark city at two in the morning. |
 | `src/audio.ts` | Web Audio synthesis (including flyer engine and street rumble). |
 | `src/music.ts` | The generative score, after early-90s London ambient techno: extended minor chords on swept, detuned pads, FM bells through a ping-pong echo and a long synthetic hall, a sub on the chord roots, a wandering band of noise, and a soft broken beat at 86 bpm that drifts in for a stretch of bars and away again. Chords come at random from a daylight set and a darker phrygian one, leaning dark as gloom and night come in. Scheduled a fraction of a second ahead on the audio clock. |
 | `src/vehicles/metro.ts` | The subway timetable, and the ride. A train is a function of the clock like everything else that moves here, but this one stops: each cycle is a dwell at one station and a run to the next, the same cycle on every line, so asking which train belongs to a platform is one piece of arithmetic — and the worker that built the tunnel and the frame drawing it get the same answer. |
