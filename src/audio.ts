@@ -679,6 +679,30 @@ export class Audio {
     });
   }
 
+  /** Water: going into it (`strength` towards 1), or a stroke through it (a tenth or so). */
+  splash(strength: number): void {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    const t = ctx.currentTime;
+    const len = 0.15 + 0.6 * strength;
+    const src = ctx.createBufferSource();
+    src.buffer = this.stepNoise;
+    src.loop = true;
+    src.playbackRate.value = 0.5 + Math.random() * 0.3;
+    const f = ctx.createBiquadFilter();
+    f.type = "bandpass";
+    f.frequency.setValueAtTime(700 + 900 * strength, t);
+    f.frequency.exponentialRampToValueAtTime(300, t + len);
+    f.Q.value = 0.7;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.25 + 0.9 * strength, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, t + len);
+    src.connect(f).connect(g).connect(this.master);
+    src.start(t);
+    src.stop(t + len + 0.05);
+  }
+
   landing(strength: number): void {
     const ctx = this.ctx;
     if (!ctx || ctx.state !== "running") return;

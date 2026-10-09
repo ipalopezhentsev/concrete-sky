@@ -1,6 +1,7 @@
 // First-person runner: movement, box collision, ledge climbing and camera feel.
 
 import type { Vec3 } from "./math";
+import type { Water } from "./swim";
 
 /**
  * Lowest the world goes, and the level anyone falls back onto where nothing else holds them.
@@ -27,6 +28,13 @@ const JUMP_SPEED = 6.4;
 const GRAVITY = 19;
 const MANTLE_REACH = 2.3; // how far above the feet a ledge can be grabbed
 const MANTLE_SPEED = 7;
+/** In the water: how deep the feet are before they float rather than stand, and how far under they float. */
+const SWIM_DEPTH = 0.95;
+const FLOAT = 1.42;
+const SWIM_SPEED = 2.3;
+const SWIM_SPRINT = 3.6;
+/** Up a ladder out of the water, which is slower going than a pull up over a ledge. */
+const LADDER_SPEED = 2.4;
 
 /** Lowest bottom of a non-steppable box above `y` overlapping the player's column. */
 function ceilingAbove(boxes: Float32Array, x: number, z: number, y: number): number {
@@ -149,12 +157,19 @@ export class Player {
   landed = 0;
   mantled = false;
   speedNorm = 0;
+  /** The water the runner can fall into and swim in; without it there is only ground. */
+  water: Water | null = null;
+  /** In the water out of their depth; and how hard they went in, on the frame they did. */
+  swimming = false;
+  splashed = 0;
+  /** A stroke through the water this frame, for the sound of it. */
+  stroke = false;
   private bobPhase = 0;
   private bobAmp = 0;
   private eyeOffset = 0;
   private eyeVel = 0;
   private yawRate = 0;
-  private mantle: { target: number; dir: [number, number] } | null = null;
+  private mantle: { target: number; dir: [number, number]; speed: number; push: number } | null = null;
   private ledge: { top: number; dir: [number, number] } | null = null;
   private safe: Vec3;
   private safeTimer = 0;
@@ -189,6 +204,16 @@ export class Player {
     this.footstep = false;
     this.landed = 0;
     this.mantled = false;
+    this.splashed = 0;
+    this.stroke = false;
+    const surface = this.water?.level(this.pos[0], this.pos[2]) ?? null;
+    const swam = this.swimming;
+    this.swimming = surface !== null && !this.mantle && this.pos[1] < surface - SWIM_DEPTH;
+    if (this.swimming && !swam) {
+      this.splashed = Math.max(0.2, Math.min(1, -this.vel[1] / 14));
+      this.grounded = false;
+      this.flung = false;
+    }
     const fwd: [number, number] = [Math.sin(this.yaw), Math.cos(this.yaw)];
     const right: [number, number] = [-fwd[1], fwd[0]];
     let wx = fwd[0] * input.moveZ + right[0] * input.moveX;
@@ -198,10 +223,13 @@ export class Player {
       wx /= wl;
       wz /= wl;
     }
-    const target = input.walk ? WALK_SPEED : input.sprint ? SPRINT_SPEED : RUN_SPEED;
+    const target = this.swimming
+      ? (input.walk ? WALK_SPEED * 0.4 : input.sprint ? SWIM_SPRINT : SWIM_SPEED)
+      : input.walk ? WALK_SPEED : input.sprint ? SPRINT_SPEED : RUN_SPEED;
     // On a line, or flung off one, the air hardly steers them: the swing is what carries them.
-    let accel = this.grounded ? 10 : this.swinging || this.flung ? 0.35 : 2.5;
-    if (wl < 1e-6 && this.grounded) accel = 12;
+    // In the water everything is slow to get going and slow to stop.
+    let accel = this.swimming ? 1.6 : this.grounded ? 10 : this.swinging || this.flung ? 0.35 : 2.5;
+    if (wl < 1e-6 && this.grounded && !this.swimming) accel = 12;
     const k = 1 - Math.exp(-accel * dt);
     this.vel[0] += (wx * target - this.vel[0]) * k;
     this.vel[2] += (wz * target - this.vel[2]) * k;
@@ -210,23 +238,46 @@ export class Player {
 
     if (this.mantle) {
       // pull up over the ledge, then carry on forward
-      this.pos[1] += MANTLE_SPEED * dt;
+      this.pos[1] += this.mantle.speed * dt;
       this.vel[1] = 0;
+      if (this.mantle.speed < MANTLE_SPEED) {
+        // hand over hand up a ladder: a rung at every beat, heard as a step
+        const prev = this.bobPhase;
+        this.bobPhase += dt * 6;
+        if (Math.floor(prev / Math.PI) !== Math.floor(this.bobPhase / Math.PI)) this.footstep = true;
+        this.vel[0] = this.vel[2] = 0;
+      }
       if (this.pos[1] >= this.mantle.target) {
         this.pos[1] = this.mantle.target;
         this.vel[0] = this.mantle.dir[0] * Math.max(RUN_SPEED * 0.6, Math.hypot(this.vel[0], this.vel[2]));
         this.vel[2] = this.mantle.dir[1] * Math.max(RUN_SPEED * 0.6, Math.hypot(this.vel[0], this.vel[2]));
-        this.pos[0] += this.mantle.dir[0] * 0.3;
-        this.pos[2] += this.mantle.dir[1] * 0.3;
+        this.pos[0] += this.mantle.dir[0] * this.mantle.push;
+        this.pos[2] += this.mantle.dir[1] * this.mantle.push;
         this.mantle = null;
         this.eyeVel -= 1.2;
       }
     } else {
-      if (input.jump && this.grounded) {
-        this.vel[1] = JUMP_SPEED;
-        this.grounded = false;
+      if (this.swimming && surface !== null) {
+        // Afloat with the head out: held at the surface by a spring that lets a fall carry
+        // them under for a moment and bobs them back up, rocked a little by each stroke.
+        const moving = Math.hypot(this.vel[0], this.vel[2]);
+        const prev = this.bobPhase;
+        this.bobPhase += dt * (1.6 + moving * 0.9);
+        if (moving > 0.6 && Math.floor(prev / Math.PI) !== Math.floor(this.bobPhase / Math.PI)) this.stroke = true;
+        const float = surface - FLOAT + Math.sin(this.bobPhase * 2) * 0.05;
+        this.vel[1] += ((float - this.pos[1]) * 12 - this.vel[1] * 3) * dt;
+        if (this.vel[1] < 0 && this.pos[1] < float) this.vel[1] *= Math.exp(-5 * dt);
+        if (this.climbOut(wl > 1e-6 ? [wx, wz] : null, input.jump)) {
+          this.updateCamera(dt, right);
+          return;
+        }
+      } else {
+        if (input.jump && this.grounded) {
+          this.vel[1] = JUMP_SPEED;
+          this.grounded = false;
+        }
+        this.vel[1] -= GRAVITY * dt;
       }
-      this.vel[1] -= GRAVITY * dt;
       this.ledge = null;
       const px = this.pos[0], pz = this.pos[2];
       this.moveAxis(0, this.vel[0] * dt, boxes);
@@ -249,9 +300,25 @@ export class Player {
     this.updateCamera(dt, right);
   }
 
+  /**
+   * Out of the water by a ladder up the quay wall, if there is one to hand and the swimmer is
+   * making for it (or jumps at it): up the rungs, and over the coping onto the parapet.
+   */
+  private climbOut(wish: [number, number] | null, jump: boolean): boolean {
+    const ladder = this.water?.ladder(this.pos[0], this.pos[2]);
+    if (!ladder) return false;
+    const [ox, oz] = ladder.out;
+    if (!jump && (!wish || wish[0] * ox + wish[1] * oz < 0.3)) return false;
+    this.mantle = { target: ladder.top + 1.15, dir: [ox, oz], speed: LADDER_SPEED, push: 1.7 };
+    this.vel = [0, 0, 0];
+    this.swimming = false;
+    this.mantled = true;
+    return true;
+  }
+
   private tryMantle(input: Input, wish: [number, number] | null, boxes: Float32Array): void {
     if (!this.ledge || !wish) return;
-    if (this.grounded && !input.jump) return;
+    if (this.grounded && !input.jump && !this.swimming) return;
     const { top, dir } = this.ledge;
     if (dir[0] * wish[0] + dir[1] * wish[1] < 0.3) return;
     const rise = top - this.pos[1];
@@ -264,7 +331,7 @@ export class Player {
           boxes[i + 2] < pz + RADIUS && boxes[i + 5] > pz - RADIUS &&
           boxes[i + 4] > top + 0.01 && boxes[i + 1] < top + HEIGHT) return;
     }
-    this.mantle = { target: top, dir };
+    this.mantle = { target: top, dir, speed: MANTLE_SPEED, push: 0.3 };
     this.mantled = true;
     this.grounded = false;
   }

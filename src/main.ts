@@ -14,6 +14,8 @@ import { Rides, type Controls } from "./rides";
 import { actionOf, held, keyFor, settings, saveSettings, SettingsDialog, type Action } from "./settings";
 import { TouchControls } from "./touch";
 import { MOMENTS, START_HOUR, STATES, Weather } from "./weather";
+import { river } from "./swim";
+import { Boat } from "./vehicles/boat";
 import { World } from "./world";
 
 const params = new URLSearchParams(location.search);
@@ -65,6 +67,14 @@ const debug = {
   stats: {} as Record<string, unknown>,
   /** Test hook: stand next to the nearest parked car. */
   toCar: () => false,
+  /** Test hook: stand on the steps beside the nearest launch, facing it; where it is, or null. */
+  toBoat: () => null as Vec3 | null,
+  /** Test hook: in a launch of your own on the water at (x, z), heading `yaw`. */
+  sail: (_x: number, _z: number, _yaw: number) => false,
+  /** Test hook: in the water a stroke off the nearest ladder up the quay wall, facing it; where the ladder tops out, or null. */
+  toLadder: () => null as Vec3 | null,
+  /** Test hook: the runner: where, swimming, riding, and what E would do. */
+  runner: () => ({}) as Record<string, unknown>,
   /** Test hook: put a hunter (foot, car or flyer) `ahead` metres in front of the player. */
   hunter: (_kind: string, _ahead: number) => false,
   /** Test hook: put a health kit on the ground `ahead` metres in front of the player (or level with them, `air`). */
@@ -229,6 +239,7 @@ async function main(): Promise<void> {
     (f) => loading("surveying the ground…", TEXTURE_SHARE + f * (CITY_FROM - TEXTURE_SHARE)),
   );
   const player = new Player(spawn.x, spawn.y, spawn.z, spawn.yaw);
+  player.water = river;
   if (posed) player.pitch = pose[4];
   if (Number(params.get("fov")) > 0) player.fov = Number(params.get("fov"));
   // `?weather=` takes a state, or one of the moments — names like "golden hour" that are
@@ -282,6 +293,47 @@ async function main(): Promise<void> {
 
   const rides = new Rides(world, player);
   rides.sync();
+  debug.toBoat = () => {
+    let best: { x: number; y: number; z: number; yaw: number } | null = null;
+    for (const p of rides.parking.all()) {
+      if (p.kind !== "boat") continue;
+      if (!best || Math.hypot(p.x - player.pos[0], p.z - player.pos[2]) < Math.hypot(best.x - player.pos[0], best.z - player.pos[2])) best = p;
+    }
+    if (!best) return null;
+    const land = rides.landing(new Boat(best.x, best.y, best.z, best.yaw));
+    player.pos = land.spot;
+    player.vel = [0, 0, 0];
+    player.yaw = Math.atan2(best.x - land.spot[0], best.z - land.spot[2]);
+    player.pitch = -0.25;
+    return [best.x, best.y, best.z];
+  };
+  debug.toLadder = () => {
+    for (let r = 0; r < 200; r += 2) {
+      for (let a = 0; a < 24; a++) {
+        const x = player.pos[0] + Math.sin(a * 0.2618) * r, z = player.pos[2] + Math.cos(a * 0.2618) * r;
+        const l = river.ladder(x, z);
+        if (!l) continue;
+        const at: Vec3 = [x - l.out[0] * 1.2, l.top - 5 - 1.4, z - l.out[1] * 1.2];
+        if (river.level(at[0], at[2]) === null) continue;
+        player.pos = at;
+        player.vel = [0, 0, 0];
+        player.yaw = Math.atan2(l.out[0], l.out[1]);
+        player.pitch = 0.3;
+        return [x, l.top, z];
+      }
+    }
+    return null;
+  };
+  debug.sail = (x, z, yaw) => {
+    const w = river.level(x, z);
+    if (w === null) return false;
+    rides.leave();
+    player.pos = [x, w + 1.2, z];
+    player.yaw = yaw;
+    rides.spawnBoat();
+    return true;
+  };
+  debug.runner = () => ({ pos: [...player.pos], swimming: player.swimming, riding: rides.riding, boat: !!rides.boat, prompt: rides.promptText() });
   debug.toCar = () => {
     let best: { x: number; z: number; yaw: number } | null = null;
     let bestD = Infinity;
@@ -815,6 +867,11 @@ async function main(): Promise<void> {
       rides.lifts.carry(player);
       if (player.footstep) audio.step(player.speedNorm, weather.wet);
       if (player.landed > 0.2) audio.landing(player.landed);
+      if (player.splashed > 0) {
+        audio.splash(player.splashed);
+        rides.particles.splash(player.pos, player.splashed);
+      }
+      if (player.stroke) audio.splash(0.12);
     }
     mouseDX = mouseDY = 0;
 
@@ -856,7 +913,7 @@ async function main(): Promise<void> {
     rides.hunters.active = running && hunt;
     rides.quests.active = running && jobs;
     rides.pedestrians.hour = weather.hour;
-    rides.pedestrians.rain = weather.params.rain;
+    rides.pedestrians.rain = Math.max(weather.params.rain, weather.params.snow * 0.6);
     rides.update(dt, time, { eye, fwd, roll, fov: fovDeg }, active && controls.fire);
     if (rides.riding && grapple.anchor) grapple.release(player);
     grapple.draw(player, rides.particles, dt);
@@ -887,6 +944,7 @@ async function main(): Promise<void> {
       audio.boom(Math.hypot(p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]), events.hits.includes(p) ? 0.6 : 1);
     }
     if (rides.car && rides.car.impact > 4) audio.landing(Math.min(1, rides.car.impact / 25));
+    if (rides.boat && rides.boat.impact > 1.5) audio.landing(Math.min(1, rides.boat.impact / 10));
 
     // the jobs: what people say, what happens, and the sound of it
     const quests = rides.quests;

@@ -166,6 +166,7 @@ export class Renderer {
   readonly aniso: number;
   private depthProg: Program;
   private rainProg: Program;
+  private snowProg: Program;
   private post: Program;
   private cloudProg: Program;
   private vehicleProg: Program;
@@ -179,6 +180,7 @@ export class Renderer {
   private particleMesh: InstancedMesh;
   private tri: Mesh;
   private rain: Mesh;
+  private snow: Mesh;
   private albedo: WebGLTexture;
   private normal: WebGLTexture;
   private noise: WebGLTexture;
@@ -226,6 +228,7 @@ export class Renderer {
     this.city = new Program(gl, S.CITY_VS, S.CITY_FS);
     this.depthProg = new Program(gl, S.SHADOW_VS, S.SHADOW_FS);
     this.rainProg = new Program(gl, S.RAIN_VS, S.RAIN_FS);
+    this.snowProg = new Program(gl, S.SNOW_VS, S.SNOW_FS);
     this.post = new Program(gl, S.POST_VS, S.POST_FS);
     this.cloudProg = new Program(gl, S.POST_VS, S.CLOUD_FS);
     this.vehicleProg = new Program(gl, S.VEHICLE_VS, S.CITY_FS);
@@ -270,6 +273,9 @@ export class Renderer {
       rain.set([sx, sy, sz, 0, sx, sy, sz, 1], i * 8);
     }
     this.rain = new Mesh(gl, rain, [3, 1], null, gl.LINES);
+    const flakes = new Float32Array(9000 * 3);
+    for (let i = 0; i < flakes.length; i++) flakes[i] = Math.random();
+    this.snow = new Mesh(gl, flakes, [3], null, gl.POINTS);
 
     // Road seen from a car is the most grazing surface in the city — a pixel of it covers
     // metres along the road and centimetres across — and that is exactly the case anisotropy
@@ -514,6 +520,21 @@ export class Renderer {
         .vec("uWindVec", [2.5 * w, 1.5 * w]).vec("uCamVel", cam.vel)
         .float("uRain", rain).vec("uRainColor", [0.8 * amb, 0.85 * amb, 0.95 * amb]);
       this.rain.draw();
+      gl.disable(gl.BLEND);
+    }
+    const snow = roofed ? 0 : weather.params.snow;
+    if (snow > 0.01) {
+      timer.begin("snow");
+      gl.depthFunc(nearer);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      const w = weather.params.wind;
+      const amb = 0.35 + 0.6 * weather.params.ambient;
+      this.snowProg.use()
+        .mat4("uViewProj", viewProj).vec("uCamPos", cam.eye).float("uTime", time)
+        .vec("uWindVec", [1.4 * w, 0.9 * w]).float("uPx", this.height / (2 * Math.tan(cam.fov / 2)))
+        .float("uSnowFall", snow).vec("uSnowColor", [0.9 * amb, 0.92 * amb, 0.96 * amb]);
+      this.snow.draw();
       gl.disable(gl.BLEND);
     }
 

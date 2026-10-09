@@ -9,8 +9,8 @@
 import { arteryFrame, arteryLines, RAIL_SPACING, RIVER_HALF, riverFrame, riverLines, waterLevel } from "../city/network";
 import { groundAt, hasRail, hasSubway, railY, roadY, SUB_SPACING, subwayY } from "../city/plan";
 import { worldSeed, type Vec3 } from "../math";
-import { CARRIAGE, PAINT_COLORS } from "./models";
-import { CARS, onTrack, RAILWAY, SUBWAY, trackOff, trackScale, trainAt, trainId, type LineKind } from "./metro";
+import { CARRIAGE, PAINT_COLORS, withDoors } from "./models";
+import { CARS, doorsAt, onTrack, RAILWAY, SUBWAY, trackOff, trackScale, trainAt, trainId, type LineKind } from "./metro";
 
 export const INSTANCE_LAYOUT = [3, 3, 4]; // position, rotation (yaw, pitch, roll), colour (rgb, lights)
 export const INSTANCE_STRIDE = 10;
@@ -192,6 +192,7 @@ export class Traffic {
         for (let k = Math.floor((centre - R) / SUB_SPACING); k <= Math.ceil((centre + R) / SUB_SPACING); k++) {
           for (const dir of [1, -1] as const) {
             const mid = trainAt(axis, line, k, dir, time);
+            const doors = doorsAt(axis, line, k, dir, time);
             if (Math.abs(mid - centre) > R) continue;
             // painted by which train it is, not by the slot it is running from, which steps on every cycle
             const color = PAINT_COLORS[h32(line, 150 + axis * 2 + (dir > 0 ? 0 : 1), trainId(k, dir, time), this.seed) % PAINT_COLORS.length];
@@ -212,7 +213,7 @@ export class Traffic {
               // than lifted onto its rails so that its floor meets their feet; and it is never
               // behind them — they are standing in the middle of it.
               if (inside) {
-                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
+                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color, withDoors(1, doors));
                 // the end wall is modelled at a car's front, so the last car takes it turned round
                 if (c === CARS - 1) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
                 if (c === 0) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw + Math.PI, -pitch, 0, color);
@@ -220,7 +221,7 @@ export class Traffic {
               }
               const y = at.pos[1] + 0.16;
               if (!ahead(at.pos[0], y, at.pos[2], 40)) continue;
-              this.trains.push(at.pos[0], y, at.pos[2], yaw, pitch, 0, color);
+              this.trains.push(at.pos[0], y, at.pos[2], yaw, pitch, 0, color, withDoors(1, doors));
             }
           }
         }
@@ -241,6 +242,7 @@ export class Traffic {
         for (let k = Math.floor((centre - R) / RAIL_SPACING) - 1; k <= Math.ceil((centre + R) / RAIL_SPACING) + 1; k++) {
           for (const dir of [1, -1] as const) {
             const mid = trainAt(axis, line, k, dir, time, K);
+            const doors = doorsAt(axis, line, k, dir, time, K);
             if (Math.abs(mid - centre) > R) continue;
             const color = PAINT_COLORS[h32(line, 90 + axis * 2 + (dir > 0 ? 0 : 1), trainId(k, dir, time, K), this.seed) % PAINT_COLORS.length];
             const r = this.ridden;
@@ -253,14 +255,14 @@ export class Traffic {
               const bogie = (8 * dir) / scale;
               const pitch = Math.atan2(railY(axis, line, s - bogie) - railY(axis, line, s + bogie), 16);
               if (inside) {
-                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
+                this.cabins.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color, withDoors(1, doors));
                 if (c === K.cars - 1) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw, pitch, 0, color);
                 if (c === 0) this.cabinEnds.push(at.pos[0], at.pos[1], at.pos[2], yaw + Math.PI, -pitch, 0, color);
                 continue;
               }
               const y = at.pos[1] + 0.16;
               if (!ahead(at.pos[0], y, at.pos[2], 60)) continue;
-              this.trains.push(at.pos[0], y, at.pos[2], yaw, pitch, 0, color);
+              this.trains.push(at.pos[0], y, at.pos[2], yaw, pitch, 0, color, withDoors(1, doors));
             }
           }
         }

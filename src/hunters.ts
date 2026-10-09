@@ -11,6 +11,7 @@ import { BOLT_SPEED, segmentBox, type BoltTargets, type Combat } from "./effects
 import type { Particles } from "./effects/particles";
 import type { Vec3 } from "./math";
 import { Player, type Colliders } from "./player";
+import { river } from "./swim";
 import { Car, type RoadSurface } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { footprint, type Parked, type Parking } from "./vehicles/parking";
@@ -109,6 +110,7 @@ export class Hunter {
 
   constructor(pos: Vec3, yaw: number, readonly id: number) {
     this.body = new Player(pos[0], pos[1], pos[2], yaw);
+    this.body.water = river;
     this.hp = TOUGHNESS.foot;
   }
 

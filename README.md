@@ -11,7 +11,9 @@ towers in a shower of sparks, and the windows round it go dark for a few
 seconds before they flicker back on. Storms blow a flyer about, worst high up,
 and from the cockpit the rain beads on the canopy and runs off it, blown back
 across it at speed. In the wet, cars throw up spray behind them and your feet
-splash at every step.
+splash at every step. In winter weather it snows instead: the flakes drift
+down past you, and the roofs, decks and streets slowly go white, staying
+white a while after it stops.
 A grappling line takes you up a wall to the ledge or deck edge it caught on,
 or swings you across a gap, and from the roofs of some towers a zipline runs
 down across the street to the deck of the next block.
@@ -34,6 +36,10 @@ street, or takes a launch out into the river, and a while later one comes back
 and its driver walks away. Nobody takes a vehicle from right beside you, and
 nothing comes back to a spot you are standing on. People are busiest at the
 rush hours, thin out at night and in the rain, and step out of your way.
+Along the rivers, flights of steps run down the quay wall to the water through
+a gap in the parapet, and the launches anyone can take are tied up at their
+foot. Fall in, jump in or go over the side of a launch and you swim; get out
+by the steps, or by one of the iron ladders up the quay wall.
 In front of every station a block stands back from the avenue round a square,
 and in the squares there are markets: a row of stalls under coloured canvas
 with strings of bulbs along their fronts, a few open by day, all of them lit
@@ -74,8 +80,8 @@ Click the page to capture the mouse.
 | W A S D / arrows | run |
 | Shift | sprint |
 | Ctrl / C | walk |
-| Space | jump; hold it while running into a ledge up to ~2.3 m high to climb it |
-| E | get into a parked car, a passing car or a parked flyer, board a train standing at a platform, or clip on to a zipline at its top post / step out, let go |
+| Space | jump; hold it while running into a ledge up to ~2.3 m high to climb it; in the water, at a ladder, climb out |
+| E | get into a parked car, a passing car or a parked flyer, board a train standing at a platform (its doors open on the platform side), take a launch from the foot of the water steps, or clip on to a zipline at its top post / step out, let go |
 | Q / right mouse | grappling line: fire it at a ledge, a deck edge or a bridge, hold to reel in, let go to fly on |
 | left mouse / F | shoot (on foot while the hunters are on, and in a flyer) |
 | V | chase camera or cockpit view (in a vehicle) |

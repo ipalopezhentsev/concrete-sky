@@ -37,6 +37,7 @@ uniform float uNight;
 uniform float uMoon; // how far the moon has taken over from the sun as the light (0..1)
 uniform float uCloudDither; // amplitude of the cloud-shadow dither (0 disables it)
 uniform float uWet;
+uniform float uSnow; // how much snow is lying, 0..1
 uniform vec4 uBolt; // lightning: which way (radians), how high it reaches, how bright, which shape
 uniform float uBoltLow; // and how far down the sky it comes: the horizon, or a struck mast
 uniform vec4 uOutage; // windows gone dark round a struck mast: x, z, how far out, how far gone
@@ -381,13 +382,20 @@ mat3 rotation(vec3 r) {
 void main() {
   mat3 R = rotation(iRot);
   vec3 info = unpackInfo(aInfo);
-  vPos = iPos + R * aPos;
+  // A train's doors: above 16, the instance's lights carry how far open they are and on which
+  // side (see withDoors in models.ts), and a door leaf carries how far it runs when they are.
+  float code = floor(iColor.a / 16.0);
+  float lights = iColor.a - code * 16.0;
+  float doors = code > 0.5 ? (code - 33.0) / 32.0 : 0.0;
+  vec3 local = aPos;
+  if (doors * local.x > 0.0) local.z += info.z * abs(doors);
+  vPos = iPos + R * local;
   vNrm = R * faceNormal(aFace);
   vUV = aUV;
   vSize = aSize;
   // style 1 marks painted parts, which take the instance colour
   vTint = info.y > 0.5 ? iColor.rgb : unpackTint(aTint);
-  vInfo = vec3(info.x, 0.0, iColor.a);
+  vInfo = vec3(info.x, 0.0, lights);
   gl_Position = uViewProj * vec4(vPos, 1.0);
 }
 `;
@@ -767,6 +775,23 @@ void main() {
     Nd = normalize(mix(Nd, N, uWet * puddle));
   }
 
+  // Snow, lying on whatever faces the sky: first in the hollows and the joints, then in
+  // drifts, then over everything — never on walls, and never on the water or anything lit.
+  float lie = 0.0;
+  if (uSnow > 0.01 && !emissiveMat && !vehicle && mat != 15) {
+    float drift = texture(uNoise, vPos.xz * 0.031).r * 0.65 + texture(uNoise, vPos.xz * 0.19 + 0.37).g * 0.35;
+    lie = smoothstep(0.55, 0.85, N.y) * smoothstep(0.0, 0.3, uSnow * 1.15 - drift * 0.85 + (1.0 - cavity) * 0.3);
+    // thinner where it has drifted less, so the paving shows through it at the edges
+    lie *= mix(0.75, 1.0, smoothstep(0.2, 0.8, uSnow - drift * 0.4 + 0.3));
+    vec3 white = vec3(0.86, 0.88, 0.92) * mix(0.9, 1.0, texture(uNoise, vPos.xz * 1.7).b) * mix(0.94, 1.0, drift);
+    albedo = mix(albedo, white, lie);
+    Nd = normalize(mix(Nd, N, lie));
+    rough = mix(rough, 0.85, lie);
+    specAmt *= 1.0 - lie;
+    puddle *= 1.0 - lie;
+    wet *= 1.0 - lie;
+  }
+
   // uCheap is a diagnostic ladder for finding what the pass actually costs:
   // 1 drops the fog, 2 also drops the shadows, 3 shows the raw material.
   if (uCheap > 2.5) { fragColor = vec4(albedo, 1.0); return; }
@@ -875,6 +900,47 @@ uniform vec3 uRainColor;
 out vec4 fragColor;
 void main() {
   fragColor = vec4(uRainColor, vAlpha * uRain * 0.3);
+}
+`;
+
+/**
+ * Snow coming down: a box of flakes round the camera like the rain's, as points, falling
+ * slowly and wandering as they fall rather than in straight lines.
+ */
+export const SNOW_VS = HEADER + /* glsl */ `
+layout(location = 0) in vec3 aSeed;
+uniform mat4 uViewProj;
+uniform vec3 uCamPos;
+uniform float uTime;
+uniform vec2 uWindVec;
+uniform float uPx; // pixels across one metre seen from one metre away
+out float vAlpha;
+const vec3 BOX = vec3(36.0, 24.0, 36.0);
+void main() {
+  float speed = 0.9 + 0.7 * fract(aSeed.x * 91.0);
+  float ph = aSeed.z * 40.0 + aSeed.x * 13.0;
+  vec3 p = aSeed * BOX;
+  p.y -= uTime * speed;
+  p.xz += uWindVec * uTime + vec2(sin(uTime * 0.9 + ph), cos(uTime * 0.7 + ph * 1.3)) * 0.7;
+  vec3 rel = mod(p - uCamPos + BOX * 0.5, BOX) - BOX * 0.5;
+  float edge = 1.0 - smoothstep(0.35, 0.5, max(abs(rel.x) / BOX.x, abs(rel.z) / BOX.z));
+  vAlpha = edge * (1.0 - smoothstep(0.3, 0.5, abs(rel.y) / BOX.y));
+  gl_Position = uViewProj * vec4(uCamPos + rel, 1.0);
+  float size = uPx * (0.04 + 0.03 * fract(aSeed.y * 57.0)) / max(gl_Position.w, 0.1);
+  // too small to draw as a disc: drawn as one pixel, and fainter for it
+  vAlpha *= clamp(size, 0.0, 1.0);
+  gl_PointSize = clamp(size, 1.0, 14.0);
+}
+`;
+
+export const SNOW_FS = HEADER + /* glsl */ `
+in float vAlpha;
+uniform float uSnowFall;
+uniform vec3 uSnowColor;
+out vec4 fragColor;
+void main() {
+  float d = length(gl_PointCoord - 0.5);
+  fragColor = vec4(uSnowColor, vAlpha * min(1.0, uSnowFall * 1.6) * 0.9 * smoothstep(0.5, 0.15, d));
 }
 `;
 

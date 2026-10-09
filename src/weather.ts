@@ -33,6 +33,8 @@ interface State {
   fogTint: number;
   mist: number;
   rain: number;
+  /** How hard it is snowing, 0..1. Snow lies where it falls: see `Weather.snow`. */
+  snow: number;
   /** How often lightning strikes: 1 is a thunderstorm, a strike every ten seconds or so. */
   thunder: number;
   wind: number;
@@ -49,14 +51,14 @@ export const STATES: Record<string, State> = {
     cloudCover: 0.42, cloudDark: 0.1, cloudSpeed: 1.0,
     flatten: 0, zenithTint: [1, 1, 1], horizonTint: [1, 1, 1], groundTint: [1, 1, 1],
     sun: 1.0, glow: 1.0, ambient: 1.0, lamps: 0,
-    fogDensity: 0.0012, fogTint: 0.1, mist: 0.004, rain: 0, thunder: 0, wind: 0.35, gloom: 0,
+    fogDensity: 0.0012, fogTint: 0.1, mist: 0.004, rain: 0, snow: 0, thunder: 0, wind: 0.35, gloom: 0,
     exposure: 1.0, saturation: 1.1, contrast: 1.1, grade: [1, 1, 1], weight: 5,
   },
   "drifting cumulus": {
     cloudCover: 0.6, cloudDark: 0.35, cloudSpeed: 1.6,
     flatten: 0.08, zenithTint: [1, 1, 1.05], horizonTint: [1, 1, 1.02], groundTint: [0.95, 0.95, 0.96],
     sun: 1.03, glow: 1.0, ambient: 1.0, lamps: 0,
-    fogDensity: 0.0015, fogTint: 0.15, mist: 0.005, rain: 0, thunder: 0, wind: 0.5, gloom: 0.15,
+    fogDensity: 0.0015, fogTint: 0.15, mist: 0.005, rain: 0, snow: 0, thunder: 0, wind: 0.5, gloom: 0.15,
     exposure: 1.05, saturation: 1.05, contrast: 1.08, grade: [1, 1, 1.02], weight: 4,
   },
   "hard light": {
@@ -64,7 +66,7 @@ export const STATES: Record<string, State> = {
     cloudCover: 0.12, cloudDark: 0.15, cloudSpeed: 0.7,
     flatten: 0, zenithTint: [1, 1, 1], horizonTint: [1, 1, 1], groundTint: [1, 1, 1],
     sun: 1.12, glow: 0.85, ambient: 0.85, lamps: 0,
-    fogDensity: 0.0006, fogTint: 0.05, mist: 0.002, rain: 0, thunder: 0, wind: 0.2, gloom: 0,
+    fogDensity: 0.0006, fogTint: 0.05, mist: 0.002, rain: 0, snow: 0, thunder: 0, wind: 0.2, gloom: 0,
     exposure: 0.95, saturation: 1.15, contrast: 1.16, grade: [1.01, 1, 0.99], weight: 3,
   },
   "high haze": {
@@ -72,21 +74,21 @@ export const STATES: Record<string, State> = {
     cloudCover: 0.25, cloudDark: 0.05, cloudSpeed: 0.6,
     flatten: 0.55, zenithTint: [1.1, 1.15, 1.3], horizonTint: [1.06, 1.08, 1.12], groundTint: [1.06, 1.04, 1.0],
     sun: 1.0, glow: 1.25, ambient: 1.15, lamps: 0,
-    fogDensity: 0.0022, fogTint: 0.3, mist: 0.004, rain: 0, thunder: 0, wind: 0.25, gloom: 0,
+    fogDensity: 0.0022, fogTint: 0.3, mist: 0.004, rain: 0, snow: 0, thunder: 0, wind: 0.25, gloom: 0,
     exposure: 0.92, saturation: 0.9, contrast: 1.1, grade: [1.02, 1.01, 0.98], weight: 3,
   },
   overcast: {
     cloudCover: 0.96, cloudDark: 0.45, cloudSpeed: 1.2,
     flatten: 1, zenithTint: [1.63, 1.85, 2.17], horizonTint: [0.96, 1.02, 1.08], groundTint: [0.73, 0.73, 0.77],
     sun: 0.15, glow: 0.3, ambient: 2.45, lamps: 0.05,
-    fogDensity: 0.0035, fogTint: 0.6, mist: 0.012, rain: 0, thunder: 0, wind: 0.55, gloom: 0.6,
+    fogDensity: 0.0035, fogTint: 0.6, mist: 0.012, rain: 0, snow: 0, thunder: 0, wind: 0.55, gloom: 0.6,
     exposure: 1.22, saturation: 0.72, contrast: 1.02, grade: [0.98, 1, 1.03], weight: 3,
   },
   rain: {
     cloudCover: 1.0, cloudDark: 0.85, cloudSpeed: 2.4,
     flatten: 1, zenithTint: [0.76, 0.87, 1.09], horizonTint: [0.52, 0.57, 0.64], groundTint: [0.4, 0.4, 0.43],
     sun: 0.08, glow: 0.1, ambient: 2.2, lamps: 0.25,
-    fogDensity: 0.005, fogTint: 0.8, mist: 0.016, rain: 1, thunder: 0.2, wind: 0.9, gloom: 1,
+    fogDensity: 0.005, fogTint: 0.8, mist: 0.016, rain: 1, snow: 0, thunder: 0.2, wind: 0.9, gloom: 1,
     exposure: 1.4, saturation: 0.65, contrast: 1.08, grade: [0.94, 0.99, 1.06], weight: 2,
   },
   thunderstorm: {
@@ -94,14 +96,14 @@ export const STATES: Record<string, State> = {
     cloudCover: 1.0, cloudDark: 0.97, cloudSpeed: 3.2,
     flatten: 1, zenithTint: [0.62, 0.72, 0.95], horizonTint: [0.44, 0.48, 0.56], groundTint: [0.34, 0.34, 0.38],
     sun: 0.05, glow: 0.06, ambient: 1.9, lamps: 0.4,
-    fogDensity: 0.0055, fogTint: 0.85, mist: 0.018, rain: 1, thunder: 1, wind: 1, gloom: 1,
+    fogDensity: 0.0055, fogTint: 0.85, mist: 0.018, rain: 1, snow: 0, thunder: 1, wind: 1, gloom: 1,
     exposure: 1.38, saturation: 0.6, contrast: 1.12, grade: [0.93, 0.98, 1.07], weight: 1.5,
   },
   fog: {
     cloudCover: 0.75, cloudDark: 0.2, cloudSpeed: 0.3,
     flatten: 1, zenithTint: [2.83, 3.1, 3.48], horizonTint: [1.2, 1.26, 1.31], groundTint: [1.33, 1.37, 1.4],
     sun: 0.27, glow: 0.8, ambient: 1.8, lamps: 0.1,
-    fogDensity: 0.011, fogTint: 1.0, mist: 0.022, rain: 0, thunder: 0, wind: 0.15, gloom: 0.7,
+    fogDensity: 0.011, fogTint: 1.0, mist: 0.022, rain: 0, snow: 0, thunder: 0, wind: 0.15, gloom: 0.7,
     exposure: 1.05, saturation: 0.6, contrast: 0.95, grade: [0.98, 1, 1.02], weight: 2,
   },
   "storm light": {
@@ -109,8 +111,25 @@ export const STATES: Record<string, State> = {
     cloudCover: 0.72, cloudDark: 0.95, cloudSpeed: 3.0,
     flatten: 0.85, zenithTint: [0.82, 0.92, 1.25], horizonTint: [0.77, 0.72, 0.69], groundTint: [0.6, 0.57, 0.57],
     sun: 1.25, glow: 1.2, ambient: 2.35, lamps: 0.1,
-    fogDensity: 0.003, fogTint: 0.4, mist: 0.012, rain: 0.15, thunder: 0, wind: 1, gloom: 0.9,
+    fogDensity: 0.003, fogTint: 0.4, mist: 0.012, rain: 0.15, snow: 0, thunder: 0, wind: 1, gloom: 0.9,
     exposure: 1.12, saturation: 0.9, contrast: 1.12, grade: [1.02, 1, 0.98], weight: 2,
+  },
+  snow: {
+    // A low white lid, the light coming from everywhere at once, and the far side of the
+    // street going soft. Quiet: no wind to speak of, and nothing to hear of the fall.
+    cloudCover: 1.0, cloudDark: 0.4, cloudSpeed: 0.6,
+    flatten: 1, zenithTint: [1.5, 1.6, 1.8], horizonTint: [1.05, 1.08, 1.14], groundTint: [1.1, 1.12, 1.16],
+    sun: 0.1, glow: 0.3, ambient: 2.6, lamps: 0.2,
+    fogDensity: 0.0034, fogTint: 0.85, mist: 0.011, rain: 0, snow: 1, thunder: 0, wind: 0.3, gloom: 0.6,
+    exposure: 1.18, saturation: 0.62, contrast: 1.0, grade: [0.97, 0.99, 1.04], weight: 1.5,
+  },
+  flurries: {
+    // A few flakes out of a broken sky, the sun coming and going on them.
+    cloudCover: 0.8, cloudDark: 0.45, cloudSpeed: 1.4,
+    flatten: 0.6, zenithTint: [1.2, 1.3, 1.5], horizonTint: [1.02, 1.04, 1.1], groundTint: [1.0, 1.0, 1.05],
+    sun: 0.6, glow: 0.8, ambient: 1.8, lamps: 0.05,
+    fogDensity: 0.003, fogTint: 0.5, mist: 0.01, rain: 0, snow: 0.35, thunder: 0, wind: 0.6, gloom: 0.4,
+    exposure: 1.1, saturation: 0.8, contrast: 1.05, grade: [0.98, 1, 1.03], weight: 1.5,
   },
 };
 
@@ -155,6 +174,7 @@ export interface Look {
   fogTint: number;
   mist: number;
   rain: number;
+  snow: number;
   thunder: number;
   wind: number;
   gloom: number;
@@ -210,6 +230,7 @@ function resolve(d: Daylight, w: State): Look {
     fogTint: w.fogTint,
     mist: w.mist,
     rain: w.rain,
+    snow: w.snow,
     thunder: w.thunder * clamp((w.rain - 0.5) * 2, 0, 1),
     wind: w.wind,
     gloom: w.gloom,
@@ -236,6 +257,11 @@ export class Weather {
   sky: Daylight;
   params: Look;
   wet: number;
+  /**
+   * How much snow is lying, 0..1: it settles over a minute or two of a fall and takes several
+   * minutes to go once it stops, so the city stays white a while under a clearing sky.
+   */
+  snow = 0;
   cycle = true;
   name: string;
   changed: string | null;
@@ -273,6 +299,7 @@ export class Weather {
     this.sky = daylight(this.hour);
     this.params = resolve(this.sky, this.state);
     this.wet = this.params.rain;
+    this.snow = this.params.snow;
     this.changed = start;
   }
 
@@ -324,6 +351,9 @@ export class Weather {
     const p = this.params;
     const rate = p.rain > this.wet ? 0.36 : 0.075;
     this.wet += (p.rain - this.wet) * Math.min(1, dt * rate);
+    // rain on lying snow takes it away quickly; a dry day slowly
+    if (p.snow > this.snow) this.snow = Math.min(p.snow, this.snow + dt * 0.012 * (0.4 + p.snow));
+    else this.snow = Math.max(0, this.snow - dt * (0.004 + 0.03 * p.rain));
     this.lightning(dt);
     this.cloudOffset[0] = (this.cloudOffset[0] + dt * 0.0022 * p.cloudSpeed * 0.8) % 64;
     this.cloudOffset[1] = (this.cloudOffset[1] + dt * 0.0022 * p.cloudSpeed * 0.6) % 64;
@@ -433,6 +463,7 @@ export class Weather {
       uNight: p.night,
       uMoon: this.sky.moon,
       uWet: Math.min(this.wet * 1.2, 1),
+      uSnow: this.snow,
     };
   }
 

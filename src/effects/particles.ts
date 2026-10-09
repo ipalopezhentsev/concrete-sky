@@ -171,6 +171,18 @@ export class Particles {
     }
   }
 
+  /** Someone going into the water: a crown of spray round where they went in, `strength` 0..1. */
+  splash(p: Vec3, strength: number): void {
+    for (let i = 0; i < 20 + 50 * strength; i++) {
+      const a = Math.random() * Math.PI * 2, s = 0.6 + Math.random() * 2.5 * strength;
+      this.smoke.add({
+        pos: [p[0] + Math.sin(a) * 0.3, p[1] + 1.4, p[2] + Math.cos(a) * 0.3],
+        vel: [Math.sin(a) * s, 2 + Math.random() * 6 * strength, Math.cos(a) * s],
+        life: 0.5 + Math.random() * 0.5, size: 0.12 + 0.2 * Math.random(), grow: 0.4, color: [0.8, 0.84, 0.88], alpha: 0.5, gravity: 9.8,
+      });
+    }
+  }
+
   /** A short glowing streak for a bolt in flight. */
   tracer(p: Vec3, color: Vec3): void {
     this.glow.add({ pos: p, vel: [0, 0, 0], life: 0.12, size: 0.35, grow: -1.5, color });

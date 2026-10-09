@@ -16,6 +16,13 @@ const REVERSE = 5;
 const TURN = 0.85; // radians a second at speed
 const DRAG = 0.5;
 
+/** Where along a launch its hull is circled for collision, and how wide the circles are: bow, waist, stern. */
+export const HULL_AT = [-3.5, 0, 3.5];
+export const HULL_R = BOAT_DIMS.hx;
+
+/** Whether a hull at (x, z) heading `yaw` would be in something: a pier, a barge, another boat. */
+export type HullCheck = (x: number, z: number, yaw: number) => boolean;
+
 export interface BoatInput {
   moveX: number; // helm, +1 = starboard
   moveZ: number; // throttle
@@ -27,21 +34,36 @@ export class Boat {
   speed = 0;
   /** How far the hull is from the nearest bank; 0 once it is aground. */
   clearance = RIVER_HALF;
+  /** How hard it ran into something this frame, in m/s (for the sound). */
+  impact = 0;
 
   constructor(x: number, y: number, z: number, yaw: number) {
     this.pos = [x, y, z];
     this.yaw = yaw;
   }
 
-  update(dt: number, input: BoatInput): void {
+  update(dt: number, input: BoatInput, blocked?: HullCheck): void {
+    this.impact = 0;
+    const was = this.yaw;
     const want = input.moveZ > 0 ? DRIVE * input.moveZ : REVERSE * input.moveZ;
     this.speed += (want - this.speed) * (1 - Math.exp(-DRAG * dt));
     // the helm only bites while there is water going past the rudder
     const bite = Math.min(1, Math.abs(this.speed) / 4);
-    this.yaw += input.moveX * TURN * bite * dt * Math.sign(this.speed || 1);
+    // yaw grows to the left, as it does for the car (see its yaw rate): starboard helm takes it off
+    this.yaw -= input.moveX * TURN * bite * dt * Math.sign(this.speed || 1);
 
     const nx = this.pos[0] + Math.sin(this.yaw) * this.speed * dt;
     const nz = this.pos[2] + Math.cos(this.yaw) * this.speed * dt;
+
+    // Nor does it go through anything solid on the water: it stops against it with a knock and
+    // comes off it a little. Anything it is already in it may move out of, or it would be
+    // pinned there for good.
+    if (blocked && blocked(nx, nz, this.yaw) && !blocked(this.pos[0], this.pos[2], was)) {
+      this.impact = Math.abs(this.speed);
+      this.speed *= -0.25;
+      this.yaw = was;
+      return;
+    }
 
     // A boat is held by its river, not by collision boxes: leave the channel and it grounds.
     // Steering back off the bank has to keep working, so only the move that would take it
@@ -63,9 +85,9 @@ export class Boat {
     }
   }
 
-  /** Where a rider steps off: onto the deck, level with the gunwale. */
-  exitSpot(): Vec3 {
-    const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
+  /** Where a rider steps off over one side or the other (`side` 1 is the left, -1 the right), level with the gunwale. */
+  exitSpot(side: 1 | -1 = 1): Vec3 {
+    const rx = Math.cos(this.yaw) * side, rz = -Math.sin(this.yaw) * side;
     return [this.pos[0] + rx * (BOAT_DIMS.hx + 0.7), this.pos[1] + 0.4, this.pos[2] + rz * (BOAT_DIMS.hx + 0.7)];
   }
 }

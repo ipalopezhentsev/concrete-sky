@@ -108,7 +108,8 @@ export class Parking {
     let best: Parked | null = null;
     let bestD = reach;
     for (const p of this.all()) {
-      if (p.wreck || Math.abs(p.y - y) > 2.5) continue;
+      // a launch rides lower than its quay, and higher than anyone in the water beside it
+      if (p.wreck || Math.abs(p.y - y) > (p.kind === "boat" ? 3.2 : 2.5)) continue;
       const f = footprint(p.kind, p.yaw);
       const dx = Math.max(Math.abs(x - p.x) - f.hx, 0);
       const dz = Math.max(Math.abs(z - p.z) - f.hz, 0);
@@ -177,15 +178,16 @@ export class Parking {
     const list: number[] = [];
     for (const p of this.all()) {
       if (Math.abs(p.x - x) > 160 || Math.abs(p.z - z) > 160) continue;
-      if (p.kind !== "car" && p.kind !== "van") {
+      if (p.kind === "flyer") {
         const f = footprint(p.kind, p.yaw);
         list.push(p.x - f.hx, p.y, p.z - f.hz, p.x + f.hx, p.y + f.h, p.z + f.hz);
         continue;
       }
-      if (!cars) continue;
+      if (!cars && p.kind !== "boat") continue;
       // Cut into slices along its length, each boxed on its own: the square-on box round a car
-      // parked on a street running the diagonal stood out a metre and a half into the lane.
-      const d = CAR_DIMS[p.kind], fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);
+      // parked on a street running the diagonal stood out a metre and a half into the lane, and
+      // the one round a launch on a bend of the river stood over the steps it is boarded from.
+      const d = p.kind === "boat" ? BOAT_DIMS : CAR_DIMS[p.kind], fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);
       const slice = d.hz / SLICES;
       const ex = Math.abs(fx) * slice + Math.abs(fz) * d.hx, ez = Math.abs(fz) * slice + Math.abs(fx) * d.hx;
       for (let k = 0; k < SLICES; k++) {

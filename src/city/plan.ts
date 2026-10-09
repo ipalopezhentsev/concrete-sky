@@ -1729,13 +1729,17 @@ function lamps(b: Builder, p: Piece): void {
     const x = ax + p.ux * s - p.uz * off, z = az + p.uz * s + p.ux * off;
     const kerb = pieceYAt(p, s);
     const y0 = kerb - 3, top = kerb + H;
-    b.box(x - 0.13, y0, z - 0.13, x + 0.13, top, z + 0.13, Mat.Metal, [1, 1, 1], 0, { detail: false });
     // the arm and head, out over the road
     const reach = -side * 1.8;
     const hx = x - p.uz * reach, hz = z + p.ux * reach;
+    const lx = x - p.uz * reach * 1.6, lz = z + p.ux * reach * 1.6;
+    // Not under a bridge or the railway: either is lower than a lamp is tall, and the column
+    // came up through the deck with its head lit on the road above. The deck has lamps of its
+    // own, and under it is dark enough to want none.
+    if (overhead(x, z, kerb + 1, top + 0.3) || overhead(hx, hz, kerb + 1, top + 0.3) || overhead(lx, lz, kerb + 1, top + 0.3)) continue;
+    b.box(x - 0.13, y0, z - 0.13, x + 0.13, top, z + 0.13, Mat.Metal, [1, 1, 1], 0, { detail: false });
     b.box(hx - 1.1, top - 0.12, hz - 0.1, hx + 1.1, top, hz + 0.1, Mat.Metal, [1, 1, 1], 0,
       { collide: false, detail: true, turn: Math.atan2(p.ux, -p.uz) });
-    const lx = x - p.uz * reach * 1.6, lz = z + p.ux * reach * 1.6;
     b.lamps.push(lx, top - 0.3, lz);
     b.box(lx - 0.45, top - 0.2, lz - 0.2, lx + 0.45, top - 0.05, lz + 0.2, Mat.Lamp, [1, 1, 1], 0,
       { collide: false, detail: true, turn: Math.atan2(p.ux, -p.uz) });
@@ -1842,7 +1846,32 @@ const APRON_GRADE = TERRACE / TILE;
 /** How far inboard from the water's edge the stone quay reaches. */
 const QUAY_SLAB = 16;
 /** Stations to a bay of quay. The same grid the water is laid on, so the two edges agree. */
-const BAY = 8;
+export const BAY = 8;
+/** Every so many bays a flight of steps runs down the quay wall into the water, and a launch may tie up at its foot. */
+export const WATER_STEPS = 23;
+/** Every so many bays an iron ladder runs up the quay wall out of the water. */
+export const LADDERS = 5;
+/** How far out from the quay wall a launch at the steps lies, to its middle: alongside the last tread clear of the water. */
+const LAUNCH_OFF = 8.6;
+
+/**
+ * One bay of quay: its middle on the river's centreline, which way the river runs there, and
+ * how long it is — taken between the bay's own two ends, as the water and the stone are.
+ */
+export function quayBay(line: number, k: number): { p: Vec2; dir: Vec2; chord: number } {
+  const a = riverFrame(line, k * BAY).p, c = riverFrame(line, (k + 1) * BAY).p;
+  const dx = c[0] - a[0], dz = c[1] - a[1];
+  const chord = Math.hypot(dx, dz) || BAY;
+  return { p: [(a[0] + c[0]) / 2, (a[1] + c[1]) / 2], dir: [dx / chord, dz / chord], chord };
+}
+
+/** The launch tied up at the foot of the water steps in bay `k` on one side of a river, if one is. */
+export function launchAt(line: number, k: number, side: 1 | -1): { x: number; z: number; yaw: number } | null {
+  if (k % WATER_STEPS !== 0 || hashInt(line, k, side + 1, 341) % 3 === 0) return null;
+  const { p, dir } = quayBay(line, k);
+  const o = RIVER_HALF - LAUNCH_OFF;
+  return { x: p[0] - dir[1] * o * side, z: p[1] + dir[0] * o * side, yaw: Math.atan2(dir[0], dir[1]) };
+}
 /** The diagonal of a ground tile: how far a corner's height can carry across the grid. */
 const TILE_DIAG = TILE * 1.45;
 
@@ -2778,6 +2807,24 @@ export function rideAt(x: number, z: number, below: number): number | null {
     for (const c of crossings(axis, line, Math.floor(s / ARTERY)))
       if (s > c.a0 && s < c.a1) take(deckY(axis, line, c, s, x, z));
   return best;
+}
+
+/**
+ * Whether a deck passes over (x, z) anywhere between heights `lo` and `hi`: a main road's
+ * bridge or its ramp, or the railway's viaduct. For anything standing in the street that has
+ * to keep out from under them — a street lamp is taller than either leaves room for.
+ */
+export function overhead(x: number, z: number, lo: number, hi: number): boolean {
+  // a deck's surface, with the depth of its structure under it
+  const hits = (top: number, depth: number) => top > lo && top - depth < hi;
+  for (const { axis, line, s } of arteryStations(x, z, ARTERY_HALF + ARTERY_MARGIN)) {
+    for (const c of crossings(axis, line, Math.floor(s / ARTERY)))
+      if (s > c.a0 && s < c.a1 && hits(deckY(axis, line, c, s, x, z), 2.5)) return true;
+  }
+  for (const { axis, line, s, p } of arteryStations(x, z, 5.6)) {
+    if (hasRail(axis, line) && Math.hypot(p[0] - x, p[1] - z) < 5.6 && hits(railY(axis, line, s), 1.9)) return true;
+  }
+  return false;
 }
 
 /**
@@ -4544,12 +4591,9 @@ function waterfront(b: Builder, x0: number, z0: number): void {
       // length, so eight of them is anywhere from five to thirteen metres of bank — and boxes
       // cut to the nominal eight left the quay open at every joint where the spline stretches:
       // a missing tooth of parapet with the water showing through behind it.
-      const a = riverFrame(line, s).p, c = riverFrame(line, s + BAY).p;
-      const px = (a[0] + c[0]) / 2, pz = (a[1] + c[1]) / 2;
-      const dx = c[0] - a[0], dz = c[1] - a[1];
-      const chord = Math.hypot(dx, dz) || BAY;
-      const dir: Vec2 = [dx / chord, dz / chord];
-      const turn = Math.atan2(dz, dx);
+      const k = Math.round(s / BAY);
+      const { p: [px, pz], dir, chord } = quayBay(line, k);
+      const turn = Math.atan2(dir[1], dir[0]);
       // Bays overrun both ends by the mitre: two of them turned against each other leave the
       // joint open on the inside of the bend otherwise, and the wider the thing laid the wider
       // that opening. The boxes are opaque, so the seam is buried inside the stone.
@@ -4557,8 +4601,8 @@ function waterfront(b: Builder, x0: number, z0: number): void {
       // and, as on a deck, every other bay is set down out of the plane of its neighbours, or
       // the three metres of quay the two of them both cover is two surfaces at one height
       // (see `SHINGLE`)
-      const k = Math.round(s / BAY);
       const drop = (((k % 2) + 2) % 2) * SHINGLE;
+      const steps = k % WATER_STEPS === 0;
       for (const side of [1, -1] as const) {
         const ex = px - dir[1] * RIVER_HALF * side, ez = pz + dir[0] * RIVER_HALF * side;
         if (ex < x0 - 4 || ex >= x0 + REGION + 4 || ez < z0 - 4 || ez >= z0 + REGION + 4) continue;
@@ -4574,17 +4618,44 @@ function waterfront(b: Builder, x0: number, z0: number): void {
         put(QUAY_SLAB / 2, w - 4, top, QUAY_SLAB / 2, Mat.Deck, stone);
         // A solid parapet along the top of the wall. Nothing thin: a slender rail here runs
         // the whole length of the bank and, seen down the quay, reads as a wire over the
-        // water rather than as anything anyone would build.
-        put(1.1, top, top + 0.42, 1.0, Mat.Board, stone, Finish.Cast);
-        put(0.42, top + 0.42, top + 1.15, 1.7, Mat.Board, stone, Finish.Cast);
-        // a bollard now and then, and steps down to the water every so often
-        if (k % 5 === 0) put(0.3, top + 0.42, top + 1.1, 1.0, Mat.Board, stone, Finish.Ribbed);
-        if (k % 23 === 0) {
+        // water rather than as anything anyone would build. It stops at the head of the water
+        // steps, so that they are walked down to rather than climbed over to.
+        if (!steps) {
+          put(1.1, top, top + 0.42, 1.0, Mat.Board, stone, Finish.Cast);
+          put(0.42, top + 0.42, top + 1.15, 1.7, Mat.Board, stone, Finish.Cast);
+        }
+        // A bollard now and then, with an iron ladder down the wall in front of it for anyone
+        // in the water to get out by: two stiles standing off the face and over the coping as
+        // handles, and the rungs between them. Not solid — a swimmer climbs it (see swim.ts),
+        // and nobody on the quay should trip over its handles.
+        if (k % LADDERS === 0 && !steps) {
+          put(0.3, top + 0.42, top + 1.1, 1.0, Mat.Board, stone, Finish.Ribbed);
+          const iron: Tint = [0.16, 0.15, 0.14];
+          const bar = (along: number, half: number, y0: number, y1: number, o0: number, o1: number) => {
+            const o = (o0 + o1) / 2;
+            const cx = ex - dir[1] * o * side + dir[0] * along, cz = ez + dir[0] * o * side + dir[1] * along;
+            b.box(cx - half, y0, cz - Math.abs(o1 - o0) / 2, cx + half, y1, cz + Math.abs(o1 - o0) / 2, Mat.Metal, iron, 0,
+              { turn, detail: false, collide: false });
+          };
+          for (const along of [-0.26, 0.26]) {
+            bar(along, 0.03, w - 1.5, top + 0.9, -0.22, -0.14);
+            bar(along, 0.03, top + 0.84, top + 0.9, -0.22, 0.35);
+          }
+          for (let y = w - 1.2; y < top; y += 0.32) bar(0, 0.26, y, y + 0.035, -0.2, -0.16);
+        }
+        if (steps) {
           for (let n = 1; n <= 12; n++) {
             // Half a shingle low, so that the tread which lands at the waterline — and with
             // this rise one of them always does — is not in the plane of the river itself.
             const y = top - n * (top - w + 1) / 12 - SHINGLE / 2;
             put(1.6, y - 0.6, y, -0.6 - n * 0.42, Mat.Board, stone, Finish.Boards);
+          }
+          // A launch tied up at the foot, for anyone who walks down to take it. Registered
+          // rather than built, and by the region its own middle is in, so that two regions
+          // building the same steps do not both moor one there.
+          const moor = launchAt(line, k, side);
+          if (moor && moor.x >= x0 && moor.x < x0 + REGION && moor.z >= z0 && moor.z < z0 + REGION) {
+            b.boats.push({ x: moor.x, y: w + 1.2, z: moor.z, yaw: moor.yaw });
           }
         }
       }
@@ -4610,16 +4681,12 @@ function vessels(b: Builder, x0: number, z0: number): void {
       const s = k * 90 + (h % 37);
       const big = h % 100 < 13;
       const { p, dir } = riverFrame(line, s);
-      // the small craft are launches anyone can take, so they are registered rather than built
-      if (!big && h % 3 === 0) {
-        const side2 = h % 2 === 0 ? 1 : -1;
-        const o = RIVER_HALF - 9;
-        const bx = p[0] - dir[1] * o * side2, bz = p[1] + dir[0] * o * side2;
-        if (bx >= x0 - 40 && bx < x0 + REGION + 40 && bz >= z0 - 40 && bz < z0 + REGION + 40) {
-          b.boats.push({ x: bx, y: w + 1.2, z: bz, yaw: Math.atan2(dir[0], dir[1]) });
-        }
-        continue;
-      }
+      // A third of the small ones are not here: the launches anyone can take lie at the water
+      // steps instead (see `waterfront`). And nothing ties up across the steps themselves,
+      // where it would stand between a launch and the treads it is boarded from.
+      if (!big && h % 3 === 0) continue;
+      const span = BAY * WATER_STEPS, past = (((s - BAY / 2) % span) + span) % span;
+      if (!big && (past < 34 || past > span - 34)) continue;
       // moored against a quay, or standing off in the fairway
       const side = h % 2 === 0 ? 1 : -1;
       const off = big ? (h % 3) * 9 : RIVER_HALF - 7 - (h % 5);

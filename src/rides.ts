@@ -12,15 +12,15 @@ import type { Colliders, Player } from "./player";
 import { Lifts } from "./lifts";
 import { Pedestrians, type Avoid } from "./pedestrians";
 import { Quests, type Runner } from "./quests";
-import { Boat } from "./vehicles/boat";
+import { Boat, HULL_AT, HULL_R, type HullCheck } from "./vehicles/boat";
 import { Metro, metroCycle, onTrack, RAILWAY, SUBWAY, trackOff, trainAt, type LineKind } from "./vehicles/metro";
-import { arteryLines, hasSubway, SUB_SPACING } from "./city/network";
+import { arteryLines, hasSubway, riverNear, SUB_SPACING } from "./city/network";
 import type { CitySound } from "./audio";
 import { Car, type RoadSurface } from "./vehicles/car";
 import { Flyer } from "./vehicles/flyer";
 import { Knocks } from "./vehicles/knocks";
 import { Parking } from "./vehicles/parking";
-import { InstanceList, Traffic } from "./vehicles/traffic";
+import { INSTANCE_STRIDE, InstanceList, Traffic } from "./vehicles/traffic";
 import type { VehicleLists } from "./renderer";
 import { CARRIAGE } from "./vehicles/models";
 import { groundAt, PLAT_IN, PLAT_OUT, PLAT_RISE, RAIL_PLAT, rideAt, type RailStation, type Station } from "./city/plan";
@@ -157,6 +157,39 @@ export class Rides {
   readonly carColliders: Colliders = (x, z) =>
     this.join(this.join(this.world.colliders(x, z), this.parking.boxes(x, z, false)), this.lifts.boxes(x, z));
 
+  /**
+   * Whether the launch being driven would be in something with its middle at (x, z), heading
+   * `yaw`: a bridge pier, a barge, the water steps, a launch tied up, or one of the craft going
+   * up and down the river. The hull is three circles along its length, taken through the band
+   * of height it sits in the water at, so a bridge deck overhead is not in its way.
+   */
+  private readonly hullBlocked: HullCheck = (x, z, yaw) => {
+    const b = this.boat;
+    if (!b) return false;
+    const y0 = b.pos[1] - 1, y1 = b.pos[1] + 1, r2 = HULL_R * HULL_R, fx = Math.sin(yaw), fz = Math.cos(yaw);
+    const boxes = this.carColliders(x, z);
+    const craft = this.traffic.boats, d = craft.data;
+    for (const a of HULL_AT) {
+      const cx = x + fx * a, cz = z + fz * a;
+      for (let i = 0; i < boxes.length; i += 6) {
+        if (boxes[i + 1] > y1 || boxes[i + 4] < y0) continue;
+        const dx = Math.max(boxes[i] - cx, 0, cx - boxes[i + 3]), dz = Math.max(boxes[i + 2] - cz, 0, cz - boxes[i + 5]);
+        if (dx * dx + dz * dz < r2) return true;
+      }
+      for (let i = 0; i < craft.count; i++) {
+        const o = i * INSTANCE_STRIDE, ox = d[o], oz = d[o + 2];
+        if (Math.abs(ox - cx) > 12 || Math.abs(oz - cz) > 12) continue;
+        // itself, where it was drawn last frame
+        if (Math.abs(ox - b.pos[0]) < 0.3 && Math.abs(oz - b.pos[2]) < 0.3) continue;
+        for (const a2 of HULL_AT) {
+          const px = ox + Math.sin(d[o + 3]) * a2 - cx, pz = oz + Math.cos(d[o + 3]) * a2 - cz;
+          if (px * px + pz * pz < 4 * r2) return true;
+        }
+      }
+    }
+    return false;
+  };
+
   /** The hunters' cars still on the road. */
   private hunterCars(): Car[] {
     const out: Car[] = [];
@@ -271,7 +304,7 @@ export class Rides {
     }
     if (this.flyer) return this.flyer.canExit ? "E  step out" : "";
     if (this.car) return this.car.canExit ? "E  step out" : "";
-    if (this.boat) return "E  step ashore";
+    if (this.boat) return this.landing(this.boat).ashore ? "E  step ashore" : "E  over the side";
     const p = this.player.pos;
     if (this.zips.startAt(p, this.world.colliders, this.world.streamedAt)) return "E  ride the line down";
     const parked = this.parking.nearest(p[0], p[1], p[2], REACH);
@@ -315,7 +348,7 @@ export class Rides {
       const b = this.boat;
       if (Math.abs(b.speed) > 1.5) return "stop first";
       this.parking.drop("boat", b.pos, b.yaw, [0.42, 0.44, 0.46]);
-      pl.pos = b.exitSpot();
+      pl.pos = this.landing(b).spot;
       pl.vel = [0, 0, 0];
       pl.yaw = b.yaw;
       pl.pitch = 0;
@@ -362,18 +395,58 @@ export class Rides {
       return null;
     }
     const train = this.atTrain();
-    if (train) {
-      const k = train.kind;
-      const ride = new Metro(train.st.axis, train.st.line, train.dir, train.st.k, this.time, k);
-      // step on where you were standing, so boarding does not shuffle you down the platform
-      const door = onTrack(train.st.axis, train.st.line, train.st.s, trackOff(train.dir, k), k);
-      const ahead = (p[0] - door.pos[0]) * Math.sin(door.yaw) + (p[2] - door.pos[2]) * Math.cos(door.yaw);
-      const long = (k.cars * CARRIAGE) / 2 - 2.5;
-      ride.along = Math.max(-long, Math.min(long, ahead)) * train.dir;
-      this.metro = ride;
-      return null;
-    }
+    if (train) this.boardTrain(train);
     return null;
+  }
+
+  /** On to a train standing at the platform, where the runner is standing along it. */
+  private boardTrain(train: NonNullable<ReturnType<Rides["atTrain"]>>): void {
+    const k = train.kind, p = this.player.pos;
+    const ride = new Metro(train.st.axis, train.st.line, train.dir, train.st.k, this.time, k);
+    // step on where you were standing, so boarding does not shuffle you down the platform
+    const door = onTrack(train.st.axis, train.st.line, train.st.s, trackOff(train.dir, k), k);
+    const ahead = (p[0] - door.pos[0]) * Math.sin(door.yaw) + (p[2] - door.pos[2]) * Math.cos(door.yaw);
+    const long = (k.cars * CARRIAGE) / 2 - 2.5;
+    ride.along = Math.max(-long, Math.min(long, ahead)) * train.dir;
+    this.metro = ride;
+  }
+
+  /**
+   * Walked in through an open door: aboard, as if they had pressed E. A carriage is not solid —
+   * nothing about a train is, to someone on foot — so without this, stepping into a doorway
+   * dropped them through its floor onto the track bed, inside a train that was not carrying
+   * them, to be left on the rails when it pulled out.
+   */
+  private walkOn(): void {
+    const train = this.atTrain();
+    if (!train) return;
+    const { st, dir, kind } = train;
+    const p = this.player.pos;
+    const mid = onTrack(st.axis, st.line, st.s, trackOff(dir, kind), kind);
+    const fx = Math.sin(mid.yaw), fz = Math.cos(mid.yaw);
+    const across = -(p[0] - mid.pos[0]) * fz + (p[2] - mid.pos[2]) * fx;
+    const along = (p[0] - mid.pos[0]) * fx + (p[2] - mid.pos[2]) * fz;
+    if (Math.abs(across) < 1.45 && Math.abs(along) < (kind.cars * CARRIAGE) / 2) this.boardTrain(train);
+  }
+
+  /**
+   * Where stepping out of a launch puts the runner: onto the steps or a quay it lies alongside,
+   * if there is one either side within a stride, or else over the side nearer the bank and
+   * into the water, to swim for it.
+   */
+  landing(b: Boat): { spot: Vec3; ashore: boolean } {
+    for (const side of [1, -1] as const) {
+      const spot = b.exitSpot(side);
+      const boxes = this.world.colliders(spot[0], spot[2]);
+      let top = -Infinity;
+      for (let i = 0; i < boxes.length; i += 6) {
+        if (spot[0] < boxes[i] || spot[0] > boxes[i + 3] || spot[2] < boxes[i + 2] || spot[2] > boxes[i + 5]) continue;
+        if (boxes[i + 4] > b.pos[1] - 2.2 && boxes[i + 4] < b.pos[1] + 1.2) top = Math.max(top, boxes[i + 4]);
+      }
+      if (top > -Infinity) return { spot: [spot[0], top + 0.05, spot[2]], ashore: true };
+    }
+    const bank = (side: 1 | -1) => riverNear(b.exitSpot(side)[0], b.exitSpot(side)[2])?.dist ?? 0;
+    return { spot: b.exitSpot(bank(1) >= bank(-1) ? 1 : -1), ashore: false };
   }
 
   /** Start in a flyer where the player stands (test hook, demo). */
@@ -461,7 +534,7 @@ export class Rides {
       pl.pos = [...car.pos];
     } else if (this.boat) {
       const boat = this.boat;
-      boat.update(dt, { moveX: c.moveX, moveZ: c.moveZ });
+      boat.update(dt, { moveX: c.moveX, moveZ: c.moveZ }, this.hullBlocked);
       this.carLookYaw -= c.mouseDX * 0.0022;
       this.carLookPitch = Math.max(-0.6, Math.min(0.5, this.carLookPitch - c.mouseDY * 0.0022));
       pl.yaw = boat.yaw + this.carLookYaw;
@@ -670,6 +743,7 @@ export class Rides {
   /** Traffic, hunters, weapons and effects; call after drive() and once the camera is known. */
   update(dt: number, time: number, cam: RideCamera, fire: boolean): void {
     this.time = time;
+    if (!this.riding) this.walkOn();
     // which train, if any, is to be drawn from the inside
     const m = this.metro;
     this.traffic.ridden = m ? { axis: m.axis, line: m.line, dir: m.dir, slot: m.slot, kind: m.kind } : null;

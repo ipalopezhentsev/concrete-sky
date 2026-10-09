@@ -87,6 +87,26 @@ export function metroCycle(t: number, dir: 1 | -1, calls = true, kind = SUBWAY):
   return p < D ? { n, frac: 0, stopped: true } : { n, frac: ease((p - D) / (P - D)), stopped: false };
 }
 
+/** Seconds the doors take to run open, or shut. */
+const DOOR_TIME = 1.1;
+
+/**
+ * How far open a train's doors are, standing at a platform, and on which side of its carriages:
+ * -1..1, positive for a carriage's own +x side and negative for its -x (see `withDoors` in
+ * models.ts). They run open a moment after it stops and are shut again a moment before it
+ * goes; running, or standing where there is no platform, they stay shut.
+ */
+export function doorsAt(axis: 0 | 1, line: number, k: number, dir: 1 | -1, t: number, kind = SUBWAY): number {
+  const P = kind.period;
+  const u = (t + (dir > 0 ? 0 : P / 2)) / P;
+  const p = (u - Math.floor(u)) * P;
+  const open = Math.min(p - 0.4, kind.dwell - 0.5 - p) / DOOR_TIME;
+  if (open <= 0 || !kind.station(axis, line, k)) return 0;
+  // The platform is on the `doors` side of the line; a carriage's +x is the line's other
+  // side running forwards, and the same side turned round running back.
+  return -kind.doors(dir) * dir * ease(Math.min(1, open));
+}
+
 /** When the train running `dir` comes in to a platform on cycle `n`. */
 export function dueAt(n: number, dir: 1 | -1, kind = SUBWAY): number {
   return n * kind.period - (dir > 0 ? 0 : kind.period / 2);

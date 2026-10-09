@@ -9,6 +9,8 @@ export interface ModelBox {
   paint?: boolean;
   /** Flat colour for an unpainted box; the default is the material's own texture, untinted. */
   tint?: Tint;
+  /** A train's door leaf: how far along z it runs when its doors are fully open (see `withDoors`). */
+  slide?: number;
 }
 
 const box = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: Mat, paint = false, tint?: Tint): ModelBox =>
@@ -342,7 +344,7 @@ export function liftBoxes(size: number, thick: number): ModelBox[] {
 /** Flatten a model to 12-float boxes (for instanced meshes); a box with no tint is left white. */
 export function modelData(model: ModelBox[]): number[] {
   const out: number[] = [];
-  for (const m of model) out.push(...m.b, ...(m.tint ?? [1, 1, 1]), m.mat, m.paint ? 1 : 0, 0);
+  for (const m of model) out.push(...m.b, ...(m.tint ?? [1, 1, 1]), m.mat, m.paint ? 1 : 0, m.slide ?? 0);
   return out;
 }
 
@@ -377,17 +379,100 @@ export const CARRIAGE = 20;
 /** Where the band of windows sits in a carriage side, and how far along the body it runs. */
 const WIN_SILL = 2.3, WIN_HEAD = 3.3, WIN_END = 8.8;
 
-/** A railway carriage: a long painted body, a band of windows, a roof and a lit front. */
+/**
+ * Doors: two pairs down each side of a carriage, a pane of the window band wide, where the
+ * panes run between the third and fourth pillars from either end. Sliding doors: each leaf is
+ * built shut and carries how far it runs back along the body when the doors are open (see
+ * `ModelBox.slide`), and the vertex shader runs it there by as much as the instance says they
+ * are open — on one side only, the platform's.
+ */
+const DOORS = [-5.5, 5.5];
+const DOOR_HALF = 0.65;
+const DOOR_TOP = WIN_HEAD;
+/** How far each leaf runs back: its own width, and a little more to clear the doorway. */
+const DOOR_RUN = DOOR_HALF + 0.04;
+const DOOR_GREY: Tint = [0.6, 0.61, 0.62];
+const SEAM: Tint = [0.12, 0.12, 0.13];
+
+/**
+ * The lights value an instance is pushed with, carrying how far open its doors are: `open` is
+ * -1..1, positive for the carriage's own +x side and negative for its -x side. Every other
+ * vehicle's lights are under 16, so they read as having no doors at all (see VEHICLE_VS).
+ */
+export function withDoors(lights: number, open: number): number {
+  return lights + 16 * (Math.round(Math.max(-1, Math.min(1, open)) * 32) + 33);
+}
+
+/** The outside of a carriage's doors on side `s`: the sill of each doorway, and over it two leaves with their windows. */
+function doorsOutside(s: 1 | -1): ModelBox[] {
+  const out: ModelBox[] = [];
+  // a box from x0 to x1 out from the body on this side, mirrored for the other
+  const side = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, mat: Mat, tint?: Tint, slide = 0): ModelBox =>
+    ({ ...(s > 0 ? box(x0, y0, z0, x1, y1, z1, mat, false, tint) : box(-x1, y0, z0, -x0, y1, z1, mat, false, tint)), slide });
+  for (const c of DOORS) {
+    out.push(side(1.55, 1.0, c - DOOR_HALF, 1.59, 1.06, c + DOOR_HALF, Mat.Metal));
+    for (const way of [-1, 1]) {
+      const z0 = way < 0 ? c - DOOR_HALF : c, z1 = way < 0 ? c : c + DOOR_HALF, run = way * DOOR_RUN;
+      out.push(side(1.595, 1.0, z0, 1.64, DOOR_TOP, z1, Mat.Paint, DOOR_GREY, run));
+      out.push(side(1.64, WIN_SILL, z0 + 0.07, 1.652, WIN_HEAD - 0.15, z1 - 0.07, Mat.VGlass, undefined, run));
+      // the rubber down the meeting edge
+      const e = way < 0 ? z1 : z0;
+      out.push(side(1.64, 1.0, e - 0.012, 1.654, DOOR_TOP, e + 0.012, Mat.Paint, SEAM, run));
+    }
+  }
+  return out;
+}
+
+/** The stretches of [from, to] along a carriage side either side of its doorways. */
+function betweenDoors(from: number, to: number): [number, number][] {
+  const out: [number, number][] = [];
+  for (const c of DOORS) {
+    out.push([from, c - DOOR_HALF]);
+    from = c + DOOR_HALF;
+  }
+  out.push([from, to]);
+  return out;
+}
+
+/**
+ * A railway carriage: a long painted body, a band of windows, the doors, a roof and a lit front.
+ *
+ * Hollow, for the doors' sake. A solid body with leaves that slide back showed a flat panel
+ * where the doorway was, and a train standing open at a platform was a row of black slots. So
+ * it is a shell — floor, roof, end walls, and sides broken at every doorway — with the strip
+ * lights down the ceiling, and through an open door there is the lit inside of the car. (The
+ * windows are the dark glass every vehicle has, and still show nothing through them.)
+ */
 export function carriageBoxes(): ModelBox[] {
-  return [
-    box(-1.55, 0.9, -9.6, 1.55, 3.9, 9.6, Mat.Paint, true),
-    box(-1.58, WIN_SILL, -WIN_END, 1.58, WIN_HEAD, WIN_END, Mat.VGlass),
+  const HX = 1.55, WALL = 0.12, HALF = 9.6, FLOOR = 1.06, CEIL = 3.74;
+  const out: ModelBox[] = [
+    box(-HX, 0.9, -HALF, HX, FLOOR - 0.02, HALF, Mat.Paint, true),
+    box(-HX + WALL, FLOOR - 0.02, -HALF + WALL, HX - WALL, FLOOR, HALF - WALL, Mat.Panel),
+    box(-HX, CEIL, -HALF, HX, 3.9, HALF, Mat.Paint, true),
+    box(-HX, FLOOR - 0.02, -HALF, HX, CEIL, -HALF + WALL, Mat.Paint, true),
+    box(-HX, FLOOR - 0.02, HALF - WALL, HX, CEIL, HALF, Mat.Paint, true),
     box(-1.3, 3.9, -9.2, 1.3, 4.3, 9.2, Mat.Metal),
     box(-1.2, 0.3, -8.4, 1.2, 0.9, -5.4, Mat.Metal),
     box(-1.2, 0.3, 5.4, 1.2, 0.9, 8.4, Mat.Metal),
     ...pair(0.6, 1.4, 9.6, 1.2, 1.7, 9.64, Mat.Glow),
     ...pair(0.6, 1.4, -9.64, 1.2, 1.7, -9.6, Mat.Tail),
   ];
+  // the tubes down the ceiling, as inside the one being ridden
+  for (let i = 0; i < 6; i++) {
+    const z = -HALF + 1.2 + i * 2.95;
+    out.push(box(-0.16, CEIL - 0.06, z, 0.16, CEIL, z + 2.25, Mat.Strip));
+  }
+  for (const s of [1, -1] as const) {
+    const sx = (x0: number, x1: number): [number, number] => (s > 0 ? [x0, x1] : [-x1, -x0]);
+    const [w0, w1] = sx(HX - WALL, HX), [g0, g1] = sx(HX - 0.02, 1.58);
+    // the side, broken at the doorways, with a header over each
+    for (const [z0, z1] of betweenDoors(-HALF + WALL, HALF - WALL)) out.push(box(w0, FLOOR - 0.02, z0, w1, CEIL, z1, Mat.Paint, true));
+    for (const c of DOORS) out.push(box(w0, DOOR_TOP, c - DOOR_HALF, w1, CEIL, c + DOOR_HALF, Mat.Paint, true));
+    // and the band of windows along it, broken at the same places
+    for (const [z0, z1] of betweenDoors(-WIN_END, WIN_END)) out.push(box(g0, WIN_SILL, z0, g1, WIN_HEAD, z1, Mat.VGlass));
+    out.push(...doorsOutside(s));
+  }
+  return out;
 }
 
 /**
@@ -428,7 +513,28 @@ export function carriageInsideBoxes(): ModelBox[] {
   const PANES = 8, step = (2 * WIN_END) / PANES;
   for (const s of [1, -1]) {
     const x0 = s > 0 ? HX - WALL : -HX, x1 = s > 0 ? HX : -HX + WALL;
-    out.push(box(x0, FLOOR, -HALF, x1, WIN_SILL, HALF, Mat.Paint, true));
+    // the wall under the windows, broken at each door
+    let from = -HALF;
+    for (const c of DOORS) {
+      out.push(box(x0, FLOOR, from, x1, WIN_SILL, c - DOOR_HALF, Mat.Paint, true));
+      from = c + DOOR_HALF;
+    }
+    out.push(box(x0, FLOOR, from, x1, WIN_SILL, HALF, Mat.Paint, true));
+    // and the doors in those gaps: a leaf each side of the middle with a window in it, which
+    // runs back along the inside of the wall when they open, the platform showing through
+    const ix = s > 0 ? x0 - 0.04 : x1, ox = s > 0 ? x0 : x1 + 0.04;
+    const leaf = (b: ModelBox, run: number): ModelBox => ({ ...b, slide: run });
+    for (const c of DOORS) {
+      for (const way of [-1, 1]) {
+        const z0 = way < 0 ? c - DOOR_HALF : c, z1 = way < 0 ? c : c + DOOR_HALF, run = way * DOOR_RUN;
+        out.push(leaf(trim(ix, FLOOR, z0, ox, WIN_SILL, z1, DOOR_GREY), run));
+        out.push(leaf(trim(ix, WIN_HEAD - 0.15, z0, ox, DOOR_TOP, z1, DOOR_GREY), run));
+        out.push(leaf(trim(ix, WIN_SILL, z0, ox, WIN_HEAD - 0.15, z0 + 0.07, DOOR_GREY), run));
+        out.push(leaf(trim(ix, WIN_SILL, z1 - 0.07, ox, WIN_HEAD - 0.15, z1, DOOR_GREY), run));
+        const e = way < 0 ? z1 : z0;
+        out.push(leaf(trim(ix - 0.01, FLOOR, e - 0.012, ox + 0.01, DOOR_TOP, e + 0.012, SEAM), run));
+      }
+    }
     out.push(box(x0, WIN_HEAD, -HALF, x1, CEIL, HALF, Mat.Paint, true));
     // the body beyond either end of the window band, then a pillar between each pair of panes
     out.push(box(x0, WIN_SILL, -HALF, x1, WIN_HEAD, -WIN_END, Mat.Paint, true));
